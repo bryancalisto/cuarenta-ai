@@ -19,6 +19,8 @@ if __name__ == "__main__":
     root = Tk()
     selected_value = StringVar(value="A")
     selected_action = IntVar(value=0)
+    ai_hand_cards = game.ai_hand
+    table_cards = game.table
     card_registry_controls = ttk.Frame(root, padding=10)
     card_registry_controls.grid()
 
@@ -37,6 +39,18 @@ if __name__ == "__main__":
                 game.put_card_on_table((card_value, card_type))
             if action == 1:
                 game.put_card_in_ai_hand((card_value, card_type))
+            if action == 2:
+                game.remove_card_from_table((card_value, card_type))
+            if action == 3:
+                game.remove_card_from_ai_hand((card_value, card_type))
+
+            table_cards_label.config(
+                text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", table_cards))
+            )
+
+            ai_hand_cards_label.config(
+                text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", ai_hand_cards))
+            )
 
         return callback
 
@@ -75,5 +89,39 @@ if __name__ == "__main__":
         variable=selected_action,
         value=1,
     ).grid(column=0, row=8)
+
+    ttk.Radiobutton(
+        card_registry_controls,
+        text="Quita carta de mesa",
+        variable=selected_action,
+        value=2,
+    ).grid(column=0, row=9)
+
+    ttk.Radiobutton(
+        card_registry_controls,
+        text="Quitar carta de mano",
+        variable=selected_action,
+        value=3,
+    ).grid(column=0, row=10)
+
+    # Table cards
+    table_cards_frame = ttk.Frame(root, padding=10)
+    table_cards_frame.grid()
+    ttk.Label(table_cards_frame, text="MESA").grid(column=0, row=0)
+    table_cards_label = ttk.Label(
+        table_cards_frame,
+        text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", table_cards)),
+    )
+    table_cards_label.grid(column=0, row=1)
+
+    # AI hand cards
+    ai_hand_cards_frame = ttk.Frame(root, padding=10)
+    ai_hand_cards_frame.grid()
+    ttk.Label(ai_hand_cards_frame, text="MANO AI").grid(column=0, row=0)
+    ai_hand_cards_label = ttk.Label(
+        ai_hand_cards_frame,
+        text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", ai_hand_cards)),
+    )
+    ai_hand_cards_label.grid()
 
     root.mainloop()

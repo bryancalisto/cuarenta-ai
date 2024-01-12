@@ -22,7 +22,8 @@ class Game:
         self.table.add(card)
 
     def remove_card_from_table(self, card):
-        self.table.add(card)
+        print("HEEy", card, self.table)
+        self.table.discard(card)
 
     def put_card_in_ai_hand(self, card):
         self.ai_hand.add(card)
