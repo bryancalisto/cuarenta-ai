@@ -13,16 +13,64 @@ from tkinter import ttk, messagebox
 # Give 5 cards to each player and repeat the other steps.
 ###
 
+
+def translate_card_type(type):
+    types = {
+        "clubs": "Tréboles",
+        "hearts": "Corazones",
+        "diamonds": "Diamantes",
+        "spades": "Espadas",
+    }
+
+    return types[type]
+
+
 if __name__ == "__main__":
     game = Game()
 
     root = Tk()
     selected_value = StringVar(value="A")
     selected_action = IntVar(value=0)
-    ai_hand_cards = game.ai_hand
-    table_cards = game.table
+
+    main_controls = ttk.Frame(root, padding=10)
+    main_controls.grid()
+
+    def handle_reset_click(type):
+        def callback():
+            if type == "new_round":
+                game.new_round()
+            if type == "new_game":
+                game.new_game()
+
+            re_render_dynamic_widgets()
+
+        return callback
+
+    ttk.Button(main_controls, text="AI", command=game.play_ai_turn).grid(
+        column=0, row=0
+    )
+    ttk.Button(
+        main_controls, text="Nueva ronda", command=handle_reset_click("new_round")
+    ).grid(column=1, row=0)
+    ttk.Button(
+        main_controls, text="Nuevo juego", command=handle_reset_click("new_game")
+    ).grid(column=2, row=0)
+
     card_registry_controls = ttk.Frame(root, padding=10)
     card_registry_controls.grid()
+
+    def re_render_dynamic_widgets():
+        table_cards_label.config(
+            text="\n".join(
+                map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.table)
+            )
+        )
+
+        ai_hand_cards_label.config(
+            text="\n".join(
+                map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.ai_hand)
+            )
+        )
 
     def handle_card_type_click(card_type):
         def callback():
@@ -44,13 +92,7 @@ if __name__ == "__main__":
             if action == 3:
                 game.remove_card_from_ai_hand((card_value, card_type))
 
-            table_cards_label.config(
-                text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", table_cards))
-            )
-
-            ai_hand_cards_label.config(
-                text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", ai_hand_cards))
-            )
+            re_render_dynamic_widgets()
 
         return callback
 
@@ -110,7 +152,9 @@ if __name__ == "__main__":
     ttk.Label(table_cards_frame, text="MESA").grid(column=0, row=0)
     table_cards_label = ttk.Label(
         table_cards_frame,
-        text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", table_cards)),
+        text="\n".join(
+            map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.table)
+        ),
     )
     table_cards_label.grid(column=0, row=1)
 
@@ -120,7 +164,9 @@ if __name__ == "__main__":
     ttk.Label(ai_hand_cards_frame, text="MANO AI").grid(column=0, row=0)
     ai_hand_cards_label = ttk.Label(
         ai_hand_cards_frame,
-        text="\n".join(map(lambda x: f"{x[0]} - {x[1]}", ai_hand_cards)),
+        text="\n".join(
+            map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.ai_hand)
+        ),
     )
     ai_hand_cards_label.grid()
 
