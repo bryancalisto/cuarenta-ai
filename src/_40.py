@@ -11,6 +11,8 @@ class Game:
     def new_round(self):
         self.deck = set(product(card_values, card_types))
         self.ai_hand = set()
+        self.table = set()
+        self.thrown_cards = []
         self.player_front_predicted_hand = {}
         self.player_right_predicted_hand = {}
         self.player_left_predicted_hand = {}
@@ -20,12 +22,36 @@ class Game:
         self.carton = (0, 0)  # AI is index 0
         self.deck = set(product(card_values, card_types))
         self.table = set()
+        self.thrown_cards = []
         self.ai_hand = set()
         self.player_front_predicted_hand = {}
         self.player_right_predicted_hand = {}
         self.player_left_predicted_hand = {}
 
+    # calculate probable hands of other players
+    def exec_turn(self, just_thrown_card):
+        last_thrown_card = None
+        cards_to_remove_from_table = set()
+
+        if len(self.thrown_cards) > 0:
+            last_thrown_card = self.thrown_cards[-1]
+
+        # Game or round just started
+        if last_thrown_card is None:
+            # Cannot tell anything about
+            pass
+        # Caida
+        elif last_thrown_card[0] == just_thrown_card[0]:
+            print("caida")
+            cards_to_remove_from_table.add(last_thrown_card)
+            cards_to_remove_from_table.add(just_thrown_card)
+
+        self.thrown_cards.append(just_thrown_card)
+
     def play_ai_turn(self):
+        # Throw next card based on:
+        # - Probable hand of left player (to increase possibility of gain)
+        # - Probable hand of right player (to decrease possibility of loss)
         pass
 
     def put_card_on_table(self, card):

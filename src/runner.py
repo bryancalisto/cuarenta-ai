@@ -25,13 +25,18 @@ def translate_card_type(type):
     return types[type]
 
 
+def convert_card_set_to_list(val):
+    return list(map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", list(val)))
+
+
 if __name__ == "__main__":
     game = Game()
 
     root = Tk()
     selected_value = StringVar(value="A")
     selected_action = IntVar(value=0)
-
+    table_cards = StringVar(value=convert_card_set_to_list(game.table))
+    ai_hand_cards = StringVar(value=convert_card_set_to_list(game.ai_hand))
     main_controls = ttk.Frame(root, padding=10)
     main_controls.grid()
 
@@ -56,21 +61,22 @@ if __name__ == "__main__":
         main_controls, text="Nuevo juego", command=handle_reset_click("new_game")
     ).grid(column=2, row=0)
 
+    ttk.Label(main_controls, text="MESA").grid(column=3, row=0)
+    Listbox(
+        main_controls, listvariable=table_cards, height=15, width=50, borderwidth=2
+    ).grid(column=3, row=1)
+
+    ttk.Label(main_controls, text="MANO AI").grid(column=4, row=0)
+    Listbox(
+        main_controls, listvariable=ai_hand_cards, height=15, width=50, borderwidth=2
+    ).grid(column=4, row=1)
+
     card_registry_controls = ttk.Frame(root, padding=10)
     card_registry_controls.grid()
 
     def re_render_dynamic_widgets():
-        table_cards_label.config(
-            text="\n".join(
-                map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.table)
-            )
-        )
-
-        ai_hand_cards_label.config(
-            text="\n".join(
-                map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.ai_hand)
-            )
-        )
+        table_cards.set(convert_card_set_to_list(game.table))
+        ai_hand_cards.set(value=convert_card_set_to_list(game.ai_hand))
 
     def handle_card_type_click(card_type):
         def callback():
@@ -85,6 +91,7 @@ if __name__ == "__main__":
 
             if action == 0:
                 game.put_card_on_table((card_value, card_type))
+                game.exec_turn((card_value, card_type))
             if action == 1:
                 game.put_card_in_ai_hand((card_value, card_type))
             if action == 2:
@@ -145,29 +152,5 @@ if __name__ == "__main__":
         variable=selected_action,
         value=3,
     ).grid(column=0, row=10)
-
-    # Table cards
-    table_cards_frame = ttk.Frame(root, padding=10)
-    table_cards_frame.grid()
-    ttk.Label(table_cards_frame, text="MESA").grid(column=0, row=0)
-    table_cards_label = ttk.Label(
-        table_cards_frame,
-        text="\n".join(
-            map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.table)
-        ),
-    )
-    table_cards_label.grid(column=0, row=1)
-
-    # AI hand cards
-    ai_hand_cards_frame = ttk.Frame(root, padding=10)
-    ai_hand_cards_frame.grid()
-    ttk.Label(ai_hand_cards_frame, text="MANO AI").grid(column=0, row=0)
-    ai_hand_cards_label = ttk.Label(
-        ai_hand_cards_frame,
-        text="\n".join(
-            map(lambda x: f"{x[0]} - {translate_card_type(x[1])}", game.ai_hand)
-        ),
-    )
-    ai_hand_cards_label.grid()
 
     root.mainloop()
