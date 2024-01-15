@@ -48,6 +48,9 @@ class Game:
 
         self.thrown_cards.append(just_thrown_card)
 
+        for card in cards_to_remove_from_table:
+            self.remove_card_from_table(card)
+
     def play_ai_turn(self):
         # Throw next card based on:
         # - Probable hand of left player (to increase possibility of gain)
