@@ -1,14 +1,9 @@
 """
-tests.py — Exhaustive tests for Cuarenta card.py, captures.py, and env.py.
-
-Run with:  python tests.py
+Exhaustive tests for Cuarenta card.py, captures.py, and env.py.
 """
 
 import sys
 import random
-import traceback
-from typing import List
-from itertools import combinations
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -31,9 +26,9 @@ def section(title: str):
 
 # ─── Imports ─────────────────────────────────────────────────────────────────
 
-from card import Card, Rank, Suit, ALL_RANKS, build_deck, shuffled_deck
-from captures import valid_captures, must_capture, detect_caida, detect_ronda, score_play
-from env import CuarentaEnv, Action, TEAMS, NUM_PLAYERS, HAND_SIZE, WIN_SCORE
+from card import Card, Rank, Suit, build_deck, shuffled_deck
+from captures import valid_captures, detect_caida, detect_ronda, score_play
+from env import CuarentaEnv, NUM_PLAYERS, HAND_SIZE
 
 # ─── card.py tests ───────────────────────────────────────────────────────────
 
@@ -60,7 +55,7 @@ test("All card indices are unique (0–39)", sorted(indices) == list(range(40)))
 
 section("card.py — Card properties")
 as_brillos = Card(Rank.AS, Suit.BRILLOS)
-rey_treboles = Card(Rank.REY, Suit.TREBOLES)
+rey_treboles = Card(Rank.KING, Suit.TREBOLES)
 test("As de Brillos value = 1", as_brillos.value == 1)
 test("Rey de Treboles value = 13", rey_treboles.value == 13)
 test("Jack value = 11", Card(Rank.JACK, Suit.CORAZONES_ROJOS).value == 11)
@@ -177,26 +172,26 @@ test("No ronda when partial capture", not detect_ronda(cap_partial, table_full))
 section("captures.py — Score computation")
 
 # Plain capture
-# Use a table with 3 cards so capturing 2 does NOT trigger ronda
+# Use a table with 3 cards so capturing 2 does NOT trigger limpia
 played = c(5)
-table = [c(2), c(3, 1), c(6, 2)]   # 3 cards on table
-cap = frozenset([c(2), c(3, 1)])    # capture 2 of them (no ronda)
+table = [c(2), c(3, 1), c(6, 2)]   # 3 cards on table, will capture c(2) and c(3,1) because 2+3=5
 pts, reasons = score_play(played, cap, table, None)
-test("Score 2 for capturing 2 cards (no ronda)", pts == 2, f"got {pts}")
+# won't get points, only get carton
+test("Add 2 to cards_captured count if capturing 2 cards, but get no points because it was not a caida or limpia", pts == 0, f"got {pts}")
 
 # Caída bonus
 table2 = [c(5, 1), c(2, 2)]
 cap2 = frozenset([c(5, 1)])
 last2 = c(5, 1)
 pts2, reasons2 = score_play(c(5), cap2, table2, last2)
-test("Caída adds 2 bonus points (1 card + 2 bonus = 3)", pts2 == 3, f"got {pts2}")
+test("Caída adds 2 bonus points", pts2 == 2, f"got {pts2}")
 test("Caída reason in reasons", any("caída" in r for r in reasons2))
 
 # Ronda bonus
 table3 = [c(3), c(4, 1)]
 cap3 = frozenset(table3)
 pts3, reasons3 = score_play(c(7), cap3, table3, None)
-test("Ronda adds 2 bonus points (2 cards + 2 bonus = 4)", pts3 == 4, f"got {pts3}")
+test("Limpia adds 2 bonus points", pts3 == 2, f"got {pts3}")
 
 # No capture
 pts4, _ = score_play(c(6), None, [c(1)], None)
@@ -293,7 +288,7 @@ capture3 = [a for a in legal3 if a.capture is not None]
 test("Caída: capture action exists", len(capture3) > 0)
 
 obs4, reward4, done4, info4 = env3.step(capture3[0])
-test("Caída: reward = 1 (card) + 2 (caída) = 3", reward4 == 3.0, f"got {reward4}")
+test("Caída: reward = 2 (caída) = 2", reward4 == 2.0, f"got {reward4}")
 test("Caída reason reported", any("caída" in r for r in info4["reasons"]))
 
 section("env.py — Ronda scoring")
@@ -312,12 +307,12 @@ s4.hands[0] = [seven]
 
 legal4 = env4.legal_actions()
 capture4 = [a for a in legal4 if a.capture is not None]
-test("Ronda: capture action exists", len(capture4) > 0)
+test("Limpia: capture action exists", len(capture4) > 0)
 
 obs5, reward5, done5, info5 = env4.step(capture4[0])
-test("Ronda: reward = 2 (cards) + 2 (ronda) = 4", reward5 == 4.0, f"got {reward5}")
-test("Ronda reason reported", any("ronda" in r for r in info5["reasons"]))
-test("Table empty after ronda", len(env4.state.table) == 0)
+test("Limpia: reward = 2 (limpia) = 2", reward5 == 2.0, f"got {reward5}")
+test("Limpia reason reported", any("limpia" in r for r in info5["reasons"]))
+test("Table empty after limpia", len(env4.state.table) == 0)
 
 section("env.py — Must-capture rule")
 
@@ -329,7 +324,7 @@ s5.current_player = 0
 # Give player 0 a card that CAN capture — place action should NOT be in legal
 match_card = Card(Rank.SEIS, Suit.BRILLOS)
 same_on_table = Card(Rank.SEIS, Suit.CORAZONES_ROJOS)
-s5.hands[0] = [match_card, Card(Rank.REY, Suit.TREBOLES)]
+s5.hands[0] = [match_card, Card(Rank.KING, Suit.TREBOLES)]
 s5.table = [same_on_table]
 
 legal5 = env5.legal_actions()
@@ -337,9 +332,9 @@ legal5 = env5.legal_actions()
 place_actions_for_6 = [a for a in legal5 if a.card == match_card and a.capture is None]
 test("Must-capture: no place action for card that can capture", 
      len(place_actions_for_6) == 0)
-# Rey (king) can't capture anything → only place
-place_actions_for_rey = [a for a in legal5 if a.card.rank == Rank.REY and a.capture is None]
-test("Card that cannot capture: place action available", len(place_actions_for_rey) == 1)
+# king can't capture anything → only place
+place_actions_for_king = [a for a in legal5 if a.card.rank == Rank.KING and a.capture is None]
+test("Card that cannot capture: place action available", len(place_actions_for_king) == 1)
 
 section("env.py — Full game simulation (random agents)")
 

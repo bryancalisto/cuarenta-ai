@@ -24,7 +24,7 @@ from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
 
 # Ranks that can only be captured by exact match (not as part of a sum from numbers)
-FIGURE_RANKS = {Rank.JACK, Rank.R, Rank.REY}
+FIGURE_RANKS = {Rank.JACK, Rank.QUEEN, Rank.KING}
 
 
 def _is_figure(card: Card) -> bool:
