@@ -1,6 +1,4 @@
 """
-env.py — Cuarenta game environment.
-
 4 players: seats 0, 1, 2, 3.
 Teams: (0, 2) vs (1, 3)  — partners sit across from each other.
 Turn order: 0 → 1 → 2 → 3 → 0 → ...
@@ -26,10 +24,7 @@ from typing import Dict, List, Optional, Tuple, FrozenSet
 from card import Card, build_deck, shuffled_deck
 from captures import valid_captures, score_play, must_capture
 
-
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 NUM_PLAYERS = 4
 HAND_SIZE = 5
@@ -58,19 +53,17 @@ class Action:
             return f"play {self.card} → capture [{caps}]"
         return f"play {self.card} → place"
 
-
-# ---------------------------------------------------------------------------
-# Game state
-# ---------------------------------------------------------------------------
+# State
 
 @dataclass
 class CuarentaState:
     hands: Dict[int, List[Card]]          # player_id → cards in hand
     table: List[Card]                     # face-up cards on the table (ordered)
     deck: List[Card]                      # remaining undealt cards
+    n_decks_consumed: int                 # amount of decks that have been consumed so far
     scores: List[int]                     # [team0_score, team1_score]
+    cards_captured: List[List[Card]]      # [team0_cards, team1_cards]
     current_player: int                   # whose turn it is
-    last_capturer: Optional[int]          # player who last captured (for ronda at deal-end)
     last_placed: Optional[Card]           # last card placed on table (for caída detection)
     done: bool = False
     winner: Optional[int] = None          # winning team (0 or 1), if done
@@ -79,9 +72,7 @@ class CuarentaState:
         return TEAMS[player]
 
 
-# ---------------------------------------------------------------------------
 # Environment
-# ---------------------------------------------------------------------------
 
 class CuarentaEnv:
     """
@@ -101,9 +92,6 @@ class CuarentaEnv:
         self.rng = random.Random(seed)
         self.state: Optional[CuarentaState] = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def reset(self) -> Tuple[Dict, Dict]:
         """Start a new game. Returns (observation, info)."""
@@ -114,8 +102,9 @@ class CuarentaEnv:
             table=[],
             deck=deck,
             scores=[0, 0],
+            cards_captured=[[], []],
             current_player=0,
-            last_capturer=None,
+            n_decks_consumed=0,
             last_placed=None,
             done=False,
             winner=None,
@@ -153,19 +142,21 @@ class CuarentaEnv:
             last_placed=s.last_placed,
         )
 
+        team = TEAMS[player]
+
         info = {
             "player": player,
-            "team": TEAMS[player],
+            "team": team,
             "action": str(action),
             "points": points,
             "reasons": reasons,
         }
 
         if action.capture:
-            # Remove captured cards from table
+            # Remove captured cards from table and put them in the team's captured cards
             for card in action.capture:
                 s.table.remove(card)
-            s.last_capturer = player
+                s.cards_captured[team].append(card)
             s.last_placed = None   # table was modified; caída chain resets
         else:
             # Place card on table
@@ -173,7 +164,6 @@ class CuarentaEnv:
             s.last_placed = action.card
 
         # --- Apply score ---
-        team = TEAMS[player]
         s.scores[team] += points
         reward = float(points)
 
@@ -188,22 +178,25 @@ class CuarentaEnv:
         # --- Advance turn ---
         s.current_player = (player + 1) % NUM_PLAYERS
 
-        # --- If all hands empty, redeal or end game ---
+        # --- If all hands empty, count cartón and check end game. if no end game, then redeal ---
+        # Cartón means the amount of captured cards counted in this way: points = len(captured) - 19; if points > 0 then round(6 + points) to the next integer that's divisible by two
         if all(len(s.hands[p]) == 0 for p in range(NUM_PLAYERS)):
             if len(s.deck) >= NUM_PLAYERS * HAND_SIZE:
+                # There's still deck to play
                 self._redeal()
-            elif len(s.deck) > 0:
-                # Deal whatever's left (partial deal)
-                self._redeal_partial()
             else:
-                # Deck exhausted — remaining table cards go to last capturer's team
-                if s.table and s.last_capturer is not None:
-                    bonus = len(s.table)
-                    last_team = TEAMS[s.last_capturer]
-                    s.scores[last_team] += bonus
-                    info["end_of_deck_bonus"] = bonus
                 # Check if either team has won after bonus
                 for team in range(2):
+                    # Count carton for each team
+                    carton_points = len(s.cards_captured[team]) - 19
+                    if carton_points > 0:
+                        carton_points += 5 # +5 because at 20 we start to count 6,7,8...
+                        if carton_points % 2 != 0:
+                            carton_points += 1
+                        
+                        s.scores[team] += carton_points
+
+                    # Check if any team won
                     if s.scores[team] >= WIN_SCORE:
                         s.done = True
                         s.winner = team
@@ -310,7 +303,6 @@ class CuarentaEnv:
         s.hands, s.deck = self._deal(new_deck)
         s.table = []
         s.last_placed = None
-        # last_capturer persists for scoring continuity
 
     # ------------------------------------------------------------------
     # Rendering

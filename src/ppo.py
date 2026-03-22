@@ -10,7 +10,6 @@ Hyperparameters are grouped in PPOConfig for easy tuning.
 
 from __future__ import annotations
 
-import os
 import time
 import random
 import collections
@@ -21,10 +20,14 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from tqdm import tqdm
 
 from model import CuarentaNet, ActionMasks
-from env import CuarentaEnv, Action, TEAMS, NUM_PLAYERS
+from env import CuarentaEnv, TEAMS
+from agents import HeuristicAgent
+from utils import obs_to_tensors
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -49,6 +52,7 @@ class PPOConfig:
     checkpoint_every: int   = 50_000    # steps between checkpoint saves
     pool_size:        int   = 20        # max old checkpoints to keep
     opponent_latest:  float = 0.8       # fraction of games vs latest ckpt
+    opponent_mode:    str   = "heuristic"  # "heuristic" | "selfplay" | "random"
     # Logging
     log_every:        int   = 10        # rollouts between log prints
     save_dir:         str   = "checkpoints"
@@ -98,17 +102,6 @@ def compute_gae(
     return advantages, returns
 
 
-# ─── Obs utilities ────────────────────────────────────────────────────────────
-
-def obs_to_tensors(obs_list: List[Dict], device: torch.device) -> Dict[str, torch.Tensor]:
-    """Stack a list of obs dicts into batched tensors."""
-    keys = obs_list[0].keys()
-    return {
-        k: torch.tensor(np.stack([o[k] for o in obs_list]), dtype=torch.float32).to(device)
-        for k in keys
-    }
-
-
 # ─── PPO Trainer ──────────────────────────────────────────────────────────────
 
 class PPOTrainer:
@@ -128,12 +121,15 @@ class PPOTrainer:
         self.net = CuarentaNet().to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
-        # Checkpoint pool for self-play opponents
-        self.ckpt_pool: List[Dict] = []   # list of state_dicts
-        self.ckpt_step: List[int]  = []   # global step when saved
+        # Opponent
+        self.heuristic_agent = HeuristicAgent()
         self.opponent_net = CuarentaNet().to(self.device)
         self.opponent_net.load_state_dict(self.net.state_dict())
         self.opponent_net.eval()
+
+        # Checkpoint pool for self-play opponents
+        self.ckpt_pool: List[Dict] = []
+        self.ckpt_step: List[int]  = []
 
         # Envs
         self.envs = [CuarentaEnv(seed=i) for i in range(cfg.n_envs)]
@@ -156,17 +152,16 @@ class PPOTrainer:
         rollout_num = 0
         t0 = time.time()
 
-        while self.global_step < cfg.total_steps:
-            # ── Collect rollout ──────────────────────────────────────────────
-            rollouts = self._collect_rollout()
+        pbar = tqdm(total=cfg.total_steps, desc="Training", unit="step")
 
-            # ── PPO update ──────────────────────────────────────────────────
+        while self.global_step < cfg.total_steps:
+            rollouts = self._collect_rollout()
             stats = self._ppo_update(rollouts)
 
+            prev_step = self.global_step
             self.global_step += cfg.n_envs * cfg.n_steps
             rollout_num += 1
 
-            # ── Checkpoint & self-play pool ──────────────────────────────────
             if self.global_step % cfg.checkpoint_every < cfg.n_envs * cfg.n_steps:
                 self._save_checkpoint()
 
@@ -175,8 +170,7 @@ class PPOTrainer:
                 elapsed = time.time() - t0
                 sps = self.global_step / elapsed
                 wr = np.mean(self.elo_score) if self.elo_score else float("nan")
-                print(
-                    f"step={self.global_step:>8d} | "
+                pbar.set_postfix_str(
                     f"sps={sps:>6.0f} | "
                     f"win_rate={wr:.3f} | "
                     f"loss_pi={stats['loss_pi']:.4f} | "
@@ -185,6 +179,9 @@ class PPOTrainer:
                     f"ep_rew={np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f}"
                 )
 
+            pbar.update(self.global_step - prev_step)
+
+        pbar.close()
         self._save_checkpoint(final=True)
         print(f"[PPO] Training complete. {self.global_step} steps.")
 
@@ -229,11 +226,16 @@ class PPOTrainer:
                         value = net.get_value(obs_t).item()
                         action = legal[action_idx]
                     else:
-                        # Opponent plays with opponent_net
-                        obs_t  = obs_to_tensors([obs], self.device)
-                        masks  = ActionMasks.from_env_actions([legal])
-                        action_idx, _, _ = onet.act(obs_t, masks)
-                        action = legal[action_idx]
+                        # Opponent action depends on mode
+                        if cfg.opponent_mode == "heuristic":
+                            action = self.heuristic_agent.act(obs, legal)
+                        elif cfg.opponent_mode == "random":
+                            action = random.choice(legal)
+                        else:  # selfplay
+                            obs_t  = obs_to_tensors([obs], self.device)
+                            masks  = ActionMasks.from_env_actions([legal])
+                            action_idx, _, _ = onet.act(obs_t, masks)
+                            action = legal[action_idx]
 
                     next_obs, reward, done, info = env.step(action)
                     ep_reward[env_idx] += reward
@@ -392,7 +394,7 @@ class PPOTrainer:
         self.opponent_net.eval()
 
     def load_checkpoint(self, path: str):
-        state = torch.load(path, map_location=self.device)
+        state = torch.load(path, map_location=self.device, weights_only=True)
         self.net.load_state_dict(state["net"])
         self.opt.load_state_dict(state["opt"])
         self.global_step = state["step"]
@@ -411,6 +413,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr",        type=float, default=3e-4)
     parser.add_argument("--save-dir",  type=str,   default="checkpoints")
     parser.add_argument("--resume",    type=str,   default=None)
+    parser.add_argument("--opponent-mode", type=str, default="heuristic",
+                        choices=["heuristic", "selfplay", "random"])
     parser.add_argument("--device",    type=str,   default=None)
     args = parser.parse_args()
 
@@ -420,6 +424,7 @@ if __name__ == "__main__":
         n_steps       = args.n_steps,
         lr            = args.lr,
         save_dir      = args.save_dir,
+        opponent_mode = args.opponent_mode,
     )
 
     trainer = PPOTrainer(cfg, device=args.device)

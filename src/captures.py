@@ -13,9 +13,9 @@ Priority rule: If a match OR sum capture is possible, the player MUST capture
 (cannot voluntarily leave cards). However, the player CHOOSES *which* valid capture
 to take if multiple exist.
 
-NOTE on figure captures (Sota/Caballo/Rey = 10/11/12):
+NOTE on figure captures (Jack/Caballo/Rey = 11/12/13):
   - Figures can only capture by EXACT MATCH (same rank), NOT by sum.
-  - A number card can sum to 10, 11, or 12 and capture a figure.
+  - A number card can sum to 11, 12, or 13 and capture a figure.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
 
 # Ranks that can only be captured by exact match (not as part of a sum from numbers)
-FIGURE_RANKS = {Rank.SOTA, Rank.CABALLO, Rank.REY}
+FIGURE_RANKS = {Rank.JACK, Rank.R, Rank.REY}
 
 
 def _is_figure(card: Card) -> bool:
@@ -137,7 +137,7 @@ def detect_ronda(
 # ---------------------------------------------------------------------------
 
 CAIDA_POINTS = 2
-RONDA_POINTS = 2
+LIMPIA_POINTS = 2
 
 
 def score_play(
@@ -152,10 +152,8 @@ def score_play(
     Returns (points, reasons) where reasons is a list of human-readable strings.
 
     Points:
-      - 1 per captured card (the captured cards themselves score 1 each)
       - +2 for a caída
       - +2 for a ronda (clearing the table)
-      - Note: standard Cuarenta scores 1 pt per card captured. The race to 40.
 
     Actually in Cuarenta the scoring is:
       - Each CAPTURE of ≥1 card = 1 point per captured card (the pip cards
@@ -167,19 +165,14 @@ def score_play(
     reasons = []
 
     if capture_set:
-        # 1 point per captured card
-        card_points = len(capture_set)
-        points += card_points
-        reasons.append(f"captured {card_points} card(s)")
-
         # Caída bonus
         if detect_caida(played, capture_set, table, last_placed):
             points += CAIDA_POINTS
             reasons.append("caída (+2)")
 
-        # Ronda bonus
+        # Limpia bonus
         if detect_ronda(capture_set, table):
-            points += RONDA_POINTS
-            reasons.append("ronda (+2)")
+            points += LIMPIA_POINTS
+            reasons.append("limpia (+2)")
 
     return points, reasons

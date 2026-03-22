@@ -27,7 +27,7 @@ PPO + self-play agent for the Ecuadorian card game Cuarenta, implemented in PyTo
 | `env.py` | 4-player game environment (PettingZoo-style) |
 | `model.py` | PyTorch actor-critic — Transformer encoder + two-headed policy |
 | `ppo.py` | PPO trainer with GAE, self-play checkpoint pool |
-| `evaluate.py` | Evaluation — vs random, vs heuristic, Elo rating, watch mode |
+| `evaluate.py` | Evaluation — vs random, vs heuristic, watch mode |
 | `tests.py` | Full test suite for the environment |
 
 ## Setup
@@ -65,11 +65,6 @@ python evaluate.py checkpoints/ckpt_final.pt --mode vs-heuristic
 
 # Watch a game played against the heuristic
 python evaluate.py checkpoints/ckpt_final.pt --mode watch
-
-# Elo rating across a pool of checkpoints
-python evaluate.py checkpoints/ckpt_final.pt --mode elo \
-    --elo-pool checkpoints/ckpt_01000000.pt checkpoints/ckpt_02000000.pt
-```
 
 ## Architecture
 

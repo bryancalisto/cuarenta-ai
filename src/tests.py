@@ -42,12 +42,12 @@ section("card.py — Deck structure")
 deck = build_deck()
 test("Deck has exactly 40 cards", len(deck) == 40)
 test("All cards are unique", len(set(deck)) == 40)
-test("No 8s/9s in deck (only ranks 1-7, 10, 11, 12)", all(c.value not in {8, 9} for c in deck))
+test("No 8s/9s/10s in deck (only ranks 1-7, 11, 12, 13)", all(c.value not in {8, 9} for c in deck))
 
 # Check ranks are correct
 all_values = sorted(c.value for c in deck)
-expected_values = sorted([r for r in [1,2,3,4,5,6,7,10,11,12]] * 4)
-test("Rank values are 1-7, 10, 11, 12 only", all_values == expected_values)
+expected_values = sorted([r for r in [1,2,3,4,5,6,7,11,12,13]] * 4)
+test("Rank values are 1-7, 11, 12, 13 only", all_values == expected_values)
 
 # Suit counts
 for suit in Suit:
@@ -59,12 +59,12 @@ indices = [c.index for c in deck]
 test("All card indices are unique (0–39)", sorted(indices) == list(range(40)))
 
 section("card.py — Card properties")
-as_oros = Card(Rank.AS, Suit.OROS)
-rey_bastos = Card(Rank.REY, Suit.BASTOS)
-test("As de Oros value = 1", as_oros.value == 1)
-test("Rey de Bastos value = 12", rey_bastos.value == 12)
-test("Sota value = 10", Card(Rank.SOTA, Suit.COPAS).value == 10)
-test("Card str formatting works", str(as_oros) == "AO")
+as_brillos = Card(Rank.AS, Suit.BRILLOS)
+rey_treboles = Card(Rank.REY, Suit.TREBOLES)
+test("As de Brillos value = 1", as_brillos.value == 1)
+test("Rey de Treboles value = 13", rey_treboles.value == 13)
+test("Jack value = 11", Card(Rank.JACK, Suit.CORAZONES_ROJOS).value == 11)
+test("Card str formatting works", str(as_brillos) == "AO")
 test("Deck is shuffleable", len(shuffled_deck()) == 40)
 
 # ─── captures.py tests ───────────────────────────────────────────────────────
@@ -121,28 +121,28 @@ test("Match AND sum: play 3 vs [3,1,2] → 2 options (match OR sum)", len(caps) 
 section("captures.py — Figure rules")
 
 # Figura can only match, not be in a sum
-played = c(10)  # Sota
-table = [c(3), c(7, 1), c(10, 2)]
+played = c(11)  # Jack
+table = [c(3), c(7, 1), c(11, 2)]
 caps = valid_captures(played, table)
 # Should get: exact match (10), NOT [3,7] sum — wait, played is a figure!
 # Figures can't sum → only match capture
 test("Figure played: only match capture, not sum", 
      all(len(cap) == 1 for cap in caps),
      f"captures: {caps}")
-test("Figure played: captures matching figure", any(c(10,2) in cap for cap in caps))
+test("Figure played: captures matching figure", any(c(11,2) in cap for cap in caps))
 
 # Figure on table: can only be captured by exact match
 played = c(7)   # number
-table = [c(10, 1), c(3, 2), c(4, 3)]   # Sota on table
+table = [c(11, 1), c(3, 2), c(4, 3)]   # Jack on table
 caps = valid_captures(played, table)
-# 7 = 3+4 (number sum), but cannot take Sota (10) by sum
+# 7 = 3+4 (number sum), but cannot take Jack (11) by sum
 cap_cards = set().union(*caps) if caps else set()
 test("Figure on table: number cannot sum-capture a figure",
-     c(10,1) not in cap_cards,
-     f"captured figure: {c(10,1) in cap_cards}, caps={caps}")
+     c(11,1) not in cap_cards,
+     f"captured figure: {c(11,1) in cap_cards}, caps={caps}")
 
 # Figure on table, figure played: exact match
-played = c(11)   # Caballo
+played = c(11)   # Jack
 table = [c(11, 1), c(5, 2), c(6, 3)]
 caps = valid_captures(played, table)
 test("Figure matches figure exactly", any(c(11,1) in cap for cap in caps))
@@ -257,10 +257,10 @@ s2 = env2.state
 
 # Force a known state: put a 5 on table, give player 0 a 5
 s2.current_player = 0
-five_oros = Card(Rank.CINCO, Suit.OROS)
-five_copas = Card(Rank.CINCO, Suit.COPAS)
-s2.table = [five_copas]
-s2.hands[0] = [five_oros, Card(Rank.DOS, Suit.OROS)]
+five_brillos = Card(Rank.CINCO, Suit.BRILLOS)
+five_corazones_rojos = Card(Rank.CINCO, Suit.CORAZONES_ROJOS)
+s2.table = [five_corazones_rojos]
+s2.hands[0] = [five_brillos, Card(Rank.DOS, Suit.BRILLOS)]
 
 legal2 = env2.legal_actions()
 # Should have a capture action for the 5
@@ -281,9 +281,9 @@ s3 = env3.state
 s3.current_player = 0
 
 # Set up: 7 on table as last placed + another card, player plays 7 → caída but NOT ronda
-seven_e = Card(Rank.SIETE, Suit.ESPADAS)
-seven_b = Card(Rank.SIETE, Suit.BASTOS)
-extra   = Card(Rank.DOS, Suit.OROS)
+seven_e = Card(Rank.SIETE, Suit.CORAZONES_NEGROS)
+seven_b = Card(Rank.SIETE, Suit.TREBOLES)
+extra   = Card(Rank.DOS, Suit.BRILLOS)
 s3.table = [seven_e, extra]   # 2 cards so capturing just the 7 is NOT a ronda
 s3.last_placed = seven_e
 s3.hands[0] = [seven_b]
@@ -304,9 +304,9 @@ s4 = env4.state
 s4.current_player = 0
 
 # Set up: table [3, 4], player has 7 → sum captures both → ronda
-three = Card(Rank.TRES, Suit.OROS)
-four = Card(Rank.CUATRO, Suit.COPAS)
-seven = Card(Rank.SIETE, Suit.ESPADAS)
+three = Card(Rank.TRES, Suit.BRILLOS)
+four = Card(Rank.CUATRO, Suit.CORAZONES_ROJOS)
+seven = Card(Rank.SIETE, Suit.CORAZONES_NEGROS)
 s4.table = [three, four]
 s4.hands[0] = [seven]
 
@@ -327,9 +327,9 @@ s5 = env5.state
 s5.current_player = 0
 
 # Give player 0 a card that CAN capture — place action should NOT be in legal
-match_card = Card(Rank.SEIS, Suit.OROS)
-same_on_table = Card(Rank.SEIS, Suit.COPAS)
-s5.hands[0] = [match_card, Card(Rank.REY, Suit.BASTOS)]
+match_card = Card(Rank.SEIS, Suit.BRILLOS)
+same_on_table = Card(Rank.SEIS, Suit.CORAZONES_ROJOS)
+s5.hands[0] = [match_card, Card(Rank.REY, Suit.TREBOLES)]
 s5.table = [same_on_table]
 
 legal5 = env5.legal_actions()

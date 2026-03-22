@@ -2,7 +2,7 @@
 card.py — Card and Deck definitions for Cuarenta (40-card Spanish deck).
 
 Spanish deck: 4 suits × 10 ranks, but 8s, 9s, and 10s are removed → 40 cards.
-Ranks: 1(As), 2, 3, 4, 5, 6, 7, J(10→Sota), Q(11→Caballo), K(12→Rey)
+Ranks: 1(As), 2, 3, 4, 5, 6, 7, J(11→Jota), Q(12→Caballo), K(13→Rey)
 """
 
 from __future__ import annotations
@@ -13,16 +13,16 @@ import random
 
 
 class Suit(IntEnum):
-    OROS = 0      # Coins
-    COPAS = 1     # Cups
-    ESPADAS = 2   # Swords
-    BASTOS = 3    # Clubs
+    BRILLOS = 0      # Coins
+    CORAZONES_ROJOS = 1     # Cups
+    CORAZONES_NEGROS = 2   # Swords
+    TREBOLES = 3    # Clubs
 
 
 class Rank(IntEnum):
     """
     Pip value = face rank. Used for capture arithmetic.
-    J/Q/K are 10/11/12 internally but displayed as Sota/Caballo/Rey.
+    J/Q/K are 11/12/13 internally but displayed as Jack/Queen/King.
     """
     AS = 1
     DOS = 2
@@ -31,9 +31,10 @@ class Rank(IntEnum):
     CINCO = 5
     SEIS = 6
     SIETE = 7
-    SOTA = 10    # Jack  (8 and 9 are removed)
-    CABALLO = 11 # Queen
-    REY = 12     # King
+#  (8, 9 and 10 are removed)
+    JACK = 11    # Jack 
+    QUEEN = 12 # Queen
+    KING = 13     # King
 
 
 RANK_DISPLAY = {
@@ -44,22 +45,22 @@ RANK_DISPLAY = {
     Rank.CINCO: "5",
     Rank.SEIS: "6",
     Rank.SIETE: "7",
-    Rank.SOTA: "J",
-    Rank.CABALLO: "Q",
-    Rank.REY: "K",
+    Rank.JACK: "J",
+    Rank.QUEEN: "Q",
+    Rank.KING: "K",
 }
 
 SUIT_DISPLAY = {
-    Suit.OROS: "O",
-    Suit.COPAS: "C",
-    Suit.ESPADAS: "E",
-    Suit.BASTOS: "B",
+    Suit.BRILLOS: "O",
+    Suit.CORAZONES_ROJOS: "C",
+    Suit.CORAZONES_NEGROS: "E",
+    Suit.TREBOLES: "B",
 }
 
 ALL_RANKS = [
     Rank.AS, Rank.DOS, Rank.TRES, Rank.CUATRO,
     Rank.CINCO, Rank.SEIS, Rank.SIETE,
-    Rank.SOTA, Rank.CABALLO, Rank.REY
+    Rank.JACK, Rank.QUEEN, Rank.KING
 ]  # 10 ranks × 4 suits = 40 cards
 
 
