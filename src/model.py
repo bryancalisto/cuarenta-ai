@@ -19,7 +19,6 @@ import numpy as np
 # ─── Dimensions ──────────────────────────────────────────────────────────────
 
 CARD_DIM   = 40     # one-hot card vectors
-OBS_SCALAR = 5      # my_team_score, opp_team_score, current_player, deck_remaining, last_placed_scalar
 EMBED_DIM  = 256
 NUM_HEADS  = 4
 FF_DIM     = 512
@@ -50,11 +49,13 @@ class ObsEncoder(nn.Module):
         last_placed       (40,)  binary
         my_team_score     (1,)
         opp_team_score    (1,)
+        my_team_captures  (1,40)  binary
+        opp_team_captures: (1,40)  binary 
         current_player    (1,)
         deck_remaining    (1,)
 
-    We stack the 4 card bit-vectors into a (4, 40) card matrix,
-    project each of the 40 card slots across 4 channels → card embeddings,
+    We stack the 6 card bit-vectors into a (6, 40) card matrix,
+    project each of the 40 card slots across 6 channels → card embeddings,
     run a small Transformer over the 40 slots,
     then pool + concat scalar features → final embedding.
     """
@@ -63,8 +64,8 @@ class ObsEncoder(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
 
-        # Project 4-channel card features to embed_dim per card slot
-        self.card_proj = nn.Linear(4, embed_dim)
+        # Project 6-channel card features to embed_dim per card slot
+        self.card_proj = nn.Linear(6, embed_dim)
 
         # Positional embedding for the 40 card slots
         self.pos_embed = nn.Embedding(CARD_DIM, embed_dim)
@@ -104,13 +105,15 @@ class ObsEncoder(nn.Module):
         """
         B = obs["my_hand"].shape[0]
 
-        # Stack card channels: (B, 4, 40) → transpose → (B, 40, 4)
+        # Stack card channels: (B, 6, 40) → transpose → (B, 40, 6)
         card_matrix = torch.stack([
             obs["my_hand"],
             obs["table"],
+            obs["my_team_captures"],
+            obs["opp_team_captures"],
             obs["played_this_deal"],
             obs["last_placed"],
-        ], dim=1).transpose(1, 2)   # (B, 40, 4)
+        ], dim=1).transpose(1, 2)   # (B, 40, 6)
 
         # Project each card slot: (B, 40, embed_dim)
         card_slots = self.card_proj(card_matrix)
@@ -189,7 +192,6 @@ class PolicyHead(nn.Module):
         return card_logits, capture_logits
 
 
-# ─── Value Head ──────────────────────────────────────────────────────────────
 
 class ValueHead(nn.Module):
     def __init__(self, embed_dim: int = EMBED_DIM):
@@ -200,7 +202,6 @@ class ValueHead(nn.Module):
         return self.net(embedding).squeeze(-1)   # (B,)
 
 
-# ─── Full Actor-Critic ────────────────────────────────────────────────────────
 
 class CuarentaNet(nn.Module):
     """

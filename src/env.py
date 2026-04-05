@@ -89,13 +89,13 @@ class CuarentaEnv:
     """
 
     def __init__(self, seed: Optional[int] = None):
-        self.rng = random.Random(seed)
+        self.random = random.Random(seed)
         self.state: Optional[CuarentaState] = None
 
 
     def reset(self) -> Tuple[Dict, Dict]:
         """Start a new game. Returns (observation, info)."""
-        deck = shuffled_deck(self.rng)
+        deck = shuffled_deck(self.random)
         hands, deck = self._deal(deck)
         self.state = CuarentaState(
             hands=hands,
@@ -232,11 +232,11 @@ class CuarentaEnv:
     def observe(self, player: int) -> Dict:
         """
         Return the observation for `player` as a dict of numpy arrays.
-        Hidden info (opponent hands) is NOT included.
+        Hidden info (opponent hands, opponent captures) is NOT included.
         """
         s = self.state
 
-        def cards_to_bitvec(cards) -> np.ndarray:
+        def cards_to_bitvec(cards: List[Card]) -> np.ndarray:
             vec = np.zeros(40, dtype=np.float32)
             for c in cards:
                 vec[c.index] = 1.0
@@ -258,6 +258,8 @@ class CuarentaEnv:
             "played_this_deal":   cards_to_bitvec(played_this_deal),
             "my_team_score":      np.array([s.scores[TEAMS[player]]], dtype=np.float32),
             "opp_team_score":     np.array([s.scores[1 - TEAMS[player]]], dtype=np.float32),
+            "my_team_captures":   cards_to_bitvec(s.cards_captured[TEAMS[player]]),
+            "opp_team_captures":  cards_to_bitvec(s.cards_captured[1 - TEAMS[player]]),
             "current_player":     np.array([s.current_player], dtype=np.float32),
             "last_placed":        cards_to_bitvec([s.last_placed] if s.last_placed else []),
             "deck_remaining":     np.array([len(s.deck)], dtype=np.float32),
@@ -299,7 +301,7 @@ class CuarentaEnv:
     def _new_round(self):
         """Shuffle a new deck and deal fresh hands (scores persist)."""
         s = self.state
-        new_deck = shuffled_deck(self.rng)
+        new_deck = shuffled_deck(self.random)
         s.hands, s.deck = self._deal(new_deck)
         s.table = []
         s.last_placed = None
