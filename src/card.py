@@ -1,10 +1,3 @@
-"""
-card.py — Card and Deck definitions for Cuarenta (40-card Spanish deck).
-
-Spanish deck: 4 suits × 10 ranks, but 8s, 9s, and 10s are removed → 40 cards.
-Ranks: 1(As), 2, 3, 4, 5, 6, 7, J(11→Jota), Q(12→Caballo), K(13→Rey)
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
@@ -20,10 +13,6 @@ class Suit(IntEnum):
 
 
 class Rank(IntEnum):
-    """
-    Pip value = face rank. Used for capture arithmetic.
-    J/Q/K are 11/12/13 internally but displayed as Jack/Queen/King.
-    """
     AS = 1
     DOS = 2
     TRES = 3
@@ -32,9 +21,9 @@ class Rank(IntEnum):
     SEIS = 6
     SIETE = 7
 #  (8, 9 and 10 are removed)
-    JACK = 11    # Jack 
-    QUEEN = 12 # Queen
-    KING = 13     # King
+    JACK = 11
+    QUEEN = 12
+    KING = 13
 
 
 RANK_DISPLAY = {
@@ -51,10 +40,10 @@ RANK_DISPLAY = {
 }
 
 SUIT_DISPLAY = {
-    Suit.BRILLOS: "O",
-    Suit.CORAZONES_ROJOS: "C",
-    Suit.CORAZONES_NEGROS: "E",
-    Suit.TREBOLES: "B",
+    Suit.BRILLOS: "B",
+    Suit.CORAZONES_ROJOS: "CR",
+    Suit.CORAZONES_NEGROS: "CN",
+    Suit.TREBOLES: "T",
 }
 
 ALL_RANKS = [
@@ -71,7 +60,6 @@ class Card:
 
     @property
     def value(self) -> int:
-        """Pip value used for capture arithmetic."""
         return int(self.rank)
 
     @property
@@ -90,13 +78,17 @@ class Card:
         return self.index < other.index
 
 
+"""
+Return all 40 cards in a fresh, unshuffled deck.
+"""
 def build_deck() -> List[Card]:
-    """Return all 40 cards in a fresh, unshuffled deck."""
     return [Card(rank, suit) for suit in Suit for rank in ALL_RANKS]
 
 
+"""
+Return a shuffled 40-card deck.
+"""
 def shuffled_deck(rng: random.Random | None = None) -> List[Card]:
-    """Return a shuffled 40-card deck."""
     deck = build_deck()
     if rng:
         rng.shuffle(deck)
