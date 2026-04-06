@@ -1,0 +1,9 @@
+HeuristicAgent:
+    ✔ Complete agent with missing logic @started(26-04-05 17:40) @done(26-04-05 23:30) @lasted(5h50m59s)
+    ☐ Fix tests
+
+Data:
+    ☐ Generate dataset with heuristic agent
+
+General:
+    ☐ Remove code that's not used

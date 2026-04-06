@@ -1,0 +1,17 @@
+[project]
+name = "40-ai"
+version = "0.1.0"
+description = "Cuarenta card game AI model implementation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "torch>=2.11.0",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

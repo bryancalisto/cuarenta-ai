@@ -22,13 +22,86 @@ from __future__ import annotations
 from itertools import combinations
 from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
+from utils import sort_cards_by_rank
 
 # Ranks that can only be captured by exact match (not as part of a sum from numbers)
-FIGURE_RANKS = {Rank.JACK, Rank.QUEEN, Rank.KING}
+FIGURE_RANKS = {Rank.JACK, Rank.QUEEN, Rank.KING, Rank.AS}
 
 
 def _is_figure(card: Card) -> bool:
     return card.rank in FIGURE_RANKS
+
+"""
+Captures all same-rank captures for this played card.
+"""
+def get_same_rank_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]]:
+    return [frozenset([c]) for c in table if c.rank == played.rank]
+
+
+"""
+Captures all the 2-card sums that add up to the played card value.
+Example:
+    - If you play a 7, you can capture a 4 and 3.
+    - If you play a 6, you can capture a 2 and 4 or a 5 and AS.
+"""
+def get_sum_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]]:
+    captures: List[FrozenSet[Card]] = []
+    sorted_table = sort_cards_by_rank(table)
+    played_value = played.value
+    complement_map = {}
+
+    # Two-sum O(n) algorithm
+    for card_i in range(len(sorted_table)):
+        card = sorted_table[card_i]
+        complement = played_value - card.value
+
+        # Check if the complement value exists in the complement_map
+        if complement in complement_map:
+            for complement_card in complement_map[complement]:
+                captures.append(frozenset([card, complement_card]))
+
+        # Add the current card to the complement_map
+        if card.value not in complement_map:
+            complement_map[card.value] = []
+        complement_map[card.value].append(card)
+
+    return captures
+
+
+"""
+Captures all the played card matches and each's sequence of consecutive cards on the table (stairs).
+Example:
+    - If you play a 3 corazones rojos, you can capture a 3, 4, 5, 6, J (but not a 2 or a 7) of any suit.
+    - If you play a J, you can capture a J, Q, K (but not a 7 or an A).
+"""
+def get_stairs_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]]:
+    captures: List[FrozenSet[Card]] = []
+    sorted_table = sort_cards_by_rank(table)
+    played_rank = played.rank
+
+    for card_i in range(len(sorted_table)):
+        if sorted_table[card_i].rank == played_rank:
+            # There's a rank match. Take that match and look for a possible sequence in the remaining cards
+            matched_card = sorted_table[card_i]
+            current_capture = [matched_card]
+
+            for card_i in range(card_i + 1, len(sorted_table)):
+                # Skip duplicates
+                if sorted_table[card_i].rank == matched_card.rank:
+                    continue
+
+                # Check if the remaining card is exactly 1 rank higher than the last captured card
+                if sorted_table[card_i].rank.value == matched_card.rank.value + 1:
+                    current_capture.append(sorted_table[card_i])
+                    matched_card = sorted_table[card_i]
+                else:
+                    break
+            
+            if len(current_capture) > 1:
+                # We found a valid stairs capture
+                captures.append(frozenset(current_capture))
+    
+    return captures
 
 
 def valid_captures(
@@ -40,47 +113,32 @@ def valid_captures(
 
     Each capture set is a frozenset of table cards that `played` can take.
     An empty list means NO capture is possible (player must just place the card).
+    A single played card may only take one capture set per turn (player picks one option from the returned list).
 
-    Rules enforced:
-      - Figures on table can only be captured by exact rank match.
-      - A played figure can only capture by exact rank match (not sum).
-      - A played number card can match exactly OR sum multiple table cards.
-      - A single played card may ONLY take one capture set per turn
-        (player picks one option from the returned list).
+    Valid capture criteria:
+        - A same rank card: A played card can only capture by exact rank match (e.g. capture a 7 corazones with 7 de corazones negros).
+        - Sum of cards: A played card can sum multiple table cards. (e.g. capture a 4 trebol and 3 corazones negros with a 7 brillos)
+        - Stairs: A played card can capture in a sequence (e.g. capture 3, 4, 5, 6, J - no matter the figure - with a 3).
+
     """
     if not table:
         return []
 
     captures: List[FrozenSet[Card]] = []
-    played_value = played.value
     played_is_figure = _is_figure(played)
 
-    # --- Exact match captures ---
-    # A card can always capture table cards of the same rank (1-for-1).
-    matches = [c for c in table if c.rank == played.rank]
-    for m in matches:
-        captures.append(frozenset([m]))
+    # Same rank card capture
+    same_rank_captures = get_same_rank_captures(played, table)
+    captures.extend(same_rank_captures)
 
-    # --- Sum captures (only for non-figure played cards) ---
+    # Sum of cards captures (only for non-figure - numeric - played cards)
     if not played_is_figure:
-        # Separate table into figures (cannot be part of a sum) and numbers
-        number_table = [c for c in table if not _is_figure(c)]
-        figure_matches = [c for c in table if _is_figure(c) and c.rank == played.rank]
-
-        # Try all subsets of size ≥ 2 from number cards
-        for size in range(2, len(number_table) + 1):
-            for subset in combinations(number_table, size):
-                if sum(c.value for c in subset) == played_value:
-                    cap = frozenset(subset)
-                    # Deduplicate
-                    if cap not in captures:
-                        captures.append(cap)
-
-        # A sum capture can also include a figure IF the figure has same rank as played
-        # (e.g., playing a 10 can capture: [figure_10] already handled above,
-        #  or [num_3, num_7], etc.)
-        # Edge case: can a number sum capture include a figure? No — figures are excluded
-        # from sums in standard Cuarenta rules.
+        sum_captures = get_sum_captures(played, table)
+        captures.extend(sum_captures)
+    
+    # Stairs captures
+    stairs_captures = get_stairs_captures(played, table)
+    captures.extend(stairs_captures)
 
     # Remove duplicate sets (shouldn't happen but be safe)
     seen: Set[FrozenSet[Card]] = set()
@@ -101,16 +159,12 @@ def must_capture(played: Card, table: List[Card]) -> bool:
 def detect_caida(
     played: Card,
     capture_set: FrozenSet[Card],
-    table: List[Card],
     last_placed: Card | None,
 ) -> bool:
     """
     Detect if this capture is a CAÍDA (cascade match).
 
-    A caída occurs when:
-      - The played card captures a table card
-      - AND the LAST card placed on the table (by any player) has the same value
-        as the played card AND is being captured in this move.
+    A caída occurs when the played card captures a table card AND the LAST card placed on the table (by a opposite team player) has the same value as the played card AND is being captured in this move.
 
     In practice: last_placed must be in capture_set and
     last_placed.value == played.value.
@@ -122,19 +176,17 @@ def detect_caida(
     return last_placed.value == played.value
 
 
-def detect_ronda(
+def detect_limpia(
     capture_set: FrozenSet[Card],
     table: List[Card],
 ) -> bool:
     """
-    Detect if this capture clears the entire table (RONDA / mesa limpia).
+    Detect if this capture clears the entire table (limpia).
     """
     return set(capture_set) == set(table)
 
 
-# ---------------------------------------------------------------------------
 # Scoring helpers
-# ---------------------------------------------------------------------------
 
 CAIDA_POINTS = 2
 LIMPIA_POINTS = 2
@@ -171,7 +223,7 @@ def score_play(
             reasons.append("caída (+2)")
 
         # Limpia bonus
-        if detect_ronda(capture_set, table):
+        if detect_limpia(capture_set, table):
             points += LIMPIA_POINTS
             reasons.append("limpia (+2)")
 
