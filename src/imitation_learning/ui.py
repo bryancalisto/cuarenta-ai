@@ -45,7 +45,7 @@ class CuarentaUI:
         self.p0_frame = tk.Frame(main_frame, relief=tk.SUNKEN, borderwidth=2)
         self.p0_frame.pack(side=tk.TOP, fill=tk.X, pady=5)
         self.pack_info[self.p0_frame] = {"side": tk.TOP, "fill": tk.X, "pady": 5}
-        tk.Label(self.p0_frame, text="Player 0 (Bottom, Team 0)", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        tk.Label(self.p0_frame, text="P0 (Team 0)", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.p0_hand_frame = tk.Frame(self.p0_frame)
         self.p0_hand_frame.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
@@ -57,7 +57,7 @@ class CuarentaUI:
         self.p3_frame = tk.Frame(middle_frame, relief=tk.SUNKEN, borderwidth=2, width=100)
         self.p3_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5)
         self.pack_info[self.p3_frame] = {"side": tk.LEFT, "fill": tk.BOTH, "padx": 5}
-        tk.Label(self.p3_frame, text="P3\n(Team 1)", font=("Arial", 9, "bold")).pack(pady=5)
+        tk.Label(self.p3_frame, text="P3\n(Team 1)", font=("Arial", 12, "bold")).pack(pady=5)
         self.p3_hand_frame = tk.Frame(self.p3_frame)
         self.p3_hand_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
@@ -75,7 +75,7 @@ class CuarentaUI:
         self.p1_frame = tk.Frame(middle_frame, relief=tk.SUNKEN, borderwidth=2, width=100)
         self.p1_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=5)
         self.pack_info[self.p1_frame] = {"side": tk.RIGHT, "fill": tk.BOTH, "padx": 5}
-        tk.Label(self.p1_frame, text="P1\n(Team 1)", font=("Arial", 9, "bold")).pack(pady=5)
+        tk.Label(self.p1_frame, text="P1\n(Team 1)", font=("Arial", 12, "bold")).pack(pady=5)
         self.p1_hand_frame = tk.Frame(self.p1_frame)
         self.p1_hand_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
@@ -83,7 +83,7 @@ class CuarentaUI:
         self.p2_frame = tk.Frame(main_frame, relief=tk.SUNKEN, borderwidth=2)
         self.p2_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
         self.pack_info[self.p2_frame] = {"side": tk.BOTTOM, "fill": tk.X, "pady": 5}
-        tk.Label(self.p2_frame, text="Player 2 (Top, Team 0)", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        tk.Label(self.p2_frame, text="P2 (Team 0)", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.p2_hand_frame = tk.Frame(self.p2_frame)
         self.p2_hand_frame.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
@@ -95,7 +95,7 @@ class CuarentaUI:
         self.info_label.pack(padx=5, pady=2, fill=tk.X)
 
         # Action info
-        self.action_label = tk.Label(info_frame, text="", font=("Arial", 9, "bold"), fg="blue")
+        self.action_label = tk.Label(info_frame, text="", font=("Arial", 9, "bold"), fg="white")
         self.action_label.pack(padx=5, pady=2, fill=tk.X)
 
     def _card_to_label(self, card: Card) -> str:
@@ -106,13 +106,13 @@ class CuarentaUI:
         """Create a card button (white box with rank+suit icon)."""
         btn = tk.Button(
             text=self._card_to_label(card),
-            width=4,
-            height=2,
+            width=6,
+            height=3,
             bg="white",
             fg="black",
-            font=("Arial", 11, "bold"),
+            font=("Arial", 16, "bold"),
             relief=tk.RAISED,
-            borderwidth=2,
+            borderwidth=3,
             command=callback
         )
         return btn
@@ -180,19 +180,21 @@ class CuarentaUI:
             self.table_label.config(text=f"Table ({len(table)} cards)")
 
             cards_row = tk.Frame(self.table_cards_frame, bg="gray50")
-            cards_row.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            cards_row.pack(anchor=tk.CENTER, expand=True, padx=5, pady=5)
 
-            for card in table:
+            for i, card in enumerate(table):
+                is_last = (i == len(table) - 1)
+                card_bg = "#90EE90" if is_last else "white"  # Light green for last card
                 card_label = tk.Label(
                     cards_row,
                     text=self._card_to_label(card),
-                    width=4,
-                    height=2,
-                    bg="white",
+                    width=6,
+                    height=3,
+                    bg=card_bg,
                     fg="black",
-                    font=("Arial", 11, "bold"),
+                    font=("Arial", 16, "bold"),
                     relief=tk.RAISED,
-                    borderwidth=2
+                    borderwidth=3
                 )
                 card_label.pack(side=tk.LEFT, padx=2, pady=2)
 

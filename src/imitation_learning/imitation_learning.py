@@ -148,7 +148,8 @@ class CuarentaPolicyLearner:
         combined = np.concatenate(vectors)
         return torch.FloatTensor(combined).to(self.device)
 
-    def collect_trajectory(self, num_steps: int = 20) -> float:
+    # default to 60 steps per trajectory because that's 3 full rounds of play (4 players, 5 cards each, for 3 rounds). Game will often end before that, but this gives enough room to capture full games and some extra steps for longer games.
+    def collect_trajectory(self, num_steps: int = 60) -> float:
         """
         Collect one trajectory of expert demonstrations via UI.
         Returns average reward.
