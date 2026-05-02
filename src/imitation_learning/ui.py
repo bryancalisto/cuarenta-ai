@@ -33,6 +33,7 @@ class CuarentaUI:
         self.card_buttons: Dict[Card, tk.Button] = {}  # card -> button widget
         self.capture_buttons: Dict[int, tk.Button] = {}  # button id -> button
         self.pack_info: Dict[tk.Frame, Dict] = {}  # store pack parameters
+        self.step_count = 0
 
         self._setup_ui()
 
@@ -161,9 +162,11 @@ class CuarentaUI:
         # Update info
         team0_score = s.scores[0]
         team1_score = s.scores[1]
+        team0_captured = len(s.cards_captured[0])
+        team1_captured = len(s.cards_captured[1])
         current_team = TEAMS[current_player]
 
-        info_text = f"Team 0 (P0,P2): {team0_score} | Team 1 (P1,P3): {team1_score} | Current: Player {current_player} (Team {current_team})"
+        info_text = f"Step: {self.step_count} | Team 0 (P0,P2): {team0_score} pts, {team0_captured} cards | Team 1 (P1,P3): {team1_score} pts, {team1_captured} cards | Current: Player {current_player} (Team {current_team})"
         self.info_label.config(text=info_text)
 
     def _update_table_display(self):
@@ -256,6 +259,7 @@ class CuarentaUI:
 
         action = self.selected_action
         self.action_label.config(text=f"Selected: {action}")
+        self.step_count += 1
 
     def wait_for_action(self) -> Action:
         """Block until player selects and confirms an action. Return the action."""

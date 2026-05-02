@@ -1,12 +1,13 @@
 """
 Main training script for DAgger-based imitation learning.
 
-Run as: python train.py
+Run as: python train.py [--checkpoint <path>]
 """
 
 import sys
 from pathlib import Path
 import tkinter as tk
+import argparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -17,9 +18,13 @@ from imitation_learning.imitation_learning import create_dagger_trainer
 
 def main():
     """Run DAgger training with UI expert."""
+    parser = argparse.ArgumentParser(description="Train Cuarenta policy with DAgger")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to policy checkpoint to resume from")
+    args = parser.parse_args()
+
     # Initialize environment
     env = CuarentaEnv()
-    obs, _ = env.reset()
+    env.reset()
 
     # Create Tkinter root
     root = tk.Tk()
@@ -36,6 +41,11 @@ def main():
 
     # Create DAgger trainer
     trainer = create_dagger_trainer(env, expert_callback, device="cpu")
+
+    # Load checkpoint if provided
+    if args.checkpoint:
+        print(f"Loading checkpoint from {args.checkpoint}...")
+        trainer.load_policy(args.checkpoint)
 
     # Training loop
     num_dagger_iterations = 5
@@ -54,15 +64,15 @@ def main():
         print(f"Iteration {iteration+1} complete. Avg loss: {loss:.4f}")
 
         # Save trajectories after each iteration
-        trainer.save_trajectories("data")
+        trainer.save_trajectories("data/trajectories")
 
         # Periodically save
         if (iteration + 1) % 2 == 0:
-            save_path = f"/tmp/cuarenta_policy_iter{iteration+1}.pt"
+            save_path = f"data/policies/cuarenta_policy_iter{iteration+1}.pt"
             trainer.save_policy(save_path)
 
     # Final save
-    final_path = "/tmp/cuarenta_policy_final.pt"
+    final_path = "data/policies/cuarenta_policy_final.pt"
     trainer.save_policy(final_path)
 
     print(f"\n{'='*60}")
