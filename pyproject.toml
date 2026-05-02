@@ -5,6 +5,7 @@ description = "Cuarenta card game AI model implementation"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "imitation>=1.0.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.4",
     "torch>=2.11.0",

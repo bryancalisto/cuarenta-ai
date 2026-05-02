@@ -163,3 +163,4 @@ cython_debug/
 # Others
 checkpoints/
 .vscode/
+data/

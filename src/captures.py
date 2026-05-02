@@ -73,6 +73,7 @@ Captures all the played card matches and each's sequence of consecutive cards on
 Example:
     - If you play a 3 corazones rojos, you can capture a 3, 4, 5, 6, J (but not a 2 or a 7) of any suit.
     - If you play a J, you can capture a J, Q, K (but not a 7 or an A).
+    - If you play a 7, you can capture a 7, J, Q, K as 8, 9, 10 are not in the game.
 """
 def get_stairs_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]]:
     captures: List[FrozenSet[Card]] = []
@@ -90,8 +91,8 @@ def get_stairs_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]
                 if sorted_table[card_i].rank == matched_card.rank:
                     continue
 
-                # Check if the remaining card is exactly 1 rank higher than the last captured card
-                if sorted_table[card_i].rank.value == matched_card.rank.value + 1:
+                # Check if the remaining card is exactly 1 rank higher than the last captured card or if 7 captures J
+                if sorted_table[card_i].rank.value == matched_card.rank.value + 1 or (matched_card.rank == Rank.SIETE and sorted_table[card_i].rank == Rank.JACK):
                     current_capture.append(sorted_table[card_i])
                     matched_card = sorted_table[card_i]
                 else:
@@ -205,25 +206,25 @@ def score_play(
 
     Points:
       - +2 for a caída
-      - +2 for a ronda (clearing the table)
+      - +2 for a limpia (clearing the table)
 
     Actually in Cuarenta the scoring is:
       - Each CAPTURE of ≥1 card = 1 point per captured card (the pip cards
         themselves are worth 1 pt each towards the 40).
       - Caída = 2 bonus points (on top of the capture points).
-      - Ronda = 2 bonus points (on top of capture points).
+      - Limpia = 2 bonus points (on top of capture points).
     """
     points = 0
     reasons = []
 
     if capture_set:
         # Caída bonus
-        if detect_caida(played, capture_set, table, last_placed):
+        if detect_caida(played, capture_set, last_placed):
             points += CAIDA_POINTS
             reasons.append("caída (+2)")
 
         # Limpia bonus
-        if detect_limpia(capture_set, table):
+        elif detect_limpia(capture_set, table):
             points += LIMPIA_POINTS
             reasons.append("limpia (+2)")
 
