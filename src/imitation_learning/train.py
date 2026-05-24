@@ -40,7 +40,7 @@ def main():
         return ui.wait_for_action()
 
     # Create DAgger trainer
-    trainer = create_dagger_trainer(env, expert_callback, device="cpu")
+    trainer = create_dagger_trainer(env, expert_callback, device="mps")
 
     # Load checkpoint if provided
     if args.checkpoint:

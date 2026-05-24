@@ -251,7 +251,7 @@ class CuarentaPolicyLearner:
 
     def load_policy(self, path: str):
         """Load policy weights and metadata."""
-        save_data = torch.load(path, map_location=self.device)
+        save_data = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(save_data["policy_state"])
         self.action_encoder = save_data["action_encoder"]
         print(f"Policy loaded from {path}")

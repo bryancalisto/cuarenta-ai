@@ -163,4 +163,5 @@ cython_debug/
 # Others
 checkpoints/
 .vscode/
-data/
+cuarenta_policy_iter*.pt
+trajectories
