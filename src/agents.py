@@ -3,11 +3,33 @@ from __future__ import annotations
 import random
 from typing import List
 
+import numpy as np
 import torch
 
 from model import CuarentaNet, ActionMasks
 from env import Action
 from utils import obs_to_tensors
+from imitation_learning.imitation_learning import PolicyNetwork
+
+
+def flatten_obs(obs) -> np.ndarray:
+    """Flatten an observation dict using the same sorted-key order as training."""
+    keys = sorted(obs.keys())
+    return np.concatenate([obs[k].reshape(-1) for k in keys]).astype(np.float32)
+
+
+def encode_legal_action(action: Action, legal: List[Action]) -> int:
+    """
+    Encode an action into the flat 40 * 41 action space used by the imitation
+    policy and the PPO warm-start model.
+    """
+    same_card = [a for a in legal if a.card == action.card]
+    card_idx = action.card.index
+    if action.capture is None:
+        capture_idx = 0
+    else:
+        capture_idx = same_card.index(action) + 1
+    return card_idx * 41 + capture_idx
 
 
 class RandomAgent:
@@ -66,3 +88,26 @@ class NetAgent:
         masks = ActionMasks.from_env_actions([legal])
         action_idx, _, _ = self.net.act(obs_t, masks, deterministic=self.deterministic)
         return legal[action_idx]
+
+
+class FlatNetAgent:
+    """Wraps a flat PolicyNetwork checkpoint for evaluation."""
+
+    def __init__(self, net: PolicyNetwork, device: torch.device, deterministic: bool = True):
+        self.net = net
+        self.device = device
+        self.deterministic = deterministic
+        self.net.eval()
+
+    @torch.no_grad()
+    def act(self, obs, legal: List[Action]) -> Action:
+        obs_t = torch.tensor(flatten_obs(obs), dtype=torch.float32, device=self.device).unsqueeze(0)
+        logits = self.net(obs_t)[0]
+        legal_indices = [encode_legal_action(a, legal) for a in legal]
+        legal_logits = logits[0, legal_indices]
+        if self.deterministic:
+            choice = int(torch.argmax(legal_logits).item())
+        else:
+            dist = torch.distributions.Categorical(logits=legal_logits)
+            choice = int(dist.sample().item())
+        return legal[choice]

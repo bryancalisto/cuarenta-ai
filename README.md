@@ -8,11 +8,11 @@ conda install torch numpy
 python tests.py
 
 ## Train
-python ppo.py --steps 5000000 --n-envs 8
+python src/ppo.py
 
 ## Evaluate after training
-python evaluate.py checkpoints/ckpt_final.pt --mode vs-heuristic
-python evaluate.py checkpoints/ckpt_final.pt --mode watch
+python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
+python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
 
 # Cuarenta RL Agent
 
@@ -39,14 +39,14 @@ pip install torch numpy
 ## Train
 
 ```bash
-# Basic training (5M steps, 8 parallel envs)
-python ppo.py
+# Basic training (warm starts from data/policies/cuarenta_policy_final.pt)
+python src/ppo.py
 
 # Custom config
-python ppo.py --steps 10000000 --n-envs 16 --lr 1e-4 --save-dir my_run
+python src/ppo.py --steps 10000000 --n-envs 16 --lr 1e-4 --save-dir data/policies
 
 # Resume from checkpoint
-python ppo.py --resume checkpoints/ckpt_00500000.pt
+python src/ppo.py --resume data/policies/cuarenta_policy_iter1.pt
 ```
 
 Training prints a log line every 10 rollouts:
@@ -58,13 +58,13 @@ step=   81920 | sps=  4231 | win_rate=0.523 | loss_pi=0.0312 | loss_vf=0.4821 | 
 
 ```bash
 # Win rate vs random agent (200 games)
-python evaluate.py checkpoints/ckpt_final.pt --mode vs-random
+python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-random
 
 # Win rate vs rule-based heuristic
-python evaluate.py checkpoints/ckpt_final.pt --mode vs-heuristic
+python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
 
 # Watch a game played against the heuristic
-python evaluate.py checkpoints/ckpt_final.pt --mode watch
+python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
 
 ## Architecture
 

@@ -13,8 +13,9 @@ import argparse
 
 import torch
 
-from agents import HeuristicAgent, NetAgent, RandomAgent
+from agents import FlatNetAgent, HeuristicAgent, NetAgent, RandomAgent
 from model import CuarentaNet
+from imitation_learning.imitation_learning import PolicyNetwork
 from env import CuarentaEnv
 
 
@@ -100,12 +101,24 @@ def run_tournament(
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
-def load_net(path: str, device: torch.device) -> CuarentaNet:
-    net = CuarentaNet().to(device)
-    state = torch.load(path, map_location=device, weights_only=True)
-    net.load_state_dict(state["net"])
-    net.eval()
-    return net
+def load_agent(path: str, device: torch.device):
+    state = torch.load(path, map_location=device, weights_only=False)
+    if "net" in state:
+        net = CuarentaNet().to(device)
+        net.load_state_dict(state["net"])
+        net.eval()
+        return NetAgent(net, device, deterministic=True)
+
+    if "policy_state" in state:
+        policy_state = state["policy_state"]
+        obs_size = int(state.get("obs_size", policy_state["fc1.weight"].shape[1]))
+        action_size = int(state.get("action_size", policy_state["fc3.weight"].shape[0]))
+        net = PolicyNetwork(obs_size=obs_size, action_size=action_size).to(device)
+        net.load_state_dict(policy_state)
+        net.eval()
+        return FlatNetAgent(net, device, deterministic=True)
+
+    raise KeyError(f"Unsupported checkpoint format: {path}")
 
 
 def main():
@@ -118,8 +131,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device or ("mps" if torch.mps.is_available() else "cpu"))
-    net    = load_net(args.checkpoint, device)
-    agent  = NetAgent(net, device, deterministic=True)
+    agent  = load_agent(args.checkpoint, device)
 
     if args.mode == "vs-random":
         opp = RandomAgent(seed=999)

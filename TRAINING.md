@@ -20,22 +20,22 @@ Start PPO training with default hyperparameters:
 python src/ppo.py
 ```
 
-Default — train vs heuristic
+Default — warm start from `data/policies/cuarenta_policy_final.pt` and train in self-play
 
 ```
-python ppo.py
+python src/ppo.py
 ```
 
-Once agent beats heuristic, switch to self-play
+To train against the heuristic instead, override the opponent mode:
 
 ```
-python ppo.py --opponent-mode selfplay --resume checkpoints/ckpt_final.pt
+python src/ppo.py --opponent-mode heuristic
 ```
 
 Sanity check baseline
 
 ```
-python ppo.py --opponent-mode random
+python src/ppo.py --opponent-mode random
 ```
 
 ### Custom hyperparameters:
@@ -46,7 +46,7 @@ python src/ppo.py \
   --n-envs 8 \
   --n-steps 512 \
   --lr 3e-4 \
-  --save-dir checkpoints
+  --save-dir data/policies
 ```
 
 **Key options:**
@@ -55,11 +55,12 @@ python src/ppo.py \
 - `--n-steps`: Steps per rollout (default: 512)
 - `--lr`: Learning rate (default: 3e-4)
 - `--n-epochs`: Gradient epochs per rollout
-- `--save-dir`: Checkpoint save directory (default: `checkpoints/`)
+- `--save-dir`: Policy snapshot directory (default: `data/policies/`)
+- `--init-policy`: Warm-start policy path (default: `data/policies/cuarenta_policy_final.pt`)
 
 ### Resume training:
 ```bash
-python src/ppo.py --resume checkpoints/ckpt_00050000.pt
+python src/ppo.py --resume data/policies/cuarenta_policy_iter1.pt
 ```
 
 ## Game Environment
@@ -74,5 +75,5 @@ The environment (`src/env.py`):
 ## Architecture
 
 - **Model** (`src/model.py`): Transformer-based encoder + policy/value heads
-- **Training** (`src/ppo.py`): PPO with self-play against checkpoint pool
+- **Training** (`src/ppo.py`): PPO with self-play against a policy snapshot pool
 - **Captures** (`src/captures.py`): Legal move generation and scoring logic

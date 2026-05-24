@@ -123,7 +123,7 @@ class CuarentaEnv:
         player = s.current_player
 
         # --- Validate action ---
-        print(f'PLAYER: {player}, ACTION: {action}')
+        # print(f'PLAYER: {player}, ACTION: {action}')
         assert action.card in s.hands[player], (
             f"Player {player} does not hold {action.card}. Hand: {s.hands[player]}"
         )
