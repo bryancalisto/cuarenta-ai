@@ -19,6 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -257,6 +260,7 @@ class PPOTrainer:
         self.episode_rewards = collections.deque(maxlen=100)
         self.episode_lengths = collections.deque(maxlen=100)
         self.elo_score = collections.deque(maxlen=500)  # 1 = win, 0 = loss
+        self.training_history: Dict[str, List[float]] = collections.defaultdict(list)
 
         # Misc
         self.heuristic_agent = HeuristicAgent()
@@ -273,12 +277,16 @@ class PPOTrainer:
         pbar = tqdm(total=cfg.total_steps, desc="Training", unit="step")
 
         while self.global_step < cfg.total_steps:
+            rollout_start = time.time()
             rollouts = self._collect_rollout()
             stats = self._ppo_update(rollouts)
 
             prev_step = self.global_step
             self.global_step += cfg.n_envs * cfg.n_steps
             rollout_num += 1
+
+            rollout_elapsed = time.time() - rollout_start
+            self._record_training_metrics(rollout_num, stats, rollout_elapsed)
 
             if self.global_step % cfg.checkpoint_every < cfg.n_envs * cfg.n_steps:
                 self._save_policy_snapshot()
@@ -300,8 +308,10 @@ class PPOTrainer:
 
         pbar.close()
         final_path = self._save_policy_snapshot()
+        plot_path = self._save_training_plots()
         print(f"[PPO] Training complete. {self.global_step} steps.")
         print(f"[PPO] Final policy snapshot → {final_path}")
+        print(f"[PPO] Training plot → {plot_path}")
 
     # ── Rollout collection ───────────────────────────────────────────────────
 
@@ -467,6 +477,72 @@ class PPOTrainer:
                 stats["entropy"].append((-loss_ent).item())
 
         return {k: float(np.mean(v)) for k, v in stats.items()}
+
+    def _record_training_metrics(self, rollout_num: int, stats: Dict[str, float], rollout_elapsed: float):
+        """Store metrics for end-of-training plotting."""
+        self.training_history["rollout"].append(float(rollout_num))
+        self.training_history["step"].append(float(self.global_step))
+        self.training_history["loss_pi"].append(float(stats.get("loss_pi", 0.0)))
+        self.training_history["loss_vf"].append(float(stats.get("loss_vf", 0.0)))
+        self.training_history["entropy"].append(float(stats.get("entropy", 0.0)))
+        self.training_history["win_rate"].append(float(np.mean(self.elo_score)) if self.elo_score else float("nan"))
+        self.training_history["episode_reward"].append(float(np.mean(self.episode_rewards)) if self.episode_rewards else 0.0)
+        self.training_history["episode_length"].append(float(np.mean(self.episode_lengths)) if self.episode_lengths else 0.0)
+        self.training_history["sps"].append(float((self.cfg.n_envs * self.cfg.n_steps) / max(rollout_elapsed, 1e-8)))
+
+    def _save_training_plots(self) -> Path:
+        """Write a matplotlib summary of the recorded training metrics."""
+        if not self.training_history["rollout"]:
+            return self.save_dir / "training_metrics_empty.png"
+
+        steps = np.array(self.training_history["step"], dtype=np.float32)
+
+        fig, axes = plt.subplots(3, 2, figsize=(14, 12), sharex=True)
+        axes = axes.reshape(3, 2)
+
+        plots = [
+            (0, 0, "loss_pi", "Policy Loss"),
+            (0, 1, "loss_vf", "Value Loss"),
+            (1, 0, "entropy", "Entropy"),
+            (1, 1, "win_rate", "Win Rate"),
+            (2, 0, "episode_reward", "Episode Reward"),
+            (2, 1, "episode_length", "Episode Length"),
+        ]
+
+        for row, col, key, title in plots:
+            ax = axes[row, col]
+            values = np.array(self.training_history[key], dtype=np.float32)
+            ax.plot(steps, values, label=title, color="#1f77b4", linewidth=1.8)
+            if len(values) >= 5 and key in {"loss_pi", "loss_vf", "entropy", "episode_reward", "episode_length"}:
+                window = min(10, len(values))
+                smooth = np.convolve(values, np.ones(window) / window, mode="valid")
+                smooth_steps = steps[window - 1 :]
+                ax.plot(smooth_steps, smooth, color="#ff7f0e", linewidth=2.0, label=f"{window}-roll mean")
+            ax.set_title(title)
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=8)
+
+        axes[2, 0].set_xlabel("Training step")
+        axes[2, 1].set_xlabel("Training step")
+        axes[1, 0].set_ylabel("Metric value")
+        axes[2, 0].set_ylabel("Metric value")
+
+        fig.suptitle(
+            f"Cuarenta PPO Training Metrics (steps={int(self.global_step)}, iter={self.next_policy_iter - 1})",
+            fontsize=16,
+        )
+        fig.tight_layout(rect=[0, 0.02, 1, 0.97])
+
+        plot_path = self.save_dir / f"training_metrics_{int(self.global_step):08d}.png"
+        fig.savefig(plot_path, dpi=160)
+        plt.close(fig)
+
+        metrics_path = self.save_dir / f"training_metrics_{int(self.global_step):08d}.npz"
+        np.savez(
+            metrics_path,
+            **{k: np.array(v, dtype=np.float32) for k, v in self.training_history.items()},
+        )
+        return plot_path
 
     # ── Checkpointing & self-play ─────────────────────────────────────────────
 

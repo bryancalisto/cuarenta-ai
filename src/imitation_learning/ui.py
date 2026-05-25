@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
-from typing import Optional, Callable, List, Dict
+from typing import Optional, Callable, List, Dict, Set
 import sys
 from pathlib import Path
 
@@ -22,9 +22,10 @@ SUIT_ICONS = {
 class CuarentaUI:
     """Tkinter UI for Cuarenta game. Shows table and player hands, allows clicking cards."""
 
-    def __init__(self, root: tk.Tk, env: CuarentaEnv):
+    def __init__(self, root: tk.Tk, env: CuarentaEnv, human_players: Optional[List[int]] = None):
         self.root = root
         self.env = env
+        self.human_players: Optional[Set[int]] = set(human_players) if human_players is not None else None
         self.root.title("Cuarenta Imitation Learning UI")
         self.root.geometry("1200x800")
 
@@ -34,6 +35,7 @@ class CuarentaUI:
         self.capture_buttons: Dict[int, tk.Button] = {}  # button id -> button
         self.pack_info: Dict[tk.Frame, Dict] = {}  # store pack parameters
         self.step_count = 0
+        self._thrown_card_after_id: Optional[str] = None
 
         self._setup_ui()
 
@@ -41,6 +43,28 @@ class CuarentaUI:
         """Create main layout: center table, 4 player areas, info panel."""
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Thrown card indicator in the top-right corner of the board.
+        self.thrown_card_frame = tk.Frame(main_frame, relief=tk.SUNKEN, borderwidth=2, bg="#1f1f1f")
+        self.thrown_card_frame.place(relx=1.0, rely=0.0, anchor="ne")
+        tk.Label(
+            self.thrown_card_frame,
+            text="Thrown",
+            font=("Arial", 9, "bold"),
+            bg="#ffffff",
+            fg="white",
+        ).pack(padx=8, pady=(6, 0))
+        self.thrown_card_label = tk.Label(
+            self.thrown_card_frame,
+            text="",
+            font=("Arial", 18, "bold"),
+            bg="#1f1f1f",
+            fg="#ffd54a",
+            width=10,
+            height=2,
+        )
+        self.thrown_card_label.pack(padx=8, pady=(0, 8))
+        self.thrown_card_frame.place_forget()
 
         # Top section: Player 0 hand (dealer, bottom-right)
         self.p0_frame = tk.Frame(main_frame, relief=tk.SUNKEN, borderwidth=2)
@@ -140,8 +164,10 @@ class CuarentaUI:
             hand = s.hands[player_id]
             frame = player_frames[player_id]
             parent_frame = player_parent_frames[player_id]
+            current_is_human = self.human_players is None or current_player in self.human_players
+            show_cards = player_id == current_player and current_is_human
 
-            if player_id == current_player:
+            if show_cards:
                 # Show current player's hand
                 parent_frame.config(bg="yellow", relief=tk.RIDGE, borderwidth=4)
 
@@ -153,8 +179,17 @@ class CuarentaUI:
                     btn.pack(side=tk.LEFT, padx=2, pady=2)
                     self.card_buttons[card] = btn
             else:
-                # Hide other players' hands by keeping frame visible but empty
+                # Hide other players' hands by keeping frame visible but empty.
+                # When the current player is AI-controlled, show a small status
+                # marker so the user sees why no cards are available.
                 parent_frame.config(bg="SystemButtonFace", relief=tk.SUNKEN, borderwidth=2)
+                if player_id == current_player and self.human_players is not None:
+                    parent_frame.config(bg="#e8e8e8", relief=tk.RIDGE, borderwidth=4)
+                    tk.Label(
+                        frame,
+                        text="AI turn",
+                        font=("Arial", 12, "italic"),
+                    ).pack(pady=10)
 
         # Update table
         self._update_table_display()
@@ -257,9 +292,29 @@ class CuarentaUI:
         if not self.selected_action:
             return
 
-        action = self.selected_action
+        self.record_action(self.selected_action)
+
+    def record_action(self, action: Action):
+        """Record an action in the status bar and advance the step counter."""
         self.action_label.config(text=f"Selected: {action}")
         self.step_count += 1
+
+    def show_thrown_card(self, card: Card):
+        """Show the last thrown card in the top-right corner for 2 seconds."""
+        if self._thrown_card_after_id is not None:
+            self.root.after_cancel(self._thrown_card_after_id)
+            self._thrown_card_after_id = None
+
+        self.thrown_card_label.config(text=self._card_to_label(card))
+        self.thrown_card_frame.place(relx=1.0, rely=0.0, anchor="ne")
+        self.thrown_card_frame.lift()
+        self.root.update_idletasks()
+
+        def hide_thrown_card():
+            self.thrown_card_frame.place_forget()
+            self._thrown_card_after_id = None
+
+        self._thrown_card_after_id = self.root.after(2000, hide_thrown_card)
 
     def wait_for_action(self) -> Action:
         """Block until player selects and confirms an action. Return the action."""

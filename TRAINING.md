@@ -20,6 +20,8 @@ Start PPO training with default hyperparameters:
 python src/ppo.py
 ```
 
+At the end of a run, PPO now saves `training_metrics_*.png` and `training_metrics_*.npz` in `data/policies/`.
+
 Default — warm start from `data/policies/cuarenta_policy_final.pt` and train in self-play
 
 ```

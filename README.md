@@ -65,6 +65,13 @@ python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
 
 # Watch a game played against the heuristic
 python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
+```
+
+## Play Against Agent
+
+```bash
+python src/imitation_learning/play_vs_agent.py --checkpoint data/policies/cuarenta_policy_iter1.pt --human-players 0
+```
 
 ## Architecture
 
