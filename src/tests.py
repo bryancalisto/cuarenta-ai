@@ -113,6 +113,14 @@ caps = valid_captures(played, table)
 test("Match AND sum: play 3 vs [3,1,2] → 2 options (match OR sum)", len(caps) == 2,
      f"got {len(caps)}: {caps}")
 
+# Chain sum + stairs: play 5, table has [2, 3, 5, 6, 7]
+played = c(5)
+table = [c(2), c(3), c(5, 1), c(6), c(7, 1)]
+caps = valid_captures(played, table)
+test("Chain sum + stairs: play 5 vs [2,3,5,6,7] → combined capture available",
+     frozenset([c(2), c(3), c(5, 1), c(6), c(7, 1)]) in caps,
+     f"got {caps}")
+
 section("captures.py — Figure rules")
 
 # Figura can only match, not be in a sum

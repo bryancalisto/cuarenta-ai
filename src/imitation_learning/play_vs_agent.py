@@ -26,6 +26,9 @@ from imitation_learning.ui import CuarentaUI
 
 
 def parse_human_players(value: str) -> List[int]:
+    """
+    value format:
+    """
     if not value.strip():
         return []
     return [int(part.strip()) for part in value.split(",") if part.strip()]
@@ -36,13 +39,14 @@ def run_game(
     human_players: Set[int],
     device: str | None = None,
     seed: int | None = None,
+    show_agent_hand: bool = False,
     delay: float = 1.0,
 ):
     env = CuarentaEnv(seed=seed)
     env.reset()
 
     root = tk.Tk()
-    ui = CuarentaUI(root, env, human_players=sorted(human_players))
+    ui = CuarentaUI(root, env, human_players=sorted(human_players), show_agent_hand=show_agent_hand)
     root.title("Cuarenta vs Agent")
     torch_device = torch.device(device or ("mps" if torch.backends.mps.is_available() else "cpu"))
     agent = load_agent_from_checkpoint(checkpoint, torch_device, deterministic=True)
@@ -97,11 +101,19 @@ def main():
         required=True,
         help="Path to a PPO policy snapshot or PPO checkpoint",
     )
+
+    parser.add_argument(
+        "--show-agent-hand",
+        type=bool,
+        default=False,
+        help="Shows hand of agent (usually used for debugging)",
+    )
+
     parser.add_argument(
         "--human-players",
         type=str,
         default="0",
-        help="Comma-separated player ids controlled by the human, e.g. 0 or 0,2",
+        help="Comma-separated player indexes (in play order, starting at the top one) controlled by the human, e.g. 0 or 0,2",
     )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -111,6 +123,7 @@ def main():
     run_game(
         checkpoint=args.checkpoint,
         human_players=set(parse_human_players(args.human_players)),
+        show_agent_hand=args.show_agent_hand,
         device=args.device,
         seed=args.seed,
         delay=args.delay,

@@ -29,6 +29,7 @@ from captures import valid_captures, score_play, must_capture
 NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
+MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player → team index
 TEAM_PLAYERS = {0: [0, 2], 1: [1, 3]}
 
@@ -135,15 +136,16 @@ class CuarentaEnv:
         # --- Remove card from hand ---
         s.hands[player].remove(action.card)
 
+        team = TEAMS[player]
+
         # --- Compute score & update table ---
         points, reasons = score_play(
             played=action.card,
             capture_set=action.capture,
             table=s.table,
             last_placed=s.last_placed,
+            non_caida_allowed=s.scores[team] < MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS
         )
-
-        team = TEAMS[player]
 
         info = {
             "player": player,
@@ -195,14 +197,8 @@ class CuarentaEnv:
                         if carton_points % 2 != 0:
                             carton_points += 1
                         
-                        s.scores[team] += carton_points
+                        s.scores[team] += max(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
 
-                    # Check if any team won
-                    if s.scores[team] >= WIN_SCORE:
-                        s.done = True
-                        s.winner = team
-                        return self.observe(player), reward, True, info
-                # No winner yet — reshuffle and start new round
                 self._new_round()
 
         return self.observe(s.current_player), reward, False, info
@@ -304,6 +300,7 @@ class CuarentaEnv:
         s = self.state
         new_deck = shuffled_deck(self.random)
         s.hands, s.deck = self._deal(new_deck)
+        s.cards_captured = [[], []]
         s.table = []
         s.last_placed = None
 

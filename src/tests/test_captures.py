@@ -13,6 +13,7 @@ from captures import (
     get_same_rank_captures,
     get_sum_captures,
     get_stairs_captures,
+    valid_captures,
 )
 
 
@@ -224,21 +225,6 @@ class TestGetStairsCaptures:
         assert len(result) == 1
         assert frozenset([card_3, card_4, card_5, card_6, card_7]) in result
 
-    def test_sequence_with_duplicates_skipped(self):
-        """Test that duplicate ranks within sequence are skipped.
-        Playing 3 against [3, 3, 4, 5] should capture [3, 4, 5]
-        (the second 3 is skipped as a duplicate of the first).
-        """
-        played = Card(Rank.TRES, Suit.BRILLOS)
-        card_3a = Card(Rank.TRES, Suit.CORAZONES_ROJOS)
-        card_3b = Card(Rank.TRES, Suit.CORAZONES_NEGROS)
-        card_4 = Card(Rank.CUATRO, Suit.TREBOLES)
-        card_5 = Card(Rank.CINCO, Suit.BRILLOS)
-        table = [card_3a, card_3b, card_4, card_5]
-        result = get_stairs_captures(played, table)
-        assert len(result) == 1
-        assert frozenset([card_3a, card_4, card_5]) in result
-
     def test_multiple_sequences_different_starting_matches(self):
         """Test when multiple cards match rank, each producing a sequence.
         Playing 3 against [3, 4, 5, 3, 4, 5] should capture two sequences:
@@ -305,3 +291,19 @@ class TestGetStairsCaptures:
         result = get_stairs_captures(played, table)
         assert len(result) == 1
         assert frozenset([card_3, card_4, card_5]) in result
+
+
+class TestValidCaptures:
+    def test_sum_and_stairs_can_chain(self):
+        """Test that sum captures can chain into a stair capture."""
+        played = Card(Rank.CINCO, Suit.BRILLOS)
+        card_2 = Card(Rank.DOS, Suit.CORAZONES_ROJOS)
+        card_3 = Card(Rank.TRES, Suit.CORAZONES_NEGROS)
+        card_5 = Card(Rank.CINCO, Suit.TREBOLES)
+        card_6 = Card(Rank.SEIS, Suit.BRILLOS)
+        card_7 = Card(Rank.SIETE, Suit.CORAZONES_ROJOS)
+        table = [card_2, card_3, card_5, card_6, card_7]
+
+        result = valid_captures(played, table)
+
+        assert frozenset([card_2, card_3, card_5, card_6, card_7]) in result

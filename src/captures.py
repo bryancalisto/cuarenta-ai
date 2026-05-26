@@ -127,6 +127,7 @@ def valid_captures(
 
     captures: List[FrozenSet[Card]] = []
     played_is_figure = _is_figure(played)
+    sum_captures: List[FrozenSet[Card]] = []
 
     # Same rank card capture
     same_rank_captures = get_same_rank_captures(played, table)
@@ -140,6 +141,19 @@ def valid_captures(
     # Stairs captures
     stairs_captures = get_stairs_captures(played, table)
     captures.extend(stairs_captures)
+
+    # Chained captures: if the played card can start a stair and there is also
+    # a valid sum capture, allow taking both groups in a single play.
+    #
+    # Example:
+    #   table = [2, 3, 5, 6, 7], played = 5
+    #   sum capture   -> [2, 3]
+    #   stairs capture -> [5, 6, 7]
+    #   chained union  -> [2, 3, 5, 6, 7]
+    if sum_captures and stairs_captures:
+        for sum_cap in sum_captures:
+            for stair_cap in stairs_captures:
+                captures.append(sum_cap | stair_cap)
 
     # Remove duplicate sets (shouldn't happen but be safe)
     seen: Set[FrozenSet[Card]] = set()
@@ -198,6 +212,7 @@ def score_play(
     capture_set: FrozenSet[Card] | None,
     table: List[Card],
     last_placed: Card | None,
+    non_caida_allowed: bool = True,
 ) -> Tuple[int, List[str]]:
     """
     Compute points earned for a single play.
@@ -224,7 +239,7 @@ def score_play(
             reasons.append("caída (+2)")
 
         # Limpia bonus
-        elif detect_limpia(capture_set, table):
+        elif detect_limpia(capture_set, table) and non_caida_allowed:
             points += LIMPIA_POINTS
             reasons.append("limpia (+2)")
 

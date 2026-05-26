@@ -22,10 +22,11 @@ SUIT_ICONS = {
 class CuarentaUI:
     """Tkinter UI for Cuarenta game. Shows table and player hands, allows clicking cards."""
 
-    def __init__(self, root: tk.Tk, env: CuarentaEnv, human_players: Optional[List[int]] = None):
+    def __init__(self, root: tk.Tk, env: CuarentaEnv, human_players: Optional[List[int]] = None, show_agent_hand: Optional[bool] = False):
         self.root = root
         self.env = env
         self.human_players: Optional[Set[int]] = set(human_players) if human_players is not None else None
+        self.show_agent_hand = show_agent_hand
         self.root.title("Cuarenta Imitation Learning UI")
         self.root.geometry("1200x800")
 
@@ -51,15 +52,14 @@ class CuarentaUI:
             self.thrown_card_frame,
             text="Thrown",
             font=("Arial", 9, "bold"),
-            bg="#ffffff",
             fg="white",
         ).pack(padx=8, pady=(6, 0))
         self.thrown_card_label = tk.Label(
             self.thrown_card_frame,
             text="",
             font=("Arial", 18, "bold"),
-            bg="#1f1f1f",
-            fg="#ffd54a",
+            bg="#ffffff",
+            fg="#000000",
             width=10,
             height=2,
         )
@@ -116,7 +116,7 @@ class CuarentaUI:
         info_frame = tk.Frame(main_frame, relief=tk.SUNKEN, borderwidth=1)
         info_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
-        self.info_label = tk.Label(info_frame, text="", font=("Arial", 9), justify=tk.LEFT)
+        self.info_label = tk.Label(info_frame, text="", font=("Arial", 18), justify=tk.LEFT)
         self.info_label.pack(padx=5, pady=2, fill=tk.X)
 
         # Action info
@@ -165,7 +165,7 @@ class CuarentaUI:
             frame = player_frames[player_id]
             parent_frame = player_parent_frames[player_id]
             current_is_human = self.human_players is None or current_player in self.human_players
-            show_cards = player_id == current_player and current_is_human
+            show_cards = player_id == current_player and (current_is_human or self.show_agent_hand)
 
             if show_cards:
                 # Show current player's hand
@@ -187,8 +187,9 @@ class CuarentaUI:
                     parent_frame.config(bg="#e8e8e8", relief=tk.RIDGE, borderwidth=4)
                     tk.Label(
                         frame,
-                        text="AI turn",
-                        font=("Arial", 12, "italic"),
+                        text="AI",
+                        fg="yellow",
+                        font=("Arial", 22, "bold"),
                     ).pack(pady=10)
 
         # Update table
@@ -201,7 +202,7 @@ class CuarentaUI:
         team1_captured = len(s.cards_captured[1])
         current_team = TEAMS[current_player]
 
-        info_text = f"Step: {self.step_count} | Team 0 (P0,P2): {team0_score} pts, {team0_captured} cards | Team 1 (P1,P3): {team1_score} pts, {team1_captured} cards | Current: Player {current_player} (Team {current_team})"
+        info_text = f"Step: {self.step_count} | Team 0: {team0_score} pts, {team0_captured} cards | Team 1: {team1_score} pts, {team1_captured} cards"
         self.info_label.config(text=info_text)
 
     def _update_table_display(self):
