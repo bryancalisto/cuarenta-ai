@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play, must_capture
+from captures import detect_caida, valid_captures, score_play
 
 # Constants
 
@@ -89,9 +89,10 @@ class CuarentaEnv:
             obs, reward, done, info = env.step(action)
     """
 
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, seed: Optional[int] = None, caida_exposure_penalty: float = 0.0):
         self.random = random.Random(seed)
         self.state: Optional[CuarentaState] = None
+        self.caida_exposure_penalty = float(caida_exposure_penalty)
 
 
     def reset(self) -> Tuple[Dict, Dict]:
@@ -153,8 +154,10 @@ class CuarentaEnv:
             "action": str(action),
             "points": points,
             "reasons": reasons,
+            "caida_exposure_penalty": 0.0,
         }
 
+        caida_exposure_penalty = 0.0
         if action.capture:
             # Remove captured cards from table and put them in the team's captured cards
             for card in action.capture:
@@ -165,10 +168,12 @@ class CuarentaEnv:
             # Place card on table
             s.table.append(action.card)
             s.last_placed = action.card
+            caida_exposure_penalty = self._caida_exposure_penalty_for_next_player(action.card)
+            info["caida_exposure_penalty"] = caida_exposure_penalty
 
         # --- Apply score ---
         s.scores[team] += points
-        reward = float(points)
+        reward = float(points) - caida_exposure_penalty
 
         # --- Check win ---
         if s.scores[team] >= WIN_SCORE:
@@ -188,20 +193,39 @@ class CuarentaEnv:
                 # There's still deck to play
                 self._redeal()
             else:
-                # Check if either team has won after bonus
+                # Count carton for each team
                 for team in range(2):
-                    # Count carton for each team
                     carton_points = len(s.cards_captured[team]) - 19
                     if carton_points > 0:
                         carton_points += 5 # +5 because at 20 we start to count 6,7,8...
                         if carton_points % 2 != 0:
                             carton_points += 1
                         
-                        s.scores[team] += max(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
-
+                        s.scores[team] += max(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS) 
                 self._new_round()
 
         return self.observe(s.current_player), reward, False, info
+
+    def _caida_exposure_penalty_for_next_player(self, played_card: Card) -> float:
+        """
+        Return a shaping penalty for leaving `played_card` on the table in a position
+        where the next player can immediately answer with a caída.
+
+        This does not alter the true game score; it only shapes RL rewards.
+        """
+        if self.caida_exposure_penalty <= 0.0:
+            return 0.0
+
+        s = self.state
+        next_player = (s.current_player + 1) % NUM_PLAYERS
+        table_after_play = s.table
+
+        for response_card in s.hands[next_player]:
+            for capture_set in valid_captures(response_card, table_after_play):
+                if played_card in capture_set and detect_caida(response_card, capture_set, played_card):
+                    return self.caida_exposure_penalty
+
+        return 0.0
 
     def legal_actions(self) -> List[Action]:
         """Return all legal Action objects for the current player."""
@@ -303,6 +327,9 @@ class CuarentaEnv:
         s.cards_captured = [[], []]
         s.table = []
         s.last_placed = None
+
+        # next player starts in new round
+        s.current_player = (s.current_player + 1) % NUM_PLAYERS
 
     # ------------------------------------------------------------------
     # Rendering

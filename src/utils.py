@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import List, Dict
 
-from matplotlib.table import table
 import numpy as np
 import torch
 

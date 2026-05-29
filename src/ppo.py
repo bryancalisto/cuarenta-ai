@@ -61,6 +61,7 @@ class PPOConfig:
     pool_size: int = 20
     opponent_latest: float = 0.8
     opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
+    caida_exposure_penalty: float = 0.5
     save_dir: str = "data/policies"
     init_policy: str = DEFAULT_POLICY_INIT
     # Logging / training length
@@ -233,7 +234,10 @@ class PPOTrainer:
         print(f"[PPO] Using device: {self.device}")
 
         # Environments
-        self.envs = [CuarentaEnv(seed=i) for i in range(cfg.n_envs)]
+        self.envs = [
+            CuarentaEnv(seed=i, caida_exposure_penalty=cfg.caida_exposure_penalty)
+            for i in range(cfg.n_envs)
+        ]
         self.env_obs = [None] * cfg.n_envs
         self.env_done = [True] * cfg.n_envs
         self.action_encoders = [ActionEncoder(env) for env in self.envs]
@@ -622,6 +626,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save-dir", type=str, default="data/policies")
     parser.add_argument("--init-policy", type=str, default=DEFAULT_POLICY_INIT)
+    parser.add_argument("--caida-exposure-penalty", type=float, default=0.5)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
         "--opponent-mode",
@@ -640,6 +645,7 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         init_policy=args.init_policy,
         opponent_mode=args.opponent_mode,
+        caida_exposure_penalty=args.caida_exposure_penalty,
     )
 
     trainer = PPOTrainer(cfg, device=args.device)

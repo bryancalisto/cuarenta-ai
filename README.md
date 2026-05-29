@@ -26,7 +26,7 @@ PPO + self-play agent for the Ecuadorian card game Cuarenta, implemented in PyTo
 | `captures.py` | Legal capture logic — match, sum, caída, ronda |
 | `env.py` | 4-player game environment (PettingZoo-style) |
 | `model.py` | PyTorch actor-critic — Transformer encoder + two-headed policy |
-| `ppo.py` | PPO trainer with GAE, self-play checkpoint pool |
+| `ppo.py` | PPO trainer with GAE, self-play checkpoint pool, optional caida-exposure shaping |
 | `evaluate.py` | Evaluation — vs random, vs heuristic, watch mode |
 | `tests.py` | Full test suite for the environment |
 

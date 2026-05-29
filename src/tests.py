@@ -299,6 +299,27 @@ obs4, reward4, done4, info4 = env3.step(capture3[0])
 test("Caída: reward = 2 (caída) = 2", reward4 == 2.0, f"got {reward4}")
 test("Caída reason reported", any("caída" in r for r in info4["reasons"]))
 
+section("env.py — Caída exposure shaping")
+
+env4b = CuarentaEnv(seed=4, caida_exposure_penalty=1.0)
+env4b.reset()
+s4b = env4b.state
+s4b.current_player = 0
+
+# Set up: player 0 places a 5 and player 1 can immediately caida it with another 5.
+five_red = Card(Rank.CINCO, Suit.CORAZONES_ROJOS)
+five_black = Card(Rank.CINCO, Suit.CORAZONES_NEGROS)
+s4b.table = []
+s4b.hands[0] = [five_red]
+s4b.hands[1] = [five_black]
+
+legal4b = env4b.legal_actions()
+place4b = [a for a in legal4b if a.capture is None][0]
+obs4b, reward4b, done4b, info4b = env4b.step(place4b)
+test("Caída exposure: shaping penalty applied", reward4b == -1.0, f"got {reward4b}")
+test("Caída exposure: penalty reported in info", info4b["caida_exposure_penalty"] == 1.0,
+     f"got {info4b['caida_exposure_penalty']}")
+
 section("env.py — Ronda scoring")
 
 env4 = CuarentaEnv(seed=2)

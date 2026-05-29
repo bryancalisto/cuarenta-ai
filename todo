@@ -1,9 +1,8 @@
-HeuristicAgent:
-    ✔ Complete agent with missing logic @started(26-04-05 17:40) @done(26-04-05 23:30) @lasted(5h50m59s)
-    ☐ Fix tests
+☐ remove code that's not used
+☐ make sure the duration of iterations is good enough (reaches game end, reaches multiple deck ends if available)
+☐ make sure that, on deck end, the first player is the next clockwise player 
 
-Data:
-    ☐ Generate dataset with heuristic agent
-
-General:
-    ☐ Remove code that's not used
+Archive:
+  ✔ Complete agent with missing logic @started(26-04-05 17:40) @done(26-04-05 23:30) @lasted(5h50m59s) @project(HeuristicAgent)
+  ✔ Fix tests @done(26-05-27 07:16) @project(HeuristicAgent)
+  ✔ Generate dataset with heuristic agent @done(26-05-27 07:16) @project(Data)

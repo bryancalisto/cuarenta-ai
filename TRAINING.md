@@ -57,6 +57,7 @@ python src/ppo.py \
 - `--n-steps`: Steps per rollout (default: 512)
 - `--lr`: Learning rate (default: 3e-4)
 - `--n-epochs`: Gradient epochs per rollout
+- `--caida-exposure-penalty`: Reward penalty for leaving a card exposed to an immediate caida by the next player
 - `--save-dir`: Policy snapshot directory (default: `data/policies/`)
 - `--init-policy`: Warm-start policy path (default: `data/policies/cuarenta_policy_final.pt`)
 
