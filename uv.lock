@@ -18,6 +18,7 @@ dependencies = [
     { name = "imitation" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "sb3-contrib" },
     { name = "torch" },
     { name = "tqdm" },
 ]
@@ -32,6 +33,7 @@ requires-dist = [
     { name = "imitation", specifier = ">=1.0.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.4" },
+    { name = "sb3-contrib", specifier = ">=2.2.1" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
@@ -1810,6 +1812,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/be/6d/8b123a6b0336e263a0a0edc31fabb82fb3b7b6cb091ea6e92bff1f3902f1/sacred-0.8.7.tar.gz", hash = "sha256:c2a01d9b524c1d16076cb40c21071dc049bf68fe5f02a2cac78bbb3169e407d2", size = 110478, upload-time = "2024-11-26T07:16:53.839Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/01/d9/67a53f465395e0be45ac8f780938e0a551d82d4b864e5a9394ab66168432/sacred-0.8.7-py2.py3-none-any.whl", hash = "sha256:81bf159ebd1ccbbe5fcc37a15a94897dabb0616c21d1276b9064aa40c65c5099", size = 108245, upload-time = "2024-11-26T07:16:52.399Z" },
+]
+
+[[package]]
+name = "sb3-contrib"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "stable-baselines3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/54/ee0e14a34f8bc49c2c6efa285cdd4fbc885bfa1fc75f49137b334b1ad630/sb3_contrib-2.2.1.tar.gz", hash = "sha256:bdd1ac8ddfa4bb04685a46f739bcb8e0a1be57869524f421cb65978d86f1e065", size = 78971, upload-time = "2023-11-17T23:04:06.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/4e/dc77f88dc6204af9770cf82ae91b96096778d522cd30f9888cd883f36e61/sb3_contrib-2.2.1-py3-none-any.whl", hash = "sha256:2416d2f31bec9e479f4a3e9093f218d7162ea78359f7d2f7f01c5cce71c89300", size = 80668, upload-time = "2023-11-17T23:04:03.892Z" },
 ]
 
 [[package]]
