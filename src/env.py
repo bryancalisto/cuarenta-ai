@@ -123,6 +123,7 @@ class CuarentaEnv:
         s = self.state
         assert not s.done, "Game is already over. Call reset()."
         player = s.current_player
+        reward = 0
 
         # --- Validate action ---
         # print(f'PLAYER: {player}, ACTION: {action}')
@@ -164,6 +165,7 @@ class CuarentaEnv:
                 s.table.remove(card)
                 s.cards_captured[team].append(card)
             s.last_placed = None   # table was modified; caída chain resets
+            reward += len(action.capture) * 0.25 # 0.25 reward points per captured card
         else:
             # Place card on table
             s.table.append(action.card)
@@ -173,13 +175,13 @@ class CuarentaEnv:
 
         # --- Apply score ---
         s.scores[team] += points
-        reward = float(points) - caida_exposure_penalty
+        reward += points - caida_exposure_penalty
 
         # --- Check win ---
         if s.scores[team] >= WIN_SCORE:
             s.done = True
             s.winner = team
-            reward += 10.0   # terminal bonus
+            reward += 100.0   # terminal bonus
             info["winner"] = team
             return self.observe(player), reward, True, info
 
@@ -202,6 +204,12 @@ class CuarentaEnv:
                             carton_points += 1
                         
                         s.scores[team] += max(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS) 
+
+                        # If there's carton points, give a reward
+                        is_current_player_team = team == TEAMS[player] 
+
+                        if is_current_player_team:
+                            reward += carton_points
                 self._new_round()
 
         return self.observe(s.current_player), reward, False, info

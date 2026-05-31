@@ -34,10 +34,7 @@ from env import CuarentaEnv, TEAMS
 from imitation_learning.imitation_learning import ActionEncoder, PolicyNetwork
 
 
-DEFAULT_POLICY_INIT = "data/policies/cuarenta_policy_final.pt"
-
-
-# ─── Config ──────────────────────────────────────────────────────────────────
+DEFAULT_POLICY_INIT = "data/policies/cuarenta_dagger_policy_final.pt"
 
 
 @dataclass
@@ -65,11 +62,8 @@ class PPOConfig:
     save_dir: str = "data/policies"
     init_policy: str = DEFAULT_POLICY_INIT
     # Logging / training length
-    log_every: int = 10
+    log_every: int = 5
     total_steps: int = 5_000_000
-
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
 def flatten_obs(obs: Dict[str, np.ndarray]) -> np.ndarray:
@@ -108,9 +102,6 @@ def masked_legal_logits(
     return logits_1d[legal_action_ids]
 
 
-# ─── Model ───────────────────────────────────────────────────────────────────
-
-
 class FlatActorCritic(nn.Module):
     """
     Actor-critic built around the imitation-learning policy network.
@@ -142,9 +133,6 @@ class FlatActorCritic(nn.Module):
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         hidden = self.encode(obs)
         return self.value_head(hidden).squeeze(-1)
-
-
-# ─── Rollout Buffer ───────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -216,9 +204,6 @@ def select_legal_action(
     return legal_index, log_prob, entropy
 
 
-# ─── PPO Trainer ──────────────────────────────────────────────────────────────
-
-
 class PPOTrainer:
     """
     Trains a Cuarenta policy with PPO and self-play.
@@ -280,6 +265,7 @@ class PPOTrainer:
         t0 = time.time()
         pbar = tqdm(total=cfg.total_steps, desc="Training", unit="step")
 
+        # print(f'self.global_step: {self.global_step}, cfg_total_steps: {cfg.total_steps}')
         while self.global_step < cfg.total_steps:
             rollout_start = time.time()
             rollouts = self._collect_rollout()
@@ -296,16 +282,13 @@ class PPOTrainer:
                 self._save_policy_snapshot()
 
             if rollout_num % cfg.log_every == 0:
-                elapsed = time.time() - t0
-                sps = self.global_step / elapsed
                 wr = np.mean(self.elo_score) if self.elo_score else float("nan")
                 pbar.set_postfix_str(
-                    f"sps={sps:>6.0f} | "
+                    f"ep_rew={np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f} |"
                     f"win_rate={wr:.3f} | "
                     f"loss_pi={stats['loss_pi']:.4f} | "
                     f"loss_vf={stats['loss_vf']:.4f} | "
                     f"entropy={stats['entropy']:.4f} | "
-                    f"ep_rew={np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f}"
                 )
 
             pbar.update(self.global_step - prev_step)
@@ -317,8 +300,7 @@ class PPOTrainer:
         print(f"[PPO] Final policy snapshot → {final_path}")
         print(f"[PPO] Training plot → {plot_path}")
 
-    # ── Rollout collection ───────────────────────────────────────────────────
-
+    
     def _collect_rollout(self) -> List[Rollout]:
         """
         Run n_steps in each env and collect experience for the learning team.
@@ -387,7 +369,6 @@ class PPOTrainer:
         self.net.train()
         return rollouts
 
-    # ── PPO update ────────────────────────────────────────────────────────────
 
     def _ppo_update(self, rollouts: List[Rollout]) -> Dict[str, float]:
         cfg = self.cfg
@@ -548,8 +529,6 @@ class PPOTrainer:
         )
         return plot_path
 
-    # ── Checkpointing & self-play ─────────────────────────────────────────────
-
     def _save_policy_snapshot(self) -> Path:
         path = self.save_dir / f"cuarenta_policy_iter{self.next_policy_iter}.pt"
         self.next_policy_iter += 1
@@ -611,9 +590,6 @@ class PPOTrainer:
         self.opponent_net.load_state_dict(self.net.policy.state_dict())
         self.opponent_net.eval()
         print(f"[PPO] Loaded policy from {path} (step={self.global_step})")
-
-
-# ─── Entry point ──────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":

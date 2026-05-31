@@ -67,10 +67,10 @@ python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
 python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
 ```
 
-## Play Against Agent
+## Play 2 humans team vs 2 agents team 
 
 ```bash
-python src/imitation_learning/play_vs_agent.py --checkpoint data/policies/cuarenta_policy_iter1.pt --human-players 0
+python src/imitation_learning/play_vs_agent.py --checkpoint data/policies/cuarenta_policy_iter1.pt --human-players 0,2
 ```
 
 ## Architecture

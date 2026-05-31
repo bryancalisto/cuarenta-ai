@@ -5,6 +5,7 @@ from typing import List
 
 import numpy as np
 import torch
+from stable_baselines3 import PPO
 
 from model import CuarentaNet, ActionMasks
 from env import Action
@@ -113,12 +114,29 @@ class FlatNetAgent:
         return legal[choice]
 
 
+class SB3PPOAgent:
+    """Wraps a Stable-Baselines3 PPO checkpoint for evaluation and play."""
+
+    def __init__(self, model: PPO, deterministic: bool = True):
+        self.model = model
+        self.deterministic = deterministic
+
+    def act(self, obs, legal: List[Action]) -> int:
+        # SB3 expects the raw observation and returns a discrete action index.
+        action, _ = self.model.predict(obs, deterministic=self.deterministic)
+        return int(np.asarray(action).item())
+
+
 def load_agent_from_checkpoint(
     path: str,
     device: torch.device,
     deterministic: bool = True,
 ):
-    """Load either a PPO checkpoint or a flat policy snapshot."""
+    """Load a Torch checkpoint, a flat policy snapshot, or an SB3 PPO archive."""
+    if path.endswith(".zip"):
+        model = PPO.load(path, device=str(device))
+        return SB3PPOAgent(model, deterministic=deterministic)
+
     state = torch.load(path, map_location=device, weights_only=False)
 
     if "net" in state:

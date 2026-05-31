@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import List, Set
 
+import numpy as np
 import tkinter as tk
 from tkinter import messagebox
 
@@ -20,9 +21,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from card import build_deck
 from env import CuarentaEnv
 from agents import load_agent_from_checkpoint
 from imitation_learning.ui import CuarentaUI
+from env import Action
 
 
 def parse_human_players(value: str) -> List[int]:
@@ -32,6 +35,31 @@ def parse_human_players(value: str) -> List[int]:
     if not value.strip():
         return []
     return [int(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def decode_action_index(action_idx: int, legal: List[Action]) -> Action:
+    """Mirror the 40x41 action encoding used by the PPO checkpoint."""
+    action_idx = int(np.asarray(action_idx).item())
+    card_idx = action_idx // 41
+    capture_idx = action_idx % 41
+    card = build_deck()[card_idx]
+
+    matching = [a for a in legal if a.card == card]
+    if not matching:
+        return legal[action_idx % len(legal)]
+
+    if capture_idx == 0:
+        for legal_action in matching:
+            if legal_action.capture is None:
+                return legal_action
+        return legal[action_idx % len(legal)]
+
+    capture_actions = [a for a in matching if a.capture is not None]
+    capture_offset = capture_idx - 1
+    if capture_offset < len(capture_actions):
+        return capture_actions[capture_offset]
+
+    return legal[action_idx % len(legal)]
 
 
 def run_game(
@@ -59,16 +87,23 @@ def run_game(
             ui.refresh_display()
             if current_player in human_players:
                 ui.action_label.config(text=f"Your turn: P{current_player}")
-                action = ui.wait_for_action()
+                selected_action = ui.wait_for_action()
+                action_for_env = selected_action
             else:
                 ui.action_label.config(text=f"AI thinking: P{current_player}")
                 root.update_idletasks()
                 root.update()
-                action = agent.act(env.observe(current_player), legal)
-                ui.record_action(action)
+                chosen = agent.act(env.observe(current_player), legal)
+                if isinstance(chosen, Action):
+                    selected_action = chosen
+                    action_for_env = chosen
+                else:
+                    selected_action = decode_action_index(chosen, legal)
+                    action_for_env = selected_action
+                ui.record_action(selected_action)
 
-            _, reward, done, info = env.step(action)
-            ui.show_thrown_card(action.card)
+            _, reward, done, info = env.step(action_for_env)
+            ui.show_thrown_card(selected_action.card)
             ui.refresh_display()
             root.update_idletasks()
             root.update()
@@ -99,7 +134,7 @@ def main():
         "--checkpoint",
         type=str,
         required=True,
-        help="Path to a PPO policy snapshot or PPO checkpoint",
+        help="Path to a Torch checkpoint (.pt) or Stable-Baselines3 PPO archive (.zip)",
     )
 
     parser.add_argument(
