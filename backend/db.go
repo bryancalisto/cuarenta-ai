@@ -22,7 +22,10 @@ var (
 	ErrGameNotFound     = errors.New("game not found")
 	ErrSeatUnavailable  = errors.New("seat unavailable")
 	ErrGameNotReady     = errors.New("game not ready")
+	ErrGameNotRunning   = errors.New("game not running")
 	ErrForbiddenAction  = errors.New("forbidden action")
+	ErrNotYourTurn      = errors.New("not your turn")
+	ErrIllegalAction    = errors.New("illegal action")
 	ErrInvalidSeat      = errors.New("invalid seat")
 	ErrInvalidTeam      = errors.New("invalid team")
 	ErrSeatTeamMismatch = errors.New("seat does not belong to team")
@@ -210,10 +213,12 @@ func (db *Database) StartGame(gameId string, requesterId string) (models.Game, e
 	if game.CreatedBy != requesterId {
 		return models.Game{}, ErrForbiddenAction
 	}
+
 	if game.Status == "running" {
 		return models.Game{}, ErrGameNotReady
 	}
-	if len(game.HumanPlayers) != 4 {
+
+	if len(game.HumanPlayers) == 0 || len(game.HumanPlayers) > 4 {
 		return models.Game{}, ErrGameNotReady
 	}
 

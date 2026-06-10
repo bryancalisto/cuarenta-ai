@@ -15,9 +15,10 @@
 		type PublicUser,
 		type WsMessage
 	} from '$lib/api';
+	import GameBoard from '$lib/GameBoard.svelte';
 
 	type AuthTab = 'signin' | 'signup';
-	type Screen = 'auth' | 'menu' | 'create' | 'join' | 'lobby';
+	type Screen = 'auth' | 'menu' | 'create' | 'join' | 'lobby' | 'game';
 
 	const sessionKey = 'cuarenta-session';
 	const lastGameKey = 'cuarenta-last-game';
@@ -53,6 +54,7 @@
 	let joinMessage = $state('');
 	let startLoading = $state(false);
 	let mainMessage = $state('');
+	let lastCardPlayed = $state(-1);
 
 	function safeJsonParse<T>(value: string | null): T | null {
 		if (!value) return null;
@@ -132,10 +134,15 @@
 
 			if (payload.type === 'game.snapshot') {
 				activeGame = payload.game;
-				screen = 'lobby';
+				if (payload.game.status === 'running') {
+					screen = 'game';
+					mainMessage = 'Game in progress!';
+				} else {
+					screen = 'lobby';
+					mainMessage = `Connected to game ${payload.game.id}`;
+				}
 				pendingGameId = payload.game.id;
 				socketError = '';
-				mainMessage = payload.game.status === 'started' ? 'Game started' : `Connected to game ${payload.game.id}`;
 				persistSession();
 			}
 
@@ -320,6 +327,9 @@
 			const game = await startGame(token, activeGame.id);
 			activeGame = game;
 			pendingGameId = game.id;
+			if (game.status === 'running') {
+				screen = 'game';
+			}
 			setNotice(`Game ${game.id} started`);
 			persistSession();
 			subscribeToGame(game.id);
@@ -328,6 +338,29 @@
 		} finally {
 			startLoading = false;
 		}
+	}
+
+	function sendGameAction(cardIndex: number, captureIndices?: number[]) {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		lastCardPlayed = cardIndex;
+		socket.send(JSON.stringify({
+			type: 'game.action',
+			payload: {
+				gameId: activeGame?.id,
+				cardIndex: cardIndex,
+				captureIndices: captureIndices || []
+			}
+		}));
+	}
+
+	function sendCaptureSelection(captureIndices: number[]) {
+		if (lastCardPlayed === -1) return;
+		sendGameAction(lastCardPlayed, captureIndices);
+	}
+
+	function returnToLobby() {
+		screen = 'lobby';
+		mainMessage = '';
 	}
 
 	function isOccupied(game: Game | null, index: number) {
@@ -374,7 +407,7 @@
 	}
 
 	function formatGameStatus(game: Game) {
-		return game.status === 'started' ? 'In progress' : 'Lobby';
+		return game.status === 'running' ? 'In progress' : 'Lobby';
 	}
 
 	function joinCodeInput(event: Event) {
@@ -718,6 +751,41 @@
 				</div>
 
 			</section>
+		{:else if screen === 'game'}
+			<section class="grid gap-6 lg:grid-cols-[1fr_120px]">
+				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					{#if activeGame}
+						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} />
+					{/if}
+					{#if mainMessage}
+						<div class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+							{mainMessage}
+						</div>
+					{/if}
+					{#if socketError}
+						<div class="mt-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+							{socketError}
+						</div>
+					{/if}
+				</div>
+
+				<div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					<div class="mt-4 grid gap-3">
+						<button
+							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"
+							onclick={() => returnToLobby()}
+						>
+							Back
+						</button>
+						<button
+							class="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-semibold text-slate-200 transition hover:bg-white/5"
+							onclick={() => signOut()}
+						>
+							Sign out
+						</button>
+					</div>
+				</div>
+			</section>
 		{:else if screen === 'lobby'}
 			<section class="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
 				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
@@ -784,10 +852,16 @@
 					<div class="mt-4 grid gap-3">
 						<button
 							class="rounded-2xl bg-amber-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
-							disabled={startLoading || activeGame?.createdBy !== currentUser?.id || activeGame?.status === 'started'}
-							onclick={() => void beginGame()}
+							disabled={startLoading || (activeGame?.status !== 'running' && activeGame?.createdBy !== currentUser?.id)}
+							onclick={() => {
+								if (activeGame?.status === 'running') {
+									screen = 'game';
+								} else {
+									void beginGame();
+								}
+							}}
 						>
-							{startLoading ? 'Starting...' : 'Start game'}
+							{startLoading ? 'Starting...' : activeGame?.status === 'running' ? 'Show table' : 'Start game'}
 						</button>
 						<button
 							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"

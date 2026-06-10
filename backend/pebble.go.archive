@@ -1,0 +1,58 @@
+import (
+	"log"
+
+	"github.com/cockroachdb/pebble"
+)
+
+type Database interface {
+	Set(key string, value string) error
+	Get(key string) (string, error)
+}
+
+type pebbleDb struct{}
+
+const dbName = "cuarenta.db"
+
+func (p *pebbleDb) Set(key string, value string) error {
+	db, err := pebble.Open(dbName, &pebble.Options{})
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Println("Couldn't close the database")
+		}
+	}()
+
+	if err != nil {
+		return err
+	}
+
+	if err := db.Set([]byte(key), []byte(value), pebble.Sync); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *pebbleDb) Get(key string) (string, error) {
+	db, err := pebble.Open(dbName, &pebble.Options{})
+
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Println("Couldn't close the database")
+		}
+	}()
+
+	if err != nil {
+		return "", err
+	}
+
+	value, closer, err := db.Get([]byte(key))
+	if err != nil {
+		return "", err
+	}
+
+	if err := closer.Close(); err != nil {
+		return "", err
+	}
+
+	return string(value), nil
+}

@@ -5,10 +5,13 @@ import (
 	"sync"
 
 	envpkg "github.com/caarlos0/env/v11"
+	"github.com/joho/godotenv"
 )
 
 type Environ struct {
-	JwtKey string `env:"JWT_KEY"`
+	JwtKey                   string `env:"JWT_KEY"`
+	OnnxModelPath            string `env:"ONNX_MODEL_PATH"`
+	OnnxRuntimeSharedLibPath string `env:"ONNXRUNTIME_SHARED_LIBRARY_PATH"`
 }
 
 var env Environ
@@ -17,6 +20,12 @@ var once sync.Once
 func GetEnv() Environ {
 	once.Do(func() {
 		var err error
+		err = godotenv.Load()
+
+		if err != nil {
+			log.Fatalf("Couldn't not load environment variables: %v", err)
+		}
+
 		env, err = envpkg.ParseAs[Environ]()
 
 		if err != nil {

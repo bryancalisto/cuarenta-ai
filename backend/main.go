@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"cuarenta/internal/auth"
+	infer "cuarenta/internal/inference"
 	"cuarenta/internal/models"
 	"log"
 	"net/http"
@@ -42,6 +43,12 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
+func shutdown() {
+	if err := infer.ShutdownEngine(); err != nil {
+		log.Println("failed to shutdown inference engine:", err)
+	}
+}
+
 func main() {
 	r := gin.Default()
 	DB = NewDatabase()
@@ -50,6 +57,11 @@ func main() {
 	passwHash, _ := auth.HashPassword("1234")
 	DB.users[userId] = models.User{Id: userId, Email: "1@1.com", Password: passwHash}
 	r.Use(corsMiddleware())
+
+	if err := infer.StartEngine(); err != nil {
+		log.Fatalf("Couldn't start inference engine: %v", err)
+	}
+	defer shutdown()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -70,6 +82,7 @@ func main() {
 	api.POST("/games", CreateGameCtl)
 	api.POST("/games/:code/join", JoinGameCtl)
 	api.POST("/games/:code/start", StartGameCtl)
+	api.POST("/games/:code/play", PlayGameCtl)
 
 	r.GET("/exit", ExitCtl(quit))
 	r.GET("/ws", WsCtl)

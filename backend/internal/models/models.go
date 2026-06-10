@@ -13,13 +13,33 @@ type HumanPlayer struct {
 	JoinedAt  string `json:"joinedAt"`
 }
 
+type Move struct {
+	CardIndex     int   `json:"cardIndex"`
+	CaptureIndices []int `json:"captureIndices,omitempty"`
+	PlayerIndex   int   `json:"playerIndex"`
+}
+
+type CaptureOption struct {
+	CaptureIndices []int `json:"captureIndices"`
+}
+
 type Game struct {
 	Id           string        `json:"id"`
 	HumanPlayers []HumanPlayer `json:"humanPlayers"`
 	TimeSteps    int           `json:"timeSteps"`
 	Cards        [][]int       `json:"cards"`
+	Table        []int         `json:"table,omitempty"`
+	Scores       []int         `json:"scores,omitempty"`
+	CurrentPlayer int           `json:"currentPlayer"`
+	LastPlaced   *int          `json:"lastPlaced,omitempty"`
+	Winner       *int          `json:"winner,omitempty"`
+	Done         bool          `json:"done,omitempty"`
+	DeckRemaining int           `json:"deckRemaining,omitempty"`
 	CreatedBy    string        `json:"createdBy"`
 	CreatedAt    string        `json:"createdAt"`
 	StartedAt    string        `json:"startedAt,omitempty"`
 	Status       string        `json:"status"`
+	PendingMoves []Move        `json:"pendingMoves,omitempty"`
+	CaptureOptions []CaptureOption `json:"captureOptions,omitempty"`
+	AwaitingCapture bool `json:"awaitingCapture,omitempty"`
 }

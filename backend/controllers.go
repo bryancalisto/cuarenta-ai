@@ -163,6 +163,8 @@ func mapErrorToStatus(err error) (int, string) {
 		return http.StatusForbidden, "You are not allowed to perform that action"
 	case errors.Is(err, ErrGameNotReady):
 		return http.StatusConflict, "The game is not ready to start yet"
+	case errors.Is(err, ErrGameNotRunning):
+		return http.StatusConflict, "The game is not running"
 	case errors.Is(err, ErrInvalidSeat):
 		return http.StatusBadRequest, "Spot index must be between 0 and 3"
 	case errors.Is(err, ErrInvalidTeam):
@@ -171,6 +173,10 @@ func mapErrorToStatus(err error) (int, string) {
 		return http.StatusBadRequest, "Team 1 can only use seats 1 and 3; team 2 can only use seats 2 and 4"
 	case errors.Is(err, ErrAlreadyInGame):
 		return http.StatusConflict, "You are already registered in this game"
+	case errors.Is(err, ErrNotYourTurn):
+		return http.StatusForbidden, "It is not your turn"
+	case errors.Is(err, ErrIllegalAction):
+		return http.StatusBadRequest, "That action is not legal"
 	default:
 		return http.StatusBadRequest, err.Error()
 	}
@@ -324,8 +330,32 @@ func StartGameCtl(c *gin.Context) {
 		return
 	}
 
-	hub.broadcast(game)
-	c.JSON(http.StatusOK, gin.H{"game": game})
+	updated, err := startRunningGame(game)
+	if err != nil {
+		status, message := mapErrorToStatus(err)
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"game": updated})
+}
+
+func PlayGameCtl(c *gin.Context) {
+	var dto PlayGameDTO
+	if err := c.ShouldBindJSON(&dto); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	userId := c.GetString("userId")
+	updated, err := playHumanTurn(c.Param("code"), userId, dto)
+	if err != nil {
+		status, message := mapErrorToStatus(err)
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"game": updated})
 }
 
 func ExitCtl(quit chan os.Signal) func(c *gin.Context) {
@@ -430,6 +460,42 @@ func WsCtl(c *gin.Context) {
 				continue
 			}
 			subscribeToGame(client, payload.GameId)
+		case "game.action":
+			var payload map[string]interface{}
+			if err := json.Unmarshal(message.Payload, &payload); err != nil {
+				sendWsError(client, http.StatusBadRequest, "Invalid action payload")
+				continue
+			}
+			gameId, ok := payload["gameId"].(string)
+			if !ok {
+				sendWsError(client, http.StatusBadRequest, "Missing gameId")
+				continue
+			}
+			cardIndex, ok := payload["cardIndex"].(float64)
+			if !ok {
+				sendWsError(client, http.StatusBadRequest, "Missing cardIndex")
+				continue
+			}
+
+			captureIndices := []int{}
+			if captures, ok := payload["captureIndices"].([]interface{}); ok {
+				for _, c := range captures {
+					if idx, ok := c.(float64); ok {
+						captureIndices = append(captureIndices, int(idx))
+					}
+				}
+			}
+
+			dto := PlayGameDTO{
+				CardIndex:      int(cardIndex),
+				CaptureIndices: captureIndices,
+			}
+			updatedGame, err := playHumanTurn(gameId, client.userId, dto)
+			if err != nil {
+				sendWsError(client, http.StatusBadRequest, err.Error())
+				continue
+			}
+			hub.broadcast(updatedGame)
 		default:
 			sendWsError(client, http.StatusBadRequest, "Unknown websocket event")
 		}
