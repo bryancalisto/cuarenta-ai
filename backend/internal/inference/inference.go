@@ -65,7 +65,7 @@ func StartEngine() error {
 		inputData := make([]float32, inputShape.FlattenedSize())
 		outputData := make([]float32, outputShape.FlattenedSize())
 
-		InputTensor, err = ort.NewTensor[float32](inputShape, inputData)
+		InputTensor, err = ort.NewTensor(inputShape, inputData)
 		if err != nil {
 			initErr = fmt.Errorf("create input tensor: %w", err)
 			return
@@ -101,7 +101,7 @@ func ShutdownEngine() error {
 	var firstErr error
 
 	if onnxSession != nil {
-		if err := onnxSession.Destroy(); err != nil && firstErr == nil {
+		if err := onnxSession.Destroy(); err != nil {
 			firstErr = err
 			log.Println("failed to destroy onnx session:", err)
 		}
