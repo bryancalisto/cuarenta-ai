@@ -19,7 +19,7 @@
 
 	function isCurrentUser(playerIndex: number): boolean {
 		if (!currentUser) return false;
-		return game.humanPlayers.some((p) => p.index === playerIndex && p.userId === currentUser.id);
+		return game.humanPlayers.some((p: any) => p.index === playerIndex && p.userId === currentUser.id);
 	}
 
 	function canPlayCard(cardIndex: number): boolean {
@@ -30,10 +30,10 @@
 		return `P${index}`;
 	}
 
-	const myPlayer = game.humanPlayers.find((p) => currentUser && p.userId === currentUser.id);
+	const myPlayer = game.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id);
 	const myArrayIndex = myPlayer ? myPlayer.index - 1 : undefined;
 
-	const currentPlayerIsHuman = game.currentPlayer !== undefined && game.humanPlayers.some((p) => p.index - 1 === game.currentPlayer && p.userId === currentUser?.id);
+	const currentPlayerIsHuman = game.currentPlayer !== undefined && game.humanPlayers.some((p: any) => p.index - 1 === game.currentPlayer && p.userId === currentUser?.id);
 	const isMyTurn = myArrayIndex !== undefined && game.currentPlayer === myArrayIndex;
 
 	let displayedMoveCount = $state(0);
@@ -74,7 +74,7 @@
 		}
 
 		// Reconstruct initial table before pending moves
-		const initialTable = new Set(game.table || []);
+		const initialTable = new Set<number>(game.table || []);
 		for (let i = game.pendingMoves.length - 1; i >= 0; i--) {
 			const move = game.pendingMoves[i];
 			initialTable.delete(move.cardIndex);
@@ -121,10 +121,6 @@
 				<span class="label">Game</span>
 				<span class="value">{game.id}</span>
 			</div>
-			<div class="info-item">
-				<span class="label">Status</span>
-				<span class="value">{game.done ? 'Finished' : 'Playing'}</span>
-			</div>
 		</div>
 
 		<div class="scores">
@@ -169,27 +165,7 @@
 				<div class="empty-table">Table is empty</div>
 			{/if}
 		</div>
-
-		<div class="deck-info">Deck: {game.deckRemaining ?? 0} cards</div>
 	</div>
-
-	<!-- Pending moves section -->
-	{#if game.pendingMoves && displayedMoveCount > 0}
-		<div class="pending-moves">
-			<div class="section-title">Recent Moves</div>
-			<div class="moves-list">
-				{#each game.pendingMoves.slice(0, displayedMoveCount) as move}
-					<div class="move-item">
-						<span class="player-badge">P{move.playerIndex}</span>
-						<span class="card-badge">{cardToString(move.cardIndex)}</span>
-						{#if move.captureIndices && move.captureIndices.length > 0}
-							<span class="capture-badge">captured</span>
-						{/if}
-					</div>
-				{/each}
-			</div>
-		</div>
-	{/if}
 
 	<!-- Capture selection section -->
 	{#if game.awaitingCapture && game.captureOptions && game.captureOptions.length > 0 && !isSelectingCapture}
@@ -252,7 +228,6 @@
 		justify-content: space-between;
 		align-items: center;
 		border-bottom: 2px solid white/10;
-		padding-bottom: 1rem;
 	}
 
 	.game-info,
@@ -287,11 +262,10 @@
 		display: flex;
 		justify-content: center;
 		align-items: center;
-		padding: 2rem;
 	}
 
 	.current-player-text {
-		font-size: 4rem;
+		font-size: 3rem;
 		font-weight: 700;
 		color: #94a3b8;
 		text-align: center;
@@ -300,7 +274,7 @@
 
 	.current-player-text.your-turn {
 		color: #fbbf24;
-		font-size: 4.5rem;
+		font-size: 3.5rem;
 		text-shadow: 0 0 20px rgba(251, 191, 36, 0.5);
 	}
 
@@ -320,7 +294,6 @@
 	}
 
 	.table-area {
-		flex: 1;
 		display: flex;
 		flex-direction: column;
 		justify-content: center;
@@ -328,12 +301,11 @@
 		border: 2px solid white/20;
 		border-radius: 1rem;
 		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
-		padding: 2rem;
+		padding: 3rem;
 		gap: 1rem;
 	}
 
 	.table-cards {
-		min-height: 120px;
 		display: flex;
 		justify-content: center;
 		align-items: center;
@@ -347,13 +319,13 @@
 	}
 
 	.card {
-		padding: 0.75rem 1rem;
+		padding: 1rem 1rem;
 		border-radius: 0.5rem;
 		border: 2px solid white/30;
 		background: white;
 		color: black;
 		font-weight: 600;
-		font-size: 1rem;
+		font-size: 1.5rem;
 		cursor: pointer;
 		transition: all 0.2s;
 	}
@@ -386,11 +358,6 @@
 		font-size: 1.125rem;
 	}
 
-	.deck-info {
-		font-size: 0.875rem;
-		color: #cbd5e1;
-	}
-
 	.player-hand {
 		border: 2px solid white/10;
 		border-radius: 1rem;
@@ -408,7 +375,6 @@
 	.hand-header {
 		margin-bottom: 0.75rem;
 		border-bottom: 1px solid white/10;
-		padding-bottom: 0.5rem;
 	}
 
 	.hand-label {
@@ -437,57 +403,6 @@
 		letter-spacing: 0.1em;
 		color: #cbd5e1;
 		margin-bottom: 0.75rem;
-	}
-
-	.pending-moves {
-		border: 2px solid white/10;
-		border-radius: 1rem;
-		padding: 1rem;
-		background: rgba(15, 23, 42, 0.6);
-	}
-
-	.moves-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.move-item {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		font-size: 0.875rem;
-		color: #cbd5e1;
-	}
-
-	.player-badge {
-		display: inline-block;
-		background: rgba(59, 130, 246, 0.3);
-		border: 1px solid rgba(59, 130, 246, 0.5);
-		color: #93c5fd;
-		padding: 0.25rem 0.5rem;
-		border-radius: 0.25rem;
-		font-weight: 600;
-	}
-
-	.card-badge {
-		display: inline-block;
-		background: white;
-		color: black;
-		padding: 0.25rem 0.5rem;
-		border-radius: 0.25rem;
-		font-weight: 600;
-	}
-
-	.capture-badge {
-		display: inline-block;
-		background: rgba(34, 197, 94, 0.3);
-		border: 1px solid rgba(34, 197, 94, 0.5);
-		color: #86efac;
-		padding: 0.25rem 0.5rem;
-		border-radius: 0.25rem;
-		font-size: 0.75rem;
-		font-weight: 600;
 	}
 
 	.capture-selection {
