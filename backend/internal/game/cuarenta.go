@@ -9,8 +9,8 @@ import (
 
 const (
 	NumPlayers = 4
-	HandSize    = 5
-	WinScore    = 40
+	HandSize   = 5
+	WinScore   = 40
 
 	// Matches the Python training code.
 	MaxAchievablePointsByNonCaidaActions = 38
@@ -27,23 +27,23 @@ type Suit int
 type Rank int
 
 const (
-	Brillos Suit = 0
-	CorazonesRojos Suit = 1
+	Brillos         Suit = 0
+	CorazonesRojos  Suit = 1
 	CorazonesNegros Suit = 2
-	Treboles Suit = 3
+	Treboles        Suit = 3
 )
 
 const (
-	As Rank = 1
-	Dos Rank = 2
-	Tres Rank = 3
+	As     Rank = 1
+	Dos    Rank = 2
+	Tres   Rank = 3
 	Cuatro Rank = 4
-	Cinco Rank = 5
-	Seis Rank = 6
-	Siete Rank = 7
-	Jack Rank = 11
-	Queen Rank = 12
-	King Rank = 13
+	Cinco  Rank = 5
+	Seis   Rank = 6
+	Siete  Rank = 7
+	Jack   Rank = 11
+	Queen  Rank = 12
+	King   Rank = 13
 )
 
 var allRanks = []Rank{As, Dos, Tres, Cuatro, Cinco, Seis, Siete, Jack, Queen, King}
@@ -378,16 +378,16 @@ func scorePlay(played Card, captureSet []Card, table []Card, lastPlaced *Card, n
 }
 
 type State struct {
-	Hands           map[int][]Card
-	Table           []Card
-	Deck            []Card
-	DecksConsumed   int
-	Scores          [2]int
-	CardsCaptured   [2][]Card
-	CurrentPlayer   int
-	LastPlaced      *Card
-	Done            bool
-	Winner          *int
+	Hands         map[int][]Card
+	Table         []Card
+	Deck          []Card
+	DecksConsumed int
+	Scores        [2]int
+	CardsCaptured [2][]Card
+	CurrentPlayer int
+	LastPlaced    *Card
+	Done          bool
+	Winner        *int
 }
 
 type Env struct {
@@ -514,8 +514,13 @@ func (e *Env) Observe(player int) Observation {
 		"my_team_captures":  cardsToBitVec(s.CardsCaptured[teamByPlayer[player]]),
 		"opp_team_captures": cardsToBitVec(s.CardsCaptured[1-teamByPlayer[player]]),
 		"current_player":    []float32{float32(s.CurrentPlayer)},
-		"last_placed":       cardsToBitVec(func() []Card { if s.LastPlaced != nil { return []Card{*s.LastPlaced} }; return nil }()),
-		"deck_remaining":    []float32{float32(len(s.Deck))},
+		"last_placed": cardsToBitVec(func() []Card {
+			if s.LastPlaced != nil {
+				return []Card{*s.LastPlaced}
+			}
+			return nil
+		}()),
+		"deck_remaining": []float32{float32(len(s.Deck))},
 	}
 	return obs
 }
@@ -559,6 +564,24 @@ func (e *Env) legalActions() []Action {
 
 func (e *Env) LegalActions() []Action {
 	return e.legalActions()
+}
+
+func (e *Env) LegalActionsForCard(played Card) []Action {
+	s := e.state
+	player := s.CurrentPlayer
+	actions := make([]Action, 0, len(s.Hands[player]))
+
+	// the card alone the player just throwed is a valid action
+	actions = append(actions, Action{Card: played})
+
+	// according to the thrown card, there's a set of actions that can be taken
+	captures := ValidCaptures(played, s.Table)
+	for _, capSet := range captures {
+		action := Action{Card: played, Capture: canonicalCards(capSet)}
+		actions = append(actions, action)
+	}
+
+	return actions
 }
 
 func actionExists(action Action, legal []Action) bool {
@@ -611,12 +634,12 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 	team := teamByPlayer[player]
 	points, reasons := scorePlay(action.Card, action.Capture, s.Table, s.LastPlaced, s.Scores[team] < MaxAchievablePointsByNonCaidaActions)
 	info := map[string]any{
-		"player":                   player,
-		"team":                     team,
-		"action":                   action.String(),
-		"points":                   points,
-		"reasons":                  reasons,
-		"caida_exposure_penalty":   0.0,
+		"player":                 player,
+		"team":                   team,
+		"action":                 action.String(),
+		"points":                 points,
+		"reasons":                reasons,
+		"caida_exposure_penalty": 0.0,
 	}
 
 	caidaExposurePenalty := 0.0

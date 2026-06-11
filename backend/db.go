@@ -25,6 +25,7 @@ var (
 	ErrGameNotRunning   = errors.New("game not running")
 	ErrForbiddenAction  = errors.New("forbidden action")
 	ErrNotYourTurn      = errors.New("not your turn")
+	ErrNotAITurn        = errors.New("not AI turn")
 	ErrIllegalAction    = errors.New("illegal action")
 	ErrInvalidSeat      = errors.New("invalid seat")
 	ErrInvalidTeam      = errors.New("invalid team")

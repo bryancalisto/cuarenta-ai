@@ -348,6 +348,7 @@ func PlayGameCtl(c *gin.Context) {
 	}
 
 	userId := c.GetString("userId")
+	log.Println("Calling playHumanTurn in PlayGameCtl")
 	updated, err := playHumanTurn(c.Param("code"), userId, dto)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
@@ -417,8 +418,8 @@ func WsCtl(c *gin.Context) {
 	}
 
 	upgrader := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:  2048,
+		WriteBufferSize: 2048,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
@@ -466,6 +467,7 @@ func WsCtl(c *gin.Context) {
 				sendWsError(client, http.StatusBadRequest, "Invalid action payload")
 				continue
 			}
+			log.Println("game.action:", payload)
 			gameId, ok := payload["gameId"].(string)
 			if !ok {
 				sendWsError(client, http.StatusBadRequest, "Missing gameId")
@@ -490,12 +492,13 @@ func WsCtl(c *gin.Context) {
 				CardIndex:      int(cardIndex),
 				CaptureIndices: captureIndices,
 			}
-			updatedGame, err := playHumanTurn(gameId, client.userId, dto)
+			// updatedGame, err := playHumanTurn(gameId, client.userId, dto)
+			_, err := playHumanTurn(gameId, client.userId, dto)
 			if err != nil {
 				sendWsError(client, http.StatusBadRequest, err.Error())
 				continue
 			}
-			hub.broadcast(updatedGame)
+			// hub.broadcast(updatedGame)
 		default:
 			sendWsError(client, http.StatusBadRequest, "Unknown websocket event")
 		}
