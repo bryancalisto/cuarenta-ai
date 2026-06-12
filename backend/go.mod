@@ -7,7 +7,7 @@ require (
 	github.com/yalue/onnxruntime_go v1.31.0
 )
 
-require github.com/benbjohnson/clock v1.3.5 // indirect
+require github.com/benbjohnson/clock v1.3.5
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
