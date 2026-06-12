@@ -251,8 +251,6 @@ func (db *Database) CreateWsTicket(userId string) models.WsTicket {
 }
 
 func (db *Database) DeleteExpiredWsTickets() int {
-	defer db.mu.Lock()
-
 	count := 0
 	currentTime := db.clock.Now().UTC()
 	for _, ticket := range db.tickets {
@@ -268,9 +266,9 @@ func (db *Database) DeleteExpiredWsTickets() int {
 }
 
 func (db *Database) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool) {
-	db.mu.Lock()
+	db.mu.RLock()
 	ticket, ok := db.tickets[ticketCode]
-	db.mu.Unlock()
+	db.mu.RUnlock()
 
 	if !ok {
 		log.Println("ticket not found")
