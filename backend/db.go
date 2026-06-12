@@ -5,38 +5,46 @@ import (
 	"cuarenta/internal/models"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/benbjohnson/clock"
 )
 
 type Database struct {
-	mu    sync.RWMutex
-	users map[string]models.User
-	games map[string]models.Game
+	clock   clock.Clock
+	mu      sync.RWMutex
+	users   map[string]models.User
+	games   map[string]models.Game
+	tickets map[string]models.WsTicket
 }
 
 var (
-	ErrUserExists       = errors.New("user already exists")
-	ErrGameNotFound     = errors.New("game not found")
-	ErrSeatUnavailable  = errors.New("seat unavailable")
-	ErrGameNotReady     = errors.New("game not ready")
-	ErrGameNotRunning   = errors.New("game not running")
-	ErrForbiddenAction  = errors.New("forbidden action")
-	ErrNotYourTurn      = errors.New("not your turn")
-	ErrNotAITurn        = errors.New("not AI turn")
-	ErrIllegalAction    = errors.New("illegal action")
-	ErrInvalidSeat      = errors.New("invalid seat")
-	ErrInvalidTeam      = errors.New("invalid team")
-	ErrSeatTeamMismatch = errors.New("seat does not belong to team")
-	ErrAlreadyInGame    = errors.New("player already in game")
+	ErrUserExists              = errors.New("user already exists")
+	ErrInvalidConnectionTicket = errors.New("invalid connection ticket")
+	ErrGameNotFound            = errors.New("game not found")
+	ErrSeatUnavailable         = errors.New("seat unavailable")
+	ErrGameNotReady            = errors.New("game not ready")
+	ErrGameNotRunning          = errors.New("game not running")
+	ErrForbiddenAction         = errors.New("forbidden action")
+	ErrNotYourTurn             = errors.New("not your turn")
+	ErrNotAITurn               = errors.New("not AI turn")
+	ErrIllegalAction           = errors.New("illegal action")
+	ErrInvalidSeat             = errors.New("invalid seat")
+	ErrInvalidTeam             = errors.New("invalid team")
+	ErrSeatTeamMismatch        = errors.New("seat does not belong to team")
+	ErrAlreadyInGame           = errors.New("player already in game")
 )
 
-func NewDatabase() *Database {
+func NewDatabase(clock clock.Clock) *Database {
 	return &Database{
-		users: make(map[string]models.User),
-		games: make(map[string]models.Game),
+		clock:   clock,
+		users:   make(map[string]models.User),
+		games:   make(map[string]models.Game),
+		tickets: make(map[string]models.WsTicket),
 	}
 }
 
@@ -153,14 +161,14 @@ func (db *Database) CreateGame(creatorId string, player models.HumanPlayer) (mod
 		return models.Game{}, err
 	}
 
-	player.JoinedAt = time.Now().UTC().Format(time.RFC3339)
+	player.JoinedAt = db.clock.Now().UTC().Format(time.RFC3339)
 	game := models.Game{
 		Id:           id,
 		HumanPlayers: []models.HumanPlayer{player},
 		TimeSteps:    0,
 		Cards:        [][]int{},
 		CreatedBy:    creatorId,
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		CreatedAt:    db.clock.Now().UTC().Format(time.RFC3339),
 		Status:       "lobby",
 	}
 
@@ -196,7 +204,7 @@ func (db *Database) JoinGame(gameId string, player models.HumanPlayer) (models.G
 		}
 	}
 
-	player.JoinedAt = time.Now().UTC().Format(time.RFC3339)
+	player.JoinedAt = db.clock.Now().UTC().Format(time.RFC3339)
 	game.HumanPlayers = append(game.HumanPlayers, player)
 	db.games[gameId] = game
 	return game, nil
@@ -224,7 +232,52 @@ func (db *Database) StartGame(gameId string, requesterId string) (models.Game, e
 	}
 
 	game.Status = "running"
-	game.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	game.StartedAt = db.clock.Now().UTC().Format(time.RFC3339)
 	db.games[gameId] = game
 	return game, nil
+}
+
+func (db *Database) CreateWsTicket(userId string) models.WsTicket {
+	const secondsToLive = 3
+	code := getUid()
+	expiresAt := db.clock.Now().UTC().Add(time.Second * secondsToLive)
+	ticket := models.WsTicket{Code: code, ExpiresAtUTC: expiresAt, UserId: userId}
+
+	db.mu.Lock()
+	db.tickets[code] = ticket
+	db.mu.Unlock()
+
+	return ticket
+}
+
+func (db *Database) DeleteExpiredWsTickets() int {
+	defer db.mu.Lock()
+
+	count := 0
+	currentTime := db.clock.Now().UTC()
+	for _, ticket := range db.tickets {
+		if ticket.ExpiresAtUTC.Before(currentTime) {
+			db.mu.Lock()
+			delete(db.tickets, ticket.Code)
+			db.mu.Unlock()
+			count++
+		}
+	}
+
+	return count
+}
+
+func (db *Database) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool) {
+	db.mu.Lock()
+	ticket, ok := db.tickets[ticketCode]
+	db.mu.Unlock()
+
+	if !ok {
+		log.Println("ticket not found")
+		return nil, false
+	}
+
+	currentTime := db.clock.Now().UTC()
+	valid := currentTime.Before(ticket.ExpiresAtUTC)
+	return &ticket, valid
 }

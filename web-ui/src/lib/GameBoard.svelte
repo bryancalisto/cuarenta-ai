@@ -142,6 +142,8 @@
 				{getPlayerLabel(getDisplayedCurrentPlayer() ?? 0)}
 				{#if isMyTurn}
 					<span class="turn-label">Your turn</span>
+				{:else if !currentPlayerIsHuman}
+					<span class="turn-label">AI</span>
 				{/if}
 			</div>
 		{:else if game.done && game.winner !== undefined}

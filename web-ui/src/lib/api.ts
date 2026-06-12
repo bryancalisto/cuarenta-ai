@@ -133,9 +133,23 @@ export async function startGame(token: string, gameId: string): Promise<Game> {
 	return data.game;
 }
 
-export function openGameSocket(token: string): WebSocket {
+export async function getWebsocketTicket(token: string): Promise<string> {
+	const response = await fetch(buildUrl('/auth/ws-ticket'), {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`
+		}
+	});
+
+	const data = await readJson<{ ticket: string }>(response);
+	console.log('tickkk', data.ticket)
+	return data.ticket;
+}
+
+export function openGameSocket(ticket: string): WebSocket {
 	const url = new URL(buildUrl('/ws'));
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-	url.searchParams.set('token', token);
+	url.searchParams.set('ticket', ticket);
+	console.log('URLLL:', url.toString())
 	return new WebSocket(url.toString());
 }

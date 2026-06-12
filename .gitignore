@@ -164,3 +164,4 @@ checkpoints/
 .vscode/
 cuarenta_policy_iter*.pt
 trajectories
+todo

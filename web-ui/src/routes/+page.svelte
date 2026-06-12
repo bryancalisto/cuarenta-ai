@@ -4,6 +4,7 @@
 	import {
 		createGame,
 		getGame,
+		getWebsocketTicket,
 		joinGame,
 		openGameSocket,
 		signIn,
@@ -98,12 +99,12 @@
 		socketStatus = 'offline';
 	}
 
-	function subscribeToGame(gameId: string) {
+	async function subscribeToGame(gameId: string) {
 		pendingGameId = gameId;
 		if (!token) return;
 
 		if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-			openSocket();
+			await openSocket();
 			return;
 		}
 
@@ -112,13 +113,14 @@
 		}
 	}
 
-	function openSocket() {
+	async function openSocket() {
 		if (!token) return;
 
 		closeSocket();
 		socketStatus = 'connecting';
-
-		const ws = openGameSocket(token);
+		
+		const ticket = await getWebsocketTicket(token);
+		const ws = openGameSocket(ticket);
 		socket = ws;
 
 		ws.onopen = () => {
@@ -210,7 +212,7 @@
 			persistSession();
 			openSocket();
 			if (pendingGameId) {
-				subscribeToGame(pendingGameId);
+				await subscribeToGame(pendingGameId);
 			}
 		} catch (error) {
 			authError = error instanceof Error ? error.message : 'Authentication failed';

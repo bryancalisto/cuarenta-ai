@@ -155,6 +155,8 @@ func mapErrorToStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrUserExists):
 		return http.StatusConflict, "A user with that email already exists"
+	case errors.Is(err, ErrInvalidConnectionTicket):
+		return http.StatusUnauthorized, "invalid connection ticket"
 	case errors.Is(err, ErrGameNotFound):
 		return http.StatusNotFound, "Game not found"
 	case errors.Is(err, ErrSeatUnavailable):
@@ -195,6 +197,10 @@ func GameSnapshotCtl(c *gin.Context) {
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Game not found"})
 		return
+	}
+
+	if err := playAITurns(gameId); err != nil {
+		log.Printf("GameSnapshotCtl error: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"game": game})
@@ -273,6 +279,12 @@ func SignInCtl(c *gin.Context) {
 		"accessToken": token,
 		"user":        publicUser(user),
 	})
+}
+
+func CreateWsTicketCtl(c *gin.Context) {
+	userId := c.GetString("userId")
+	ticket := DB.CreateWsTicket(userId)
+	c.JSON(http.StatusOK, gin.H{"ticket": ticket.Code})
 }
 
 func CreateGameCtl(c *gin.Context) {
@@ -371,21 +383,6 @@ func ExitCtl(quit chan os.Signal) func(c *gin.Context) {
 	}
 }
 
-func wsTokenFromRequest(c *gin.Context) string {
-	token := c.Query("token")
-	if token != "" {
-		return token
-	}
-
-	authHeader := c.GetHeader("Authorization")
-	parts := strings.Split(authHeader, " ")
-	if len(parts) == 2 && parts[0] == "Bearer" {
-		return parts[1]
-	}
-
-	return ""
-}
-
 func subscribeToGame(client *wsClient, gameId string) {
 	gameId = normalizeGameId(gameId)
 	if gameId == "" {
@@ -405,14 +402,12 @@ func subscribeToGame(client *wsClient, gameId string) {
 }
 
 func WsCtl(c *gin.Context) {
-	token := wsTokenFromRequest(c)
-	if token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
+	ticketCode := strings.TrimSpace(c.Query("ticket"))
+	ticket, valid := DB.ValidateWsTicket(ticketCode)
 
-	valid, userId, err := auth.ValidateJWT(token)
-	if err != nil || !valid {
+	userId := ticket.UserId
+
+	if !valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
