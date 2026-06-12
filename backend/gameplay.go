@@ -19,6 +19,7 @@ type PlayGameDTO struct {
 
 type gameSession struct {
 	mu         sync.Mutex
+	aiTurnChan chan int
 	env        *game.Env
 	stepCount  int
 	humanSeats map[int]string
@@ -71,15 +72,6 @@ func cardIndices(cards []game.Card) []int {
 	}
 	sort.Ints(out)
 	return out
-}
-
-func humanSeatForUser(snapshot models.Game, userId string) (int, bool) {
-	for _, player := range snapshot.HumanPlayers {
-		if player.UserId == userId {
-			return player.Index - 1, true
-		}
-	}
-	return -1, false
 }
 
 func humanSeats(snapshot models.Game) map[int]string {
@@ -162,6 +154,7 @@ func newGameSession(snapshot models.Game) *gameSession {
 	return &gameSession{
 		env:        game.NewEnv(time.Now().UnixNano(), 0),
 		humanSeats: humanSeats(snapshot),
+		aiTurnChan: make(chan int, 1),
 	}
 }
 
@@ -185,9 +178,9 @@ func startRunningGame(snapshot models.Game) (models.Game, error) {
 
 	publishGameSnapshot(updated)
 
-	if err := playAITurns(snapshot.Id); err != nil {
-		log.Fatalf("Error while running AI players moves 2: %v", err)
-	}
+	// if err := playAITurns(snapshot.Id); err != nil {
+	// 	log.Fatalf("Error while running AI players moves 2: %v", err)
+	// }
 
 	session, ok := getSession(snapshot.Id)
 
@@ -196,6 +189,10 @@ func startRunningGame(snapshot models.Game) (models.Game, error) {
 	}
 
 	updated = sessionSnapshot(snapshot, session)
+
+	go aiTurnsRunner(updated.Id, session.aiTurnChan)
+
+	session.aiTurnChan <- updated.CurrentPlayer
 	return updated, nil
 }
 
@@ -244,6 +241,15 @@ func matchLegalAction(action game.Action, legal []game.Action) (game.Action, boo
 	}
 
 	return game.Action{}, false
+}
+
+func aiTurnsRunner(gameId string, aiTurnChan chan int) {
+	for {
+		<-aiTurnChan
+		// run pending ai turns
+		playAITurns(gameId)
+	}
+
 }
 
 func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {
@@ -353,7 +359,7 @@ func playAITurns(gameId string) error {
 			break
 		}
 
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 
 		if err := playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
@@ -378,6 +384,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	}
 
 	session.mu.Lock()
+	defer session.mu.Unlock()
 
 	state := session.env.State()
 	if state == nil {
@@ -403,7 +410,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 		return models.Game{}, err
 	}
 
-	legal := session.env.LegalActions()
+	legal := session.env.LegalActionsForCard(action.Card)
 
 	// Check if this card has legal captures
 	matchingActions := legalCapturesForCard(action.Card, legal)
@@ -446,10 +453,10 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 
 	publishGameSnapshot(snapshot)
 
-	session.mu.Unlock()
-	if err := playAITurns(gameId); err != nil {
-		log.Fatalf("Error while running AI players moves: %v", err)
-	}
+	// if err := playAITurns(gameId); err != nil {
+	// 	log.Fatalf("Error while running AI players moves: %v", err)
+	// }
 
+	session.aiTurnChan <- snapshot.CurrentPlayer
 	return models.Game{}, nil
 }

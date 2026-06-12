@@ -394,6 +394,7 @@ type Env struct {
 	rng                  *rand.Rand
 	state                *State
 	caidaExposurePenalty float64
+	// gameSession *
 }
 
 func NewEnv(seed int64, caidaExposurePenalty float64) *Env {

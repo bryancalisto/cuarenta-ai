@@ -487,13 +487,11 @@ func WsCtl(c *gin.Context) {
 				CardIndex:      int(cardIndex),
 				CaptureIndices: captureIndices,
 			}
-			// updatedGame, err := playHumanTurn(gameId, client.userId, dto)
 			_, err := playHumanTurn(gameId, client.userId, dto)
 			if err != nil {
 				sendWsError(client, http.StatusBadRequest, err.Error())
 				continue
 			}
-			// hub.broadcast(updatedGame)
 		default:
 			sendWsError(client, http.StatusBadRequest, "Unknown websocket event")
 		}
