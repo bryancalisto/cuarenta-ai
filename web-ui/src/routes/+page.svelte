@@ -287,6 +287,22 @@
 			joinPreview = game;
 			joinPreviewCode = code;
 			joinMessage = '';
+
+			// Autoselect: check Team 1 then Team 2 for the first available spot
+			const team1Spots = allowedSeatsForTeam(1);
+			const team2Spots = allowedSeatsForTeam(2);
+			
+			const t1Available = team1Spots.find(s => !isOccupied(game, s));
+			if (t1Available) {
+				joinTeam = 1;
+				joinSpot = t1Available;
+			} else {
+				const t2Available = team2Spots.find(s => !isOccupied(game, s));
+				if (t2Available) {
+					joinTeam = 2;
+					joinSpot = t2Available;
+				}
+			}
 		} catch (error) {
 			joinPreview = null;
 			joinPreviewCode = code;
@@ -403,8 +419,12 @@
 
 	function setJoinTeam(team: number) {
 		joinTeam = team;
-		if (!isSeatAllowedForTeam(joinSpot, team)) {
-			joinSpot = allowedSeatsForTeam(team)[0];
+		const allowed = allowedSeatsForTeam(team);
+		const firstAvailable = allowed.find(s => !isOccupied(joinPreview, s));
+		if (firstAvailable) {
+			joinSpot = firstAvailable;
+		} else {
+			joinSpot = allowed[0];
 		}
 	}
 
@@ -757,7 +777,7 @@
 			<section class="grid gap-6 lg:grid-cols-[1fr_120px] flex-1">
 				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					{#if activeGame}
-						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} />
+						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} onReturnToLobby={returnToLobby} />
 					{/if}
 					{#if mainMessage}
 						<div class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">

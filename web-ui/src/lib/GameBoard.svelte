@@ -1,11 +1,13 @@
 <script lang="ts">
 	import type { Game } from './api';
+	import GameResultsDialog from './GameResultsDialog.svelte';
 
-	let { game, currentUser, onPlayCard, onSelectCapture } = $props<{
+	let { game, currentUser, onPlayCard, onSelectCapture, onReturnToLobby } = $props<{
 		game: Game;
 		currentUser: { id: string; email: string } | null;
 		onPlayCard: (cardIndex: number) => void;
 		onSelectCapture: (captureIndices: number[]) => void;
+		onReturnToLobby: () => void;
 	}>();
 
 	const suits = ['♦️', '♥️', '♠️', '♣️'];
@@ -17,9 +19,12 @@
 		return `${rank}${suit}`;
 	}
 
+	function isHumanPlayer(playerIndex: number): boolean {
+		return game.humanPlayers.some((p: any) => p.index - 1 === playerIndex);
+	}
+
 	function isCurrentUser(playerIndex: number): boolean {
-		if (!currentUser) return false;
-		return game.humanPlayers.some((p: any) => p.index === playerIndex && p.userId === currentUser.id);
+		return myArrayIndex !== undefined && playerIndex === myArrayIndex;
 	}
 
 	function canPlayCard(cardIndex: number): boolean {
@@ -27,13 +32,12 @@
 	}
 
 	function getPlayerLabel(index: number): string {
-		return `P${index}`;
+		return `P${index + 1}`;
 	}
 
 	const myPlayer = $derived(game.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id));
 	const myArrayIndex = $derived(myPlayer ? myPlayer.index - 1 : undefined);
 
-	const currentPlayerIsHuman = $derived(game.currentPlayer !== undefined && game.humanPlayers.some((p: any) => p.index - 1 === game.currentPlayer && p.userId === currentUser?.id));
 	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
 
 	let displayedMoveCount = $state(0);
@@ -138,18 +142,23 @@
 	<!-- Current player indicator -->
 	<div class="current-player-section">
 		{#if getDisplayedCurrentPlayer() !== undefined && !game.done}
-			<div class="current-player-text" class:your-turn={isMyTurn}>
-				{getPlayerLabel(getDisplayedCurrentPlayer() ?? 0)}
-				{#if isMyTurn}
+			{@const currentPlayerIdx = getDisplayedCurrentPlayer() ?? 0}
+			<div class="current-player-text" class:your-turn={isCurrentUser(currentPlayerIdx)}>
+				{getPlayerLabel(currentPlayerIdx)}
+				{#if isCurrentUser(currentPlayerIdx)}
 					<span class="turn-label">Your turn</span>
-				{:else if !currentPlayerIsHuman}
+				{:else if isHumanPlayer(currentPlayerIdx)}
+					<span class="turn-label">Human</span>
+				{:else}
 					<span class="turn-label">AI</span>
 				{/if}
 			</div>
-		{:else if game.done && game.winner !== undefined}
-			<div class="game-over">Team {game.winner} wins!</div>
 		{/if}
 	</div>
+
+	{#if game.done}
+		<GameResultsDialog {game} {onReturnToLobby} />
+	{/if}
 
 	<!-- Table area -->
 	<div class="table-area">
