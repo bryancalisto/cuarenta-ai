@@ -352,6 +352,24 @@ func StartGameCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"game": updated})
 }
 
+func CancelGameCtl(c *gin.Context) {
+	userId := c.GetString("userId")
+	gameId := c.Param("code")
+
+	game, err := DB.CancelGame(gameId, userId)
+	if err != nil {
+		status, message := mapErrorToStatus(err)
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+
+	hub.broadcast(game)
+	deleteSession(gameId)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
+}
+
+
 func PlayGameCtl(c *gin.Context) {
 	var dto PlayGameDTO
 	if err := c.ShouldBindJSON(&dto); err != nil {

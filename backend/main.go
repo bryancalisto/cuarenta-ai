@@ -4,7 +4,6 @@ import (
 	"context"
 	"cuarenta/internal/auth"
 	infer "cuarenta/internal/inference"
-	"cuarenta/internal/models"
 	"log"
 	"net/http"
 	"os"
@@ -49,6 +48,8 @@ func shutdown() {
 	if err := infer.ShutdownEngine(); err != nil {
 		log.Println("failed to shutdown inference engine:", err)
 	}
+
+	dbToDiskHandler()
 }
 
 type RecurrentJob struct {
@@ -85,20 +86,32 @@ func deleteExpiredWsTicketsHandler() {
 	log.Printf("Deleted %d tickets\n", nDeleted)
 }
 
+func dbToDiskHandler() {
+	if err := DB.WriteToDisk(); err != nil {
+		log.Printf("Failed to write DB file to disk: %v", err)
+	}
+}
+
 func main() {
 	r := gin.Default()
 	DB = NewDatabase(clock.New())
+	err := DB.LoadFromDisk()
+
+	if err != nil {
+		log.Printf("Failed to load DB file from disk: %v", err)
+	} else {
+		log.Println("Loaded DB from disk")
+	}
 
 	// Start recurrent jobs runner
 	recurrentJobsCtx, cancelRecurrentJobs := context.WithCancel(context.Background())
 	defer cancelRecurrentJobs()
-	recurrentJobs := []RecurrentJob{{ticker: time.NewTicker(10 * time.Minute), handler: deleteExpiredWsTicketsHandler}}
+	recurrentJobs := []RecurrentJob{
+		{ticker: time.NewTicker(10 * time.Minute), handler: deleteExpiredWsTicketsHandler},
+		{ticker: time.NewTicker(1 * time.Hour), handler: dbToDiskHandler},
+	}
 	go runRecurrentJobs(recurrentJobsCtx, recurrentJobs)
 
-	// add default user for convenient testing
-	userId := getUid()
-	passwHash, _ := auth.HashPassword("1234")
-	DB.users[userId] = models.User{Id: userId, Email: "1@1.com", Password: passwHash}
 	r.Use(corsMiddleware())
 
 	if err := infer.StartEngine(); err != nil {
@@ -139,6 +152,7 @@ func main() {
 	api.POST("/games/:code/join", JoinGameCtl)
 	api.POST("/games/:code/start", StartGameCtl)
 	api.POST("/games/:code/play", PlayGameCtl)
+	api.POST("/games/:code/cancel", CancelGameCtl)
 
 	r.GET("/exit", ExitCtl(quit))
 	r.GET("/ws", WsCtl)

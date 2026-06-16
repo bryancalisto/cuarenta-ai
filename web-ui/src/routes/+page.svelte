@@ -10,6 +10,7 @@
 		signIn,
 		signUp,
 		startGame,
+		cancelGame,
 		type AuthResponse,
 		type Game,
 		type HumanPlayer,
@@ -54,6 +55,7 @@
 	let joinLoading = $state(false);
 	let joinMessage = $state('');
 	let startLoading = $state(false);
+	let cancelLoading = $state(false);
 	let mainMessage = $state('');
 	let lastCardPlayed = $state(-1);
 
@@ -135,6 +137,15 @@
 			if (!payload) return;
 
 			if (payload.type === 'game.snapshot') {
+				if (payload.game.status === 'canceled') {
+					closeSocket();
+					activeGame = null;
+					pendingGameId = '';
+					screen = 'menu';
+					setNotice('Game was canceled by the creator');
+					persistSession();
+					return;
+				}
 				activeGame = payload.game;
 				if (payload.game.status === 'running' || (payload.game.status === 'finished' && screen !== 'lobby')) {
 					screen = 'game';
@@ -355,6 +366,29 @@
 			mainMessage = error instanceof Error ? error.message : 'Could not start game';
 		} finally {
 			startLoading = false;
+		}
+	}
+
+	async function handleCancelGame() {
+		if (!activeGame) return;
+
+		const confirmed = confirm("Are you sure you want to cancel this game? It will be deleted immediately for all players.");
+		if (!confirmed) return;
+
+		cancelLoading = true;
+		mainMessage = '';
+		try {
+			await cancelGame(token ?? '', activeGame.id);
+			closeSocket();
+			activeGame = null;
+			pendingGameId = '';
+			screen = 'menu';
+			setNotice('Game canceled successfully');
+			persistSession();
+		} catch (error) {
+			mainMessage = error instanceof Error ? error.message : 'Could not cancel game';
+		} finally {
+			cancelLoading = false;
 		}
 	}
 
@@ -882,6 +916,15 @@
 						>
 							{startLoading ? 'Starting...' : (activeGame?.status === 'running' || activeGame?.status === 'finished') ? 'Show table' : 'Start game'}
 						</button>
+						{#if activeGame?.createdBy === currentUser?.id}
+							<button
+								class="rounded-2xl bg-black hover:bg-rose-500 px-4 py-3 font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-60"
+								disabled={cancelLoading}
+								onclick={() => handleCancelGame()}
+							>
+								{cancelLoading ? 'Canceling...' : 'Cancel game'}
+							</button>
+						{/if}
 						<button
 							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"
 							onclick={() => {

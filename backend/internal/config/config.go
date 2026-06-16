@@ -12,6 +12,7 @@ type Environ struct {
 	JwtKey                   string `env:"JWT_KEY"`
 	OnnxModelPath            string `env:"ONNX_MODEL_PATH"`
 	OnnxRuntimeSharedLibPath string `env:"ONNXRUNTIME_SHARED_LIBRARY_PATH"`
+	DbPath                   string `env:"DB_PATH"`
 }
 
 var env Environ

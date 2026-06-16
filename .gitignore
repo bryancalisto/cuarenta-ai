@@ -165,3 +165,4 @@ checkpoints/
 cuarenta_policy_iter*.pt
 trajectories
 todo
+*.db

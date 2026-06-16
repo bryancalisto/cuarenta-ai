@@ -95,3 +95,75 @@ func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 		t.Errorf("Expected DurationSeconds to be %d, got %d", expectedDuration, updatedGame.DurationSeconds)
 	}
 }
+
+func TestCancelGame(t *testing.T) {
+	t.Run("creator can cancel game and it is deleted", func(t *testing.T) {
+		// arrange
+		clockMock := clock.NewMock()
+		DB = NewDatabase(clockMock)
+		creatorID := "creator-1"
+		creator := models.HumanPlayer{
+			UserId: creatorID,
+			Index:  1,
+			Team:   1,
+		}
+		gameObj, _ := DB.CreateGame(creatorID, creator)
+
+		// Create a session so we can test that it gets cleaned up too
+		session := newGameSession(gameObj)
+		sessions.mu.Lock()
+		sessions.m[normalizeGameId(gameObj.Id)] = session
+		sessions.mu.Unlock()
+
+		// act
+		canceledGame, err := DB.CancelGame(gameObj.Id, creatorID)
+		if err != nil {
+			t.Fatalf("CancelGame failed: %v", err)
+		}
+
+		// Clean up session (normally done in controller, mock here to assert)
+		deleteSession(gameObj.Id)
+
+		// assert
+		if canceledGame.Status != "canceled" {
+			t.Errorf("Expected status to be 'canceled', got %s", canceledGame.Status)
+		}
+
+		_, exists := DB.GetGame(gameObj.Id)
+		if exists {
+			t.Error("Expected game to be deleted from DB, but it still exists")
+		}
+
+		_, sessionExists := getSession(gameObj.Id)
+		if sessionExists {
+			t.Error("Expected game session to be deleted, but it still exists")
+		}
+	})
+
+	t.Run("non-creator cannot cancel game", func(t *testing.T) {
+		// arrange
+		clockMock := clock.NewMock()
+		DB = NewDatabase(clockMock)
+		creatorID := "creator-1"
+		creator := models.HumanPlayer{
+			UserId: creatorID,
+			Index:  1,
+			Team:   1,
+		}
+		gameObj, _ := DB.CreateGame(creatorID, creator)
+
+		// act
+		_, err := DB.CancelGame(gameObj.Id, "non-creator")
+
+		// assert
+		if err != ErrForbiddenAction {
+			t.Errorf("Expected ErrForbiddenAction, got %v", err)
+		}
+
+		_, exists := DB.GetGame(gameObj.Id)
+		if !exists {
+			t.Error("Expected game to still exist in DB")
+		}
+	})
+}
+

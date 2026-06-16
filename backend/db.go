@@ -2,11 +2,14 @@ package main
 
 import (
 	"crypto/rand"
+	"cuarenta/internal/config"
 	"cuarenta/internal/models"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,12 +17,67 @@ import (
 	"github.com/benbjohnson/clock"
 )
 
+// to be able to write it to disk
+type serializableDatabase struct {
+	Users     map[string]models.User
+	Games     map[string]models.Game
+	Tickets   map[string]models.WsTicket
+	CreatedAt time.Time
+}
+
 type Database struct {
-	clock   clock.Clock
-	mu      sync.RWMutex
-	users   map[string]models.User
-	games   map[string]models.Game
-	tickets map[string]models.WsTicket
+	clock     clock.Clock
+	mu        sync.RWMutex
+	users     map[string]models.User
+	games     map[string]models.Game
+	tickets   map[string]models.WsTicket
+	createdAt time.Time
+}
+
+func (d *Database) WriteToDisk() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dbPath := config.GetEnv().DbPath
+
+	file, err := os.Create(dbPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+	err = encoder.Encode(serializableDatabase{Users: d.users, Games: d.games, Tickets: d.tickets})
+	if err != nil {
+		return err
+	}
+	fmt.Println("DB successfully saved to ", dbPath)
+	return nil
+}
+
+func (d *Database) LoadFromDisk() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	dbPath := config.GetEnv().DbPath
+	file, err := os.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	decoder := gob.NewDecoder(file)
+	serDb := serializableDatabase{}
+	err = decoder.Decode(&serDb)
+	if err != nil {
+		return err
+	}
+
+	d.createdAt = serDb.CreatedAt
+	d.games = serDb.Games
+	d.tickets = serDb.Tickets
+	d.users = serDb.Users
+
+	return nil
 }
 
 var (
@@ -37,14 +95,17 @@ var (
 	ErrInvalidTeam             = errors.New("invalid team")
 	ErrSeatTeamMismatch        = errors.New("seat does not belong to team")
 	ErrAlreadyInGame           = errors.New("player already in game")
+	ErrLoadDbFromDisk          = errors.New("could not load DB from disk")
+	ErrWriteDbToDisk           = errors.New("could not write DB into disk")
 )
 
 func NewDatabase(clock clock.Clock) *Database {
 	return &Database{
-		clock:   clock,
-		users:   make(map[string]models.User),
-		games:   make(map[string]models.Game),
-		tickets: make(map[string]models.WsTicket),
+		clock:     clock,
+		createdAt: clock.Now().UTC(),
+		users:     make(map[string]models.User),
+		games:     make(map[string]models.Game),
+		tickets:   make(map[string]models.WsTicket),
 	}
 }
 
@@ -234,6 +295,25 @@ func (db *Database) StartGame(gameId string, requesterId string) (models.Game, e
 	game.Status = "running"
 	game.StartedAt = db.clock.Now().UTC().Format(time.RFC3339)
 	db.games[gameId] = game
+	return game, nil
+}
+
+func (db *Database) CancelGame(gameId string, requesterId string) (models.Game, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	gameId = normalizeGameId(gameId)
+	game, ok := db.games[gameId]
+	if !ok {
+		return models.Game{}, ErrGameNotFound
+	}
+	if game.CreatedBy != requesterId {
+		return models.Game{}, ErrForbiddenAction
+	}
+
+	delete(db.games, gameId)
+
+	game.Status = "canceled"
 	return game, nil
 }
 

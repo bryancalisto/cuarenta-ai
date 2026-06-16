@@ -134,6 +134,11 @@ export async function startGame(token: string, gameId: string): Promise<Game> {
 	return data.game;
 }
 
+export async function cancelGame(token: string, gameId: string): Promise<{ message: string }> {
+	return postJson<{ message: string }>(`/games/${encodeURIComponent(gameId)}/cancel`, token, {});
+}
+
+
 export async function getWebsocketTicket(token: string): Promise<string> {
 	const response = await fetch(buildUrl('/auth/ws-ticket'), {
 		method: 'POST',
