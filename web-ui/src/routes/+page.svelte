@@ -136,7 +136,7 @@
 
 			if (payload.type === 'game.snapshot') {
 				activeGame = payload.game;
-				if (payload.game.status === 'running') {
+				if (payload.game.status === 'running' || (payload.game.status === 'finished' && screen !== 'lobby')) {
 					screen = 'game';
 					mainMessage = '';
 				} else {
@@ -429,6 +429,9 @@
 	}
 
 	function formatGameStatus(game: Game) {
+		if (game.status === 'finished') {
+			return 'Finished';
+		}
 		return game.status === 'running' ? 'In progress' : 'Lobby';
 	}
 
@@ -868,16 +871,16 @@
 					<div class="mt-4 grid gap-3">
 						<button
 							class="rounded-2xl bg-amber-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
-							disabled={startLoading || (activeGame?.status !== 'running' && activeGame?.createdBy !== currentUser?.id)}
+							disabled={startLoading || (activeGame?.status !== 'running' && activeGame?.status !== 'finished' && activeGame?.createdBy !== currentUser?.id)}
 							onclick={() => {
-								if (activeGame?.status === 'running') {
+								if (activeGame?.status === 'running' || activeGame?.status === 'finished') {
 									screen = 'game';
 								} else {
 									void beginGame();
 								}
 							}}
 						>
-							{startLoading ? 'Starting...' : activeGame?.status === 'running' ? 'Show table' : 'Start game'}
+							{startLoading ? 'Starting...' : (activeGame?.status === 'running' || activeGame?.status === 'finished') ? 'Show table' : 'Start game'}
 						</button>
 						<button
 							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"

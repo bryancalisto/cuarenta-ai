@@ -32,6 +32,7 @@ export type Game = {
 	winner?: number | null;
 	done?: boolean;
 	deckRemaining?: number;
+	durationSeconds?: number;
 	createdBy: string;
 	createdAt: string;
 	startedAt?: string;

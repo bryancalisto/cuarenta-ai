@@ -271,6 +271,14 @@ func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {
 	return matches
 }
 
+func getGameDurationSeconds(game models.Game) int {
+	duration, err := time.Parse(time.RFC3339, game.CreatedAt)
+	if err != nil {
+		log.Fatal("Failed to parsed date")
+	}
+	return int(DB.clock.Now().Sub(duration).Seconds())
+}
+
 func playAITurn(gameId string) error {
 	base, exists := DB.GetGame(gameId)
 
@@ -316,6 +324,7 @@ func playAITurn(gameId string) error {
 	_, _, done, _, err := session.env.Step(action)
 
 	if done {
+		base.DurationSeconds = getGameDurationSeconds(base)
 		log.Println("Game has ended in AI turn")
 	}
 
@@ -452,6 +461,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	_, _, done, _, err := session.env.Step(action)
 
 	if done {
+		base.DurationSeconds = getGameDurationSeconds(base)
 		log.Println("Game has ended in human turn")
 	}
 

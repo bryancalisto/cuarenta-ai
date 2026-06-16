@@ -9,13 +9,9 @@
 
 	let duration = $state('');
 
-	function formatDuration(start: string) {
-		const startTime = new Date(start).getTime();
-		const now = new Date().getTime();
-		const diff = now - startTime;
-
-		const minutes = Math.floor(diff / 60000);
-		const seconds = Math.floor((diff % 60000) / 1000);
+	function formatDuration(durationSeconds: number) {
+		const minutes = Math.floor(durationSeconds / 60);
+		const seconds = Math.floor((durationSeconds % 60));
 
 		if (minutes > 0) {
 			return `${minutes}m ${seconds}s`;
@@ -24,8 +20,8 @@
 	}
 
 	onMount(() => {
-		if (game.startedAt) {
-			duration = formatDuration(game.startedAt);
+		if (game.durationSeconds) {
+			duration = formatDuration(game.durationSeconds);
 		}
 	});
 
@@ -68,7 +64,7 @@
 		position: fixed;
 		inset: 0;
 		background: rgba(15, 23, 42, 0.9);
-		backdrop-blur: 8px;
+		backdrop-filter: blur(8px);
 		display: flex;
 		align-items: center;
 		justify-content: center;

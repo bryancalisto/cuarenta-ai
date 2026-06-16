@@ -203,7 +203,7 @@ class CuarentaEnv:
                         if carton_points % 2 != 0:
                             carton_points += 1
                         
-                        s.scores[team] += max(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS) 
+                        s.scores[team] += min(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS) 
 
                         # If there's carton points, give a reward
                         is_current_player_team = team == TEAMS[player] 

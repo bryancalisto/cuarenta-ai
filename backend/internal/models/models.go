@@ -47,6 +47,7 @@ type Game struct {
 	DeckRemaining   int             `json:"deckRemaining,omitempty"`
 	CreatedBy       string          `json:"createdBy"`
 	CreatedAt       string          `json:"createdAt"`
+	DurationSeconds int             `json:"durationSeconds"`
 	StartedAt       string          `json:"startedAt,omitempty"`
 	Status          string          `json:"status"`
 	PendingMoves    []Move          `json:"pendingMoves,omitempty"`
