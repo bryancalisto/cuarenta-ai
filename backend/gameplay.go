@@ -370,7 +370,7 @@ func playAITurns(gameId string) error {
 			break
 		}
 
-		time.Sleep(3 * time.Second)
+		// time.Sleep(1 * time.Second)
 
 		if err := playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)

@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 	"strings"
@@ -675,6 +676,7 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 		s.Winner = &winner
 		reward += 100
 		info["winner"] = team
+		log.Printf("Team %d won\n", team+1)
 		return e.Observe(player), reward, true, info, nil
 	}
 
@@ -692,6 +694,7 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 		if len(s.Deck) >= NumPlayers*HandSize {
 			e.redeal()
 		} else {
+			// count carton
 			for teamIdx := 0; teamIdx < 2; teamIdx++ {
 				cartonPoints := len(s.CardsCaptured[teamIdx]) - 19
 				if cartonPoints <= 0 {
@@ -701,11 +704,9 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 				if cartonPoints%2 != 0 {
 					cartonPoints++
 				}
-				if cartonPoints < MaxAchievablePointsByNonCaidaActions {
-					s.Scores[teamIdx] += MaxAchievablePointsByNonCaidaActions
-				} else {
-					s.Scores[teamIdx] += cartonPoints
-				}
+
+				s.Scores[teamIdx] = min(s.Scores[teamIdx]+cartonPoints, MaxAchievablePointsByNonCaidaActions)
+
 				if teamIdx == team {
 					reward += float64(cartonPoints)
 				}
@@ -719,6 +720,7 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 				}
 				s.Winner = &winner
 				info["winner"] = winner
+				log.Printf("Team %d won\n", team+1)
 				return e.Observe(s.CurrentPlayer), reward + 100, true, info, nil
 			}
 
