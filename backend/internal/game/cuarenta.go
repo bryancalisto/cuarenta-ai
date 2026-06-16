@@ -654,6 +654,7 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 			s.Table = removeCard(s.Table, captured)
 			s.CardsCaptured[team] = append(s.CardsCaptured[team], captured)
 		}
+		s.CardsCaptured[team] = append(s.CardsCaptured[team], action.Card)
 		s.LastPlaced = nil
 	} else {
 		s.Table = append(s.Table, action.Card)

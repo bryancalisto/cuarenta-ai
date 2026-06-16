@@ -81,7 +81,10 @@
 		const initialTable = new Set<number>(game.table || []);
 		for (let i = game.pendingMoves.length - 1; i >= 0; i--) {
 			const move = game.pendingMoves[i];
-			initialTable.delete(move.cardIndex);
+			// If it was a capture, the cardIndex was never left on the table
+			if (!move.captureIndices || move.captureIndices.length === 0) {
+				initialTable.delete(move.cardIndex);
+			}
 			if (move.captureIndices) {
 				for (const captureIdx of move.captureIndices) {
 					initialTable.add(captureIdx);
@@ -93,11 +96,12 @@
 		const displayedTable = new Set(initialTable);
 		for (let i = 0; i < displayedMoveCount && i < game.pendingMoves.length; i++) {
 			const move = game.pendingMoves[i];
-			displayedTable.add(move.cardIndex);
-			if (move.captureIndices) {
+			if (move.captureIndices && move.captureIndices.length > 0) {
 				for (const captureIdx of move.captureIndices) {
 					displayedTable.delete(captureIdx);
 				}
+			} else {
+				displayedTable.add(move.cardIndex);
 			}
 		}
 

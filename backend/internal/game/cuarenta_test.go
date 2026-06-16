@@ -66,3 +66,40 @@ func TestLegalActionsForCard_NoCapture(t *testing.T) {
 		t.Errorf("Expected the legal action to be a place, but it was a capture")
 	}
 }
+
+func TestCaptureCount(t *testing.T) {
+	// Setup a table with a card that can be captured
+	table := []Card{
+		{Rank: Cinco, Suit: Brillos},
+	}
+	
+	env := &Env{
+		state: &State{
+			Table: table,
+			Hands: map[int][]Card{
+				0: {{Rank: Cinco, Suit: CorazonesRojos}},
+				1: {{Rank: Siete, Suit: Treboles}},
+				2: {{Rank: Siete, Suit: Brillos}},
+				3: {{Rank: Siete, Suit: CorazonesNegros}},
+			},
+			CurrentPlayer: 0,
+			Scores: [2]int{0, 0},
+			CardsCaptured: [2][]Card{},
+		},
+	}
+	
+	action := Action{
+		Card:    Card{Rank: Cinco, Suit: CorazonesRojos},
+		Capture: []Card{{Rank: Cinco, Suit: Brillos}},
+	}
+	
+	_, _, _, _, err := env.Step(action)
+	if err != nil {
+		t.Fatalf("Step failed: %v", err)
+	}
+	
+	capturedCount := len(env.state.CardsCaptured[0])
+	if capturedCount != 2 {
+		t.Errorf("Expected 2 cards captured (played + table card), got %d", capturedCount)
+	}
+}
