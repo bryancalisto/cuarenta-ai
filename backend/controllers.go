@@ -369,7 +369,6 @@ func CancelGameCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
 }
 
-
 func PlayGameCtl(c *gin.Context) {
 	var dto PlayGameDTO
 	if err := c.ShouldBindJSON(&dto); err != nil {

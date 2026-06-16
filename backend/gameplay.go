@@ -272,7 +272,7 @@ func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {
 }
 
 func getGameDurationSeconds(game models.Game) int {
-	duration, err := time.Parse(time.RFC3339, game.CreatedAt)
+	duration, err := time.Parse(time.RFC3339, game.StartedAt)
 	if err != nil {
 		log.Fatal("Failed to parsed date")
 	}
