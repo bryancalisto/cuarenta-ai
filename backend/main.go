@@ -7,7 +7,6 @@ import (
 	"cuarenta/internal/models"
 	"log"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
 	"reflect"
@@ -121,7 +120,7 @@ func main() {
 	// r.GET("/debug/pprof/symbol", gin.WrapH(http.HandlerFunc(pprof.Symbol)))
 	// r.GET("/debug/pprof/trace", gin.WrapH(http.HandlerFunc(pprof.Trace)))
 	// // For the handlers that return a Handler interface:
-	r.GET("/debug/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+	// r.GET("/debug/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
 	// r.GET("/debug/pprof/heap", gin.WrapH(pprof.Handler("heap")))
 	// r.GET("/debug/pprof/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
 	// r.GET("/debug/pprof/block", gin.WrapH(pprof.Handler("block")))

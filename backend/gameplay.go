@@ -132,6 +132,11 @@ func sessionSnapshot(base models.Game, session *gameSession) models.Game {
 	} else {
 		snapshot.Status = "running"
 	}
+
+	// Reset capture selection state
+	snapshot.AwaitingCapture = false
+	snapshot.CaptureOptions = nil
+
 	return snapshot
 }
 
@@ -345,6 +350,11 @@ func playAITurns(gameId string) error {
 		_, isHumanSeat := session.humanSeats[currentSeat]
 
 		if isHumanSeat {
+			break
+		}
+
+		if state.Done {
+			log.Println("Skipping AI turns as game has ended")
 			break
 		}
 

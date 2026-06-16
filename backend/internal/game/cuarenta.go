@@ -573,17 +573,18 @@ func (e *Env) LegalActions() []Action {
 
 func (e *Env) LegalActionsForCard(played Card) []Action {
 	s := e.state
-	player := s.CurrentPlayer
-	actions := make([]Action, 0, len(s.Hands[player]))
-
-	// the card alone the player just throwed is a valid action
-	actions = append(actions, Action{Card: played})
+	actions := make([]Action, 0)
 
 	// according to the thrown card, there's a set of actions that can be taken
 	captures := ValidCaptures(played, s.Table)
-	for _, capSet := range captures {
-		action := Action{Card: played, Capture: canonicalCards(capSet)}
-		actions = append(actions, action)
+	if len(captures) > 0 {
+		for _, capSet := range captures {
+			action := Action{Card: played, Capture: canonicalCards(capSet)}
+			actions = append(actions, action)
+		}
+	} else {
+		// only if no captures are available, the card alone is a valid action
+		actions = append(actions, Action{Card: played})
 	}
 
 	return actions
