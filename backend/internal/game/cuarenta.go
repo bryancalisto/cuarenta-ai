@@ -394,10 +394,10 @@ type Env struct {
 	rng                  *rand.Rand
 	state                *State
 	caidaExposurePenalty float64
-	// gameSession *
+	aiTurnChan           chan int
 }
 
-func NewEnv(seed int64, caidaExposurePenalty float64) *Env {
+func NewEnv(seed int64, caidaExposurePenalty float64, aiTurnChan chan int) *Env {
 	var rng *rand.Rand
 	if seed != 0 {
 		rng = rand.New(rand.NewSource(seed))
@@ -407,6 +407,7 @@ func NewEnv(seed int64, caidaExposurePenalty float64) *Env {
 	return &Env{
 		rng:                  rng,
 		caidaExposurePenalty: caidaExposurePenalty,
+		aiTurnChan:           aiTurnChan,
 	}
 }
 
@@ -461,6 +462,9 @@ func (e *Env) newRound() {
 	s.Table = nil
 	s.LastPlaced = nil
 	s.CurrentPlayer = (s.CurrentPlayer + 1) % NumPlayers
+	if e.aiTurnChan != nil {
+		e.aiTurnChan <- s.CurrentPlayer
+	}
 }
 
 func cardsToBitVec(cards []Card) []float32 {

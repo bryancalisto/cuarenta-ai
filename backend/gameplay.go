@@ -151,10 +151,11 @@ func publishGameSnapshot(snapshot models.Game) {
 }
 
 func newGameSession(snapshot models.Game) *gameSession {
+	aiTurnChan := make(chan int, 1)
 	return &gameSession{
-		env:        game.NewEnv(time.Now().UnixNano(), 0),
+		env:        game.NewEnv(time.Now().UnixNano(), 0, aiTurnChan),
 		humanSeats: humanSeats(snapshot),
-		aiTurnChan: make(chan int, 1),
+		aiTurnChan: aiTurnChan,
 	}
 }
 
@@ -177,10 +178,6 @@ func startRunningGame(snapshot models.Game) (models.Game, error) {
 	}
 
 	publishGameSnapshot(updated)
-
-	// if err := playAITurns(snapshot.Id); err != nil {
-	// 	log.Fatalf("Error while running AI players moves 2: %v", err)
-	// }
 
 	session, ok := getSession(snapshot.Id)
 
@@ -292,14 +289,6 @@ func playAITurn(gameId string) error {
 	}
 
 	currentSeat := state.CurrentPlayer
-
-	// observe the table and hand
-	// encode the observation as model input
-	// pass the observation to the model
-	// decode the model output into an action
-	// update game based on that action
-	// send the updated game to the ui
-	// if the next player is AI agent too, repeat for him
 
 	legal := session.env.LegalActions()
 	if len(legal) == 0 {
@@ -452,10 +441,6 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	}
 
 	publishGameSnapshot(snapshot)
-
-	// if err := playAITurns(gameId); err != nil {
-	// 	log.Fatalf("Error while running AI players moves: %v", err)
-	// }
 
 	session.aiTurnChan <- snapshot.CurrentPlayer
 	return models.Game{}, nil
