@@ -30,11 +30,11 @@
 		return `P${index}`;
 	}
 
-	const myPlayer = game.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id);
-	const myArrayIndex = myPlayer ? myPlayer.index - 1 : undefined;
+	const myPlayer = $derived(game.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id));
+	const myArrayIndex = $derived(myPlayer ? myPlayer.index - 1 : undefined);
 
-	const currentPlayerIsHuman = game.currentPlayer !== undefined && game.humanPlayers.some((p: any) => p.index - 1 === game.currentPlayer && p.userId === currentUser?.id);
-	const isMyTurn = myArrayIndex !== undefined && game.currentPlayer === myArrayIndex;
+	const currentPlayerIsHuman = $derived(game.currentPlayer !== undefined && game.humanPlayers.some((p: any) => p.index - 1 === game.currentPlayer && p.userId === currentUser?.id));
+	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
 
 	let displayedMoveCount = $state(0);
 	let isSelectingCapture = $state(false);
