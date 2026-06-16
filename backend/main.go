@@ -92,7 +92,7 @@ func main() {
 	// Start recurrent jobs runner
 	recurrentJobsCtx, cancelRecurrentJobs := context.WithCancel(context.Background())
 	defer cancelRecurrentJobs()
-	recurrentJobs := []RecurrentJob{{ticker: time.NewTicker(1 * time.Minute), handler: deleteExpiredWsTicketsHandler}}
+	recurrentJobs := []RecurrentJob{{ticker: time.NewTicker(10 * time.Minute), handler: deleteExpiredWsTicketsHandler}}
 	go runRecurrentJobs(recurrentJobsCtx, recurrentJobs)
 
 	// add default user for convenient testing

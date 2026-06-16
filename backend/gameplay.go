@@ -102,7 +102,7 @@ func deleteSession(gameId string) {
 	delete(sessions.m, normalizeGameId(gameId))
 }
 
-func sessionSnapshot(base models.Game, session *gameSession) models.Game {
+func sessionSnapshot(base models.Game, session *gameSession, pending ...models.Move) models.Game {
 	state := session.env.State()
 	snapshot := base
 	snapshot.TimeSteps = session.stepCount
@@ -136,6 +136,13 @@ func sessionSnapshot(base models.Game, session *gameSession) models.Game {
 	// Reset capture selection state
 	snapshot.AwaitingCapture = false
 	snapshot.CaptureOptions = nil
+
+	// Include pending moves if any
+	if len(pending) > 0 {
+		snapshot.PendingMoves = pending
+	} else {
+		snapshot.PendingMoves = nil
+	}
 
 	return snapshot
 }
@@ -314,13 +321,18 @@ func playAITurn(gameId string) error {
 
 	session.stepCount++
 
-	snapshot := sessionSnapshot(base, session)
+	move := models.Move{
+		CardIndex:      action.Card.Index(),
+		CaptureIndices: cardIndices(action.Capture),
+		PlayerIndex:    currentSeat,
+	}
+
+	snapshot := sessionSnapshot(base, session, move)
 	if err != nil {
 		publishGameSnapshot(snapshot)
 		return err
 	}
 
-	snapshot = sessionSnapshot(base, session)
 	publishGameSnapshot(snapshot)
 	return nil
 }
@@ -358,7 +370,7 @@ func playAITurns(gameId string) error {
 			break
 		}
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		if err := playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
@@ -444,7 +456,14 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	}
 
 	session.stepCount++
-	snapshot := sessionSnapshot(base, session)
+
+	move := models.Move{
+		CardIndex:      action.Card.Index(),
+		CaptureIndices: cardIndices(action.Capture),
+		PlayerIndex:    currentSeat,
+	}
+
+	snapshot := sessionSnapshot(base, session, move)
 	if err != nil {
 		publishGameSnapshot(snapshot)
 		return snapshot, err
