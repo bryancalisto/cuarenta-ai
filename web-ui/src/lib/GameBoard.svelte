@@ -289,8 +289,8 @@
 		display: flex;
 		flex-direction: column;
 		justify-content: center;
+		height: 9rem;
 		align-items: center;
-		border: 2px solid white/20;
 		border-radius: 1rem;
 		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
 		padding: 3rem;

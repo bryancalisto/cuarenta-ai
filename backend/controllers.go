@@ -281,6 +281,21 @@ func SignInCtl(c *gin.Context) {
 	})
 }
 
+func RefreshJwtCtl(c *gin.Context) {
+	userId := c.GetString("userId")
+
+	token, err := auth.GenerateJWT(userId)
+	if err != nil {
+		log.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate access token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"accessToken": token,
+	})
+}
+
 func CreateWsTicketCtl(c *gin.Context) {
 	userId := c.GetString("userId")
 	ticket := DB.CreateWsTicket(userId)

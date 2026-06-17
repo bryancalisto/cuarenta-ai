@@ -47,12 +47,7 @@ func ValidateJWT(tokenString string) (bool, string, error) {
 	return token.Valid, userId, nil
 }
 
-func refreshJWT(tokenString string) (string, error) {
-	valid, userId, err := ValidateJWT(tokenString)
-	if err != nil || !valid {
-		return "", err
-	}
-
+func RefreshJWT(userId string) (string, error) {
 	return GenerateJWT(userId)
 }
 

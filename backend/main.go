@@ -143,6 +143,7 @@ func main() {
 	authGroup.POST("/sign-up", SignUpCtl)
 	authGroup.POST("/sign-in", SignInCtl)
 	authGroup.Use(auth.AuthMiddleware())
+	authGroup.POST("/refresh-token", RefreshJwtCtl)
 	authGroup.POST("/ws-ticket", CreateWsTicketCtl)
 
 	api := r.Group("")

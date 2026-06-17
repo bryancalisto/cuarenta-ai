@@ -164,7 +164,7 @@ func publishGameSnapshot(snapshot models.Game) {
 func newGameSession(snapshot models.Game) *gameSession {
 	aiTurnChan := make(chan int, 1)
 	return &gameSession{
-		env:        game.NewEnv(time.Now().UnixNano(), 0, aiTurnChan),
+		env:        game.NewEnv(time.Now().UnixNano(), aiTurnChan),
 		humanSeats: humanSeats(snapshot),
 		aiTurnChan: aiTurnChan,
 	}
@@ -320,7 +320,7 @@ func playAITurn(gameId string) error {
 		action = legal[0]
 	}
 
-	_, _, done, _, err := session.env.Step(action)
+	_, done, _, err := session.env.Step(action)
 
 	if done {
 		base.DurationSeconds = getGameDurationSeconds(base)
@@ -457,7 +457,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 		return models.Game{}, ErrIllegalAction
 	}
 
-	_, _, done, _, err := session.env.Step(action)
+	_, done, _, err := session.env.Step(action)
 
 	if done {
 		base.DurationSeconds = getGameDurationSeconds(base)

@@ -1,3 +1,5 @@
+import axios from 'axios';
+
 export type PublicUser = {
 	id: string;
 	email: string;
@@ -65,32 +67,31 @@ export type WsMessage =
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080').replace(/\/$/, '');
 
-function buildUrl(path: string): string {
-	return new URL(path, API_BASE_URL).toString();
+const apiClient = axios.create({
+	baseURL: API_BASE_URL
+});
+
+let signOutCallback: (() => void) | null = null;
+
+export function configureApi(onSignOut: () => void): void {
+	signOutCallback = onSignOut;
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-	const text = await response.text();
-	const data = text ? JSON.parse(text) : null;
-
-	if (!response.ok) {
-		throw new Error(data?.error ?? 'Request failed');
+apiClient.interceptors.response.use(
+	response => response,
+	error => {
+		if (error.response?.status === 401 && signOutCallback) {
+			signOutCallback();
+		}
+		return Promise.reject(error);
 	}
-
-	return data as T;
-}
+);
 
 async function postJson<T>(path: string, token: string | null, body: unknown): Promise<T> {
-	const response = await fetch(buildUrl(path), {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			...(token ? { Authorization: `Bearer ${token}` } : {})
-		},
-		body: JSON.stringify(body)
+	const response = await apiClient.post(path, body, {
+		headers: token ? { Authorization: `Bearer ${token}` } : {}
 	});
-
-	return readJson<T>(response);
+	return response.data as T;
 }
 
 export async function signUp(email: string, password: string): Promise<AuthResponse> {
@@ -101,15 +102,19 @@ export async function signIn(email: string, password: string): Promise<AuthRespo
 	return postJson<AuthResponse>('/auth/sign-in', null, { email, password });
 }
 
+export async function refreshToken(): Promise<string> {
+	const response = await apiClient.post('/auth/refresh-token', {});
+	return response.data.accessToken;
+}
+
 export async function getGame(token: string, gameId: string): Promise<Game> {
-	const response = await fetch(buildUrl(`/games/${encodeURIComponent(gameId)}`), {
+	const response = await apiClient.get(`/games/${encodeURIComponent(gameId)}`, {
 		headers: {
 			Authorization: `Bearer ${token}`
 		}
 	});
 
-	const data = await readJson<{ game: Game }>(response);
-	return data.game;
+	return response.data.game;
 }
 
 export async function createGame(
@@ -140,19 +145,18 @@ export async function cancelGame(token: string, gameId: string): Promise<{ messa
 
 
 export async function getWebsocketTicket(token: string): Promise<string> {
-	const response = await fetch(buildUrl('/auth/ws-ticket'), {
-		method: 'POST',
+	const response = await apiClient.post('/auth/ws-ticket', {}, {
 		headers: {
 			Authorization: `Bearer ${token}`
 		}
 	});
 
-	const data = await readJson<{ ticket: string }>(response);
-	return data.ticket;
+	return response.data.ticket;
 }
 
 export function openGameSocket(ticket: string): WebSocket {
-	const url = new URL(buildUrl('/ws'));
+	const url = new URL(API_BASE_URL);
+	url.pathname = '/ws';
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	url.searchParams.set('ticket', ticket);
 	return new WebSocket(url.toString());

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -392,13 +393,12 @@ type State struct {
 }
 
 type Env struct {
-	rng                  *rand.Rand
-	state                *State
-	caidaExposurePenalty float64
-	aiTurnChan           chan int
+	rng        *rand.Rand
+	state      *State
+	aiTurnChan chan int
 }
 
-func NewEnv(seed int64, caidaExposurePenalty float64, aiTurnChan chan int) *Env {
+func NewEnv(seed int64, aiTurnChan chan int) *Env {
 	var rng *rand.Rand
 	if seed != 0 {
 		rng = rand.New(rand.NewSource(seed))
@@ -406,9 +406,8 @@ func NewEnv(seed int64, caidaExposurePenalty float64, aiTurnChan chan int) *Env 
 		rng = rand.New(rand.NewSource(rand.Int63()))
 	}
 	return &Env{
-		rng:                  rng,
-		caidaExposurePenalty: caidaExposurePenalty,
-		aiTurnChan:           aiTurnChan,
+		rng:        rng,
+		aiTurnChan: aiTurnChan,
 	}
 }
 
@@ -612,28 +611,24 @@ func removeCard(cards []Card, target Card) []Card {
 	return cards
 }
 
-func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, error) {
+// Moves one step on the game environment.
+// Returns (observation, done, info, error)
+func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 	s := e.state
 	if s.Done {
-		return nil, 0, true, nil, fmt.Errorf("game is already over")
+		return nil, true, nil, fmt.Errorf("game is already over")
 	}
 
 	player := s.CurrentPlayer
 	legal := e.legalActions()
 	if !actionExists(action, legal) {
-		return nil, 0, false, nil, fmt.Errorf("illegal action: %s", action.String())
+		return nil, false, nil, fmt.Errorf("illegal action: %s", action.String())
 	}
 
 	hand := s.Hands[player]
-	found := false
-	for _, card := range hand {
-		if card == action.Card {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(hand, action.Card)
 	if !found {
-		return nil, 0, false, nil, fmt.Errorf("player %d does not hold %s", player, action.Card)
+		return nil, false, nil, fmt.Errorf("player %d does not hold %s", player, action.Card)
 	}
 
 	s.Hands[player] = removeCard(s.Hands[player], action.Card)
@@ -649,7 +644,6 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 		"caida_exposure_penalty": 0.0,
 	}
 
-	caidaExposurePenalty := 0.0
 	if len(action.Capture) > 0 {
 		for _, captured := range canonicalCards(action.Capture) {
 			s.Table = removeCard(s.Table, captured)
@@ -660,24 +654,17 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 	} else {
 		s.Table = append(s.Table, action.Card)
 		s.LastPlaced = &action.Card
-		caidaExposurePenalty = e.caidaExposurePenaltyForNextPlayer(action.Card)
-		info["caida_exposure_penalty"] = caidaExposurePenalty
 	}
 
 	s.Scores[team] += points
-	reward := float64(points) - caidaExposurePenalty
-	if len(action.Capture) > 0 {
-		reward += float64(len(action.Capture)) * 0.25
-	}
 
 	if s.Scores[team] >= WinScore {
 		s.Done = true
 		winner := team
 		s.Winner = &winner
-		reward += 100
 		info["winner"] = team
 		log.Printf("Team %d won\n", team+1)
-		return e.Observe(player), reward, true, info, nil
+		return e.Observe(player), true, info, nil
 	}
 
 	s.CurrentPlayer = (player + 1) % NumPlayers
@@ -706,10 +693,6 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 				}
 
 				s.Scores[teamIdx] = min(s.Scores[teamIdx]+cartonPoints, MaxAchievablePointsByNonCaidaActions)
-
-				if teamIdx == team {
-					reward += float64(cartonPoints)
-				}
 			}
 
 			if s.Scores[0] >= WinScore || s.Scores[1] >= WinScore {
@@ -721,32 +704,14 @@ func (e *Env) step(action Action) (Observation, float64, bool, map[string]any, e
 				s.Winner = &winner
 				info["winner"] = winner
 				log.Printf("Team %d won\n", team+1)
-				return e.Observe(s.CurrentPlayer), reward + 100, true, info, nil
+				return e.Observe(s.CurrentPlayer), true, info, nil
 			}
 
 			e.newRound()
 		}
 	}
 
-	return e.Observe(s.CurrentPlayer), reward, false, info, nil
-}
-
-func (e *Env) caidaExposurePenaltyForNextPlayer(played Card) float64 {
-	if e.caidaExposurePenalty <= 0 {
-		return 0
-	}
-
-	s := e.state
-	nextPlayer := (s.CurrentPlayer + 1) % NumPlayers
-	for _, responseCard := range s.Hands[nextPlayer] {
-		for _, captureSet := range ValidCaptures(responseCard, s.Table) {
-			if containsCard(captureSet, played) && detectCaida(responseCard, captureSet, &played) {
-				return e.caidaExposurePenalty
-			}
-		}
-	}
-
-	return 0
+	return e.Observe(s.CurrentPlayer), false, info, nil
 }
 
 func containsCard(cards []Card, target Card) bool {
@@ -794,7 +759,7 @@ func (e *Env) Render() string {
 	return strings.Join(lines, "\n")
 }
 
-func (e *Env) Step(action Action) (Observation, float64, bool, map[string]any, error) {
+func (e *Env) Step(action Action) (Observation, bool, map[string]any, error) {
 	return e.step(action)
 }
 
