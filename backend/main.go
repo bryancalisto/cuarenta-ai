@@ -96,6 +96,13 @@ func dbToDiskHandler() {
 
 func cancelRunningGames() {
 	nCanceled := DB.CancelInProgressGames()
+
+	sessions.mu.Lock()
+	for _, session := range sessions.m {
+		close(session.aiTurnChan)
+	}
+	sessions.mu.Unlock()
+
 	log.Printf("Canceled %d games before shutdown\n", nCanceled)
 }
 

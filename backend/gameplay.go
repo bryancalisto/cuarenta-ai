@@ -252,12 +252,9 @@ func matchLegalAction(action game.Action, legal []game.Action) (game.Action, boo
 }
 
 func aiTurnsRunner(gameId string, aiTurnChan chan int) {
-	for {
-		<-aiTurnChan
-		// run pending ai turns
+	for range aiTurnChan {
 		playAITurns(gameId)
 	}
-
 }
 
 func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {

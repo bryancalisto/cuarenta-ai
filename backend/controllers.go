@@ -385,6 +385,10 @@ func CancelGameCtl(c *gin.Context) {
 	}
 
 	hub.broadcast(game)
+
+	if session, ok := getSession(gameId); ok {
+		close(session.aiTurnChan)
+	}
 	deleteSession(gameId)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
@@ -500,7 +504,7 @@ func WsCtl(c *gin.Context) {
 				sendWsError(client, http.StatusBadRequest, "Invalid action payload")
 				continue
 			}
-			log.Println("game.action:", payload)
+			// log.Println("game.action:", payload)
 			gameId, ok := payload["gameId"].(string)
 			if !ok {
 				sendWsError(client, http.StatusBadRequest, "Missing gameId")
