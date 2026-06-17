@@ -37,7 +37,7 @@ export type Game = {
 	createdAt: string;
 	startedAt?: string;
 	status: string;
-	pendingMoves?: Move[];
+	move?: Move;
 	captureOptions?: CaptureOption[];
 	awaitingCapture?: boolean;
 };
@@ -148,7 +148,6 @@ export async function getWebsocketTicket(token: string): Promise<string> {
 	});
 
 	const data = await readJson<{ ticket: string }>(response);
-	console.log('tickkk', data.ticket)
 	return data.ticket;
 }
 
@@ -156,6 +155,5 @@ export function openGameSocket(ticket: string): WebSocket {
 	const url = new URL(buildUrl('/ws'));
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	url.searchParams.set('ticket', ticket);
-	console.log('URLLL:', url.toString())
 	return new WebSocket(url.toString());
 }

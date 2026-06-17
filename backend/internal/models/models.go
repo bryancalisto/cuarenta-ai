@@ -50,7 +50,7 @@ type Game struct {
 	DurationSeconds int             `json:"durationSeconds"`
 	StartedAt       string          `json:"startedAt,omitempty"`
 	Status          string          `json:"status"`
-	PendingMoves    []Move          `json:"pendingMoves,omitempty"`
+	Move            *Move           `json:"move,omitempty"`
 	CaptureOptions  []CaptureOption `json:"captureOptions,omitempty"`
 	AwaitingCapture bool            `json:"awaitingCapture,omitempty"`
 }

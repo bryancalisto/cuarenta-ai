@@ -102,7 +102,7 @@ func deleteSession(gameId string) {
 	delete(sessions.m, normalizeGameId(gameId))
 }
 
-func sessionSnapshot(base models.Game, session *gameSession, pending ...models.Move) models.Game {
+func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) models.Game {
 	state := session.env.State()
 	snapshot := base
 	snapshot.TimeSteps = session.stepCount
@@ -137,11 +137,10 @@ func sessionSnapshot(base models.Game, session *gameSession, pending ...models.M
 	snapshot.AwaitingCapture = false
 	snapshot.CaptureOptions = nil
 
-	// Include pending moves if any
-	if len(pending) > 0 {
-		snapshot.PendingMoves = pending
+	if move != nil {
+		snapshot.Move = move
 	} else {
-		snapshot.PendingMoves = nil
+		snapshot.Move = nil
 	}
 
 	return snapshot
@@ -174,13 +173,13 @@ func newGameSession(snapshot models.Game) *gameSession {
 func prepareSession(snapshot models.Game) (*gameSession, models.Game, error) {
 	session, ok := getSession(snapshot.Id)
 	if ok {
-		return session, sessionSnapshot(snapshot, session), nil
+		return session, sessionSnapshot(snapshot, session, nil), nil
 	}
 
 	session = newGameSession(snapshot)
 	session.env.Reset()
 	setSession(snapshot.Id, session)
-	return session, sessionSnapshot(snapshot, session), nil
+	return session, sessionSnapshot(snapshot, session, nil), nil
 }
 
 func startRunningGame(snapshot models.Game) (models.Game, error) {
@@ -197,7 +196,7 @@ func startRunningGame(snapshot models.Game) (models.Game, error) {
 		log.Fatal("Failed on getting session on game start")
 	}
 
-	updated = sessionSnapshot(snapshot, session)
+	updated = sessionSnapshot(snapshot, session, nil)
 
 	go aiTurnsRunner(updated.Id, session.aiTurnChan)
 
@@ -303,7 +302,7 @@ func playAITurn(gameId string) error {
 	}
 
 	if state.Done {
-		snapshot := sessionSnapshot(base, session)
+		snapshot := sessionSnapshot(base, session, nil)
 		publishGameSnapshot(snapshot)
 		return nil
 	}
@@ -336,7 +335,7 @@ func playAITurn(gameId string) error {
 		PlayerIndex:    currentSeat,
 	}
 
-	snapshot := sessionSnapshot(base, session, move)
+	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
 		publishGameSnapshot(snapshot)
 		return err
@@ -379,7 +378,7 @@ func playAITurns(gameId string) error {
 			break
 		}
 
-		// time.Sleep(1 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		if err := playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
@@ -411,7 +410,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 		return models.Game{}, fmt.Errorf("game session is not initialized")
 	}
 	if state.Done {
-		snapshot := sessionSnapshot(base, session)
+		snapshot := sessionSnapshot(base, session, nil)
 		publishGameSnapshot(snapshot)
 		return snapshot, nil
 	}
@@ -437,7 +436,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 
 	if len(matchingActions) > 1 && len(dto.CaptureIndices) == 0 {
 		// Multiple captures possible, ask user to choose
-		snapshot := sessionSnapshot(base, session)
+		snapshot := sessionSnapshot(base, session, nil)
 		snapshot.AwaitingCapture = true
 		snapshot.CaptureOptions = make([]models.CaptureOption, len(matchingActions))
 		for i, act := range matchingActions {
@@ -473,7 +472,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 		PlayerIndex:    currentSeat,
 	}
 
-	snapshot := sessionSnapshot(base, session, move)
+	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
 		publishGameSnapshot(snapshot)
 		return snapshot, err

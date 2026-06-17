@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { fade } from 'svelte/transition';
 	import type { Game } from './api';
 	import GameResultsDialog from './GameResultsDialog.svelte';
 
@@ -9,6 +10,10 @@
 		onSelectCapture: (captureIndices: number[]) => void;
 		onReturnToLobby: () => void;
 	}>();
+
+	$effect(() => {
+		$inspect(game);
+	});
 
 	const suits = ['♦️', '♥️', '♠️', '♣️'];
 	const ranks = ['A', '2', '3', '4', '5', '6', '7', 'J', 'Q', 'K'];
@@ -40,8 +45,14 @@
 
 	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
 
-	let displayedMoveCount = $state(0);
 	let isSelectingCapture = $state(false);
+	let lastMoveNotification = $state<{ cardIndex: number; captureIndices: number[]; playerIndex: number } | null>(null);
+	let showNotification = $state(false);
+	let displayedTable: number[] = $state([]); 
+	
+	$effect(() => {
+	 	displayedTable = game.table ?? [];
+	});
 
 	// Reset capture selection when a new capture prompt appears
 	$effect(() => {
@@ -50,73 +61,29 @@
 		}
 	});
 
-	// Determine if we're still animating pending moves
-	const isAnimatingMoves = (): boolean => {
-		return game.pendingMoves ? displayedMoveCount < game.pendingMoves.length : false;
-	};
-
 	// Get the current player during animation (before pending moves)
 	const getDisplayedCurrentPlayer = (): number | undefined => {
-		if (!isAnimatingMoves() || !game.pendingMoves) {
-			return game.currentPlayer;
-		}
-
-		// During animation, show the player before the pending moves started
-		// The pending moves start from the player after the displayed moves
-		const totalMoves = game.pendingMoves.length;
-		const remainingMoves = totalMoves - displayedMoveCount;
-		const playerOffset = (remainingMoves % 4);
-
-		if (game.currentPlayer === undefined) return undefined;
-		return (game.currentPlayer - playerOffset + 400) % 4; // +400 to avoid negative
-	};
-
-	// Calculate the table state progressively as moves are displayed
-	const getDisplayedTable = (): number[] => {
-		if (!game.pendingMoves || displayedMoveCount === 0) {
-			return game.table || [];
-		}
-
-		// Reconstruct initial table before pending moves
-		const initialTable = new Set<number>(game.table || []);
-		for (let i = game.pendingMoves.length - 1; i >= 0; i--) {
-			const move = game.pendingMoves[i];
-			// If it was a capture, the cardIndex was never left on the table
-			if (!move.captureIndices || move.captureIndices.length === 0) {
-				initialTable.delete(move.cardIndex);
-			}
-			if (move.captureIndices) {
-				for (const captureIdx of move.captureIndices) {
-					initialTable.add(captureIdx);
-				}
-			}
-		}
-
-		// Replay moves up to displayedMoveCount
-		const displayedTable = new Set(initialTable);
-		for (let i = 0; i < displayedMoveCount && i < game.pendingMoves.length; i++) {
-			const move = game.pendingMoves[i];
-			if (move.captureIndices && move.captureIndices.length > 0) {
-				for (const captureIdx of move.captureIndices) {
-					displayedTable.delete(captureIdx);
-				}
-			} else {
-				displayedTable.add(move.cardIndex);
-			}
-		}
-
-		return Array.from(displayedTable);
+		return game.currentPlayer
 	};
 
 	$effect(() => {
-		if (!game.pendingMoves) return;
+		if (!game.move || game.currentPlayer === undefined) return;
 
-		const totalMoves = game.pendingMoves.length;
-		if (displayedMoveCount >= totalMoves) return;
+		const move = game.move;
+		const playerIndex = game.currentPlayer;
+		lastMoveNotification = {
+			cardIndex: move.cardIndex,
+			captureIndices: move.captureIndices ?? [],
+			playerIndex
+		};
 
+
+		showNotification = true;
+
+		// Auto-hide after 2 seconds
 		const timer = setTimeout(() => {
-			displayedMoveCount++;
-		}, 3000);
+			showNotification = false;
+		}, 2000);
 
 		return () => clearTimeout(timer);
 	});
@@ -160,6 +127,24 @@
 		{/if}
 	</div>
 
+	<!-- Move notification -->
+	{#if showNotification && lastMoveNotification}
+		<div class="move-notification" transition:fade={{duration: 300}}>
+			<div class="notification-content">
+				<div class="player-label">{getPlayerLabel(lastMoveNotification.playerIndex)} played</div>
+				<div class="played-card">{cardToString(lastMoveNotification.cardIndex)}</div>
+				{#if lastMoveNotification.captureIndices.length > 0}
+					<div class="captured-label">Captured</div>
+					<div class="captured-cards">
+						{#each lastMoveNotification.captureIndices as cardIndex}
+							<div class="card-badge">{cardToString(cardIndex)}</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	{#if game.done}
 		<GameResultsDialog {game} {onReturnToLobby} />
 	{/if}
@@ -167,10 +152,9 @@
 	<!-- Table area -->
 	<div class="table-area">
 		<div class="table-cards">
-			{#if getDisplayedTable().length > 0}
+			{#if displayedTable.length > 0}
 				<div class="cards-display">
-					{#each getDisplayedTable() as cardIndex, idx}
-						{@const displayedTable = getDisplayedTable()}
+					{#each displayedTable as cardIndex, idx}
 						<div class="card on-table" class:last-placed={idx === displayedTable.length - 1 && game.lastPlaced !== null}>
 							{cardToString(cardIndex)}
 						</div>
@@ -299,13 +283,6 @@
 		margin-top: 0.5rem;
 		color: #10b981;
 		font-weight: 600;
-	}
-
-	.game-over {
-		font-size: 3rem;
-		font-weight: 700;
-		color: #4ade80;
-		text-align: center;
 	}
 
 	.table-area {
@@ -447,5 +424,67 @@
 	.capture-option:hover {
 		background: rgba(251, 191, 36, 0.2);
 		box-shadow: 0 0 12px rgba(251, 191, 36, 0.3);
+	}
+
+	.move-notification {
+		position: fixed;
+		top: 6rem;
+		left: 2rem;
+		z-index: 50;
+		border: 2px solid #3a3b3b;
+		border-radius: 1rem;
+		background: rgba(29, 30, 29, 0.577);
+		padding: 1.5rem;
+		box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);
+		max-width: 300px;
+	}
+
+	.notification-content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.player-label {
+		font-size: 0.875rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: #86efac;
+	}
+
+	.played-card {
+		font-size: 2rem;
+		font-weight: 700;
+		color: white;
+		padding: 0.5rem;
+		background: rgba(16, 185, 129, 0.2);
+		border-radius: 0.5rem;
+		text-align: center;
+	}
+
+	.captured-label {
+		font-size: 0.75rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: #86efac;
+		margin-top: 0.5rem;
+	}
+
+	.captured-cards {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.card-badge {
+		padding: 0.5rem 0.75rem;
+		background: rgba(16, 185, 129, 0.3);
+		border: 1px solid #10b981;
+		border-radius: 0.375rem;
+		color: #86efac;
+		font-size: 0.875rem;
+		font-weight: 600;
 	}
 </style>
