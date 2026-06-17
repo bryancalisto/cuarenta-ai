@@ -359,3 +359,63 @@ func (db *Database) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool)
 	valid := currentTime.Before(ticket.ExpiresAtUTC)
 	return &ticket, valid
 }
+
+// Cancels in-progress games. Used on shutdown because currently the session and games are corrupted on server shutdown / restart.
+func (db *Database) CancelInProgressGames() int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	count := 0
+	for gameId, game := range db.games {
+		if game.Status == "running" {
+			game.Status = "canceled"
+			db.games[gameId] = game
+			count++
+		}
+	}
+
+	return count
+}
+
+func (db *Database) GetGamesByCreator(creatorId string) []models.Game {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var games []models.Game
+	for _, game := range db.games {
+		if game.CreatedBy == creatorId {
+			games = append(games, game)
+		}
+	}
+	return games
+}
+
+func (db *Database) GetGamesByUser(userId string) []models.Game {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var games []models.Game
+
+	for _, game := range db.games {
+		if _, exists := seen[game.Id]; exists {
+			continue
+		}
+
+		// User created the game OR user is a player in the game
+		isCreator := game.CreatedBy == userId
+		isPlayer := false
+		for _, player := range game.HumanPlayers {
+			if player.UserId == userId {
+				isPlayer = true
+				break
+			}
+		}
+
+		if isCreator || isPlayer {
+			seen[game.Id] = struct{}{}
+			games = append(games, game)
+		}
+	}
+	return games
+}

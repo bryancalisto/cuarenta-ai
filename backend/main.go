@@ -45,6 +45,8 @@ func corsMiddleware() gin.HandlerFunc {
 }
 
 func shutdown() {
+	cancelRunningGames()
+
 	if err := infer.ShutdownEngine(); err != nil {
 		log.Println("failed to shutdown inference engine:", err)
 	}
@@ -90,6 +92,11 @@ func dbToDiskHandler() {
 	if err := DB.WriteToDisk(); err != nil {
 		log.Printf("Failed to write DB file to disk: %v", err)
 	}
+}
+
+func cancelRunningGames() {
+	nCanceled := DB.CancelInProgressGames()
+	log.Printf("Canceled %d games before shutdown\n", nCanceled)
 }
 
 func main() {
@@ -148,6 +155,7 @@ func main() {
 
 	api := r.Group("")
 	api.Use(auth.AuthMiddleware())
+	api.GET("/games", MyGamesCtl)
 	api.GET("/games/:code", GameSnapshotCtl)
 	api.POST("/games", CreateGameCtl)
 	api.POST("/games/:code/join", JoinGameCtl)

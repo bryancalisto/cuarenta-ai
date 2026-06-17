@@ -4,6 +4,7 @@
 	import {
 		createGame,
 		getGame,
+		getMyGames,
 		getWebsocketTicket,
 		joinGame,
 		openGameSocket,
@@ -58,6 +59,8 @@
 	let cancelLoading = $state(false);
 	let mainMessage = $state('');
 	let lastCardPlayed = $state(-1);
+	let myGames = $state<Game[]>([]);
+	let myGamesLoading = $state(false);
 
 	function safeJsonParse<T>(value: string | null): T | null {
 		if (!value) return null;
@@ -142,7 +145,7 @@
 					activeGame = null;
 					pendingGameId = '';
 					screen = 'menu';
-					setNotice('Game was canceled by the creator');
+					setNotice('Game was canceled');
 					persistSession();
 					return;
 				}
@@ -184,6 +187,7 @@
 		token = session.token;
 		currentUser = session.user;
 		screen = 'menu';
+		void loadMyGames();
 		if (session.gameId) {
 			pendingGameId = session.gameId;
 			void restoreGame(session.gameId);
@@ -209,6 +213,20 @@
 		}
 	}
 
+	async function loadMyGames() {
+		if (!token) return;
+
+		myGamesLoading = true;
+		try {
+			myGames = await getMyGames(token);
+		} catch (error) {
+			console.error('Failed to load games:', error);
+			myGames = [];
+		} finally {
+			myGamesLoading = false;
+		}
+	}
+
 	async function submitAuth() {
 		authLoading = true;
 		authError = '';
@@ -222,6 +240,7 @@
 			setNotice(authTab === 'signin' ? 'Signed in' : 'Account created');
 			persistSession();
 			openSocket();
+			await loadMyGames();
 			if (pendingGameId) {
 				await subscribeToGame(pendingGameId);
 			}
@@ -275,11 +294,36 @@
 			screen = 'lobby';
 			setNotice(`Game ${game.id} created`);
 			persistSession();
+			await loadMyGames();
 			subscribeToGame(game.id);
 		} catch (error) {
 			createMessage = error instanceof Error ? error.message : 'Could not create game';
 		} finally {
 			createLoading = false;
+		}
+	}
+
+	async function openGameFromList(game: Game) {
+		activeGame = game;
+		pendingGameId = game.id;
+		screen = 'lobby';
+		setNotice(`Opened game ${game.id}`);
+		persistSession();
+		subscribeToGame(game.id);
+	}
+
+	async function handleCancelGameFromList(game: Game, event: Event) {
+		event.stopPropagation();
+
+		const confirmed = confirm("Are you sure you want to cancel this game? It will be deleted immediately for all players.");
+		if (!confirmed) return;
+
+		try {
+			await cancelGame(token ?? '', game.id);
+			await loadMyGames();
+			setNotice('Game canceled successfully');
+		} catch (error) {
+			setNotice(error instanceof Error ? error.message : 'Could not cancel game');
 		}
 	}
 
@@ -359,6 +403,7 @@
 			if (game.status === 'running') {
 				screen = 'game';
 			}
+			await loadMyGames();
 			setNotice(`Game ${game.id} started`);
 			persistSession();
 			subscribeToGame(game.id);
@@ -383,6 +428,7 @@
 			activeGame = null;
 			pendingGameId = '';
 			screen = 'menu';
+			await loadMyGames();
 			setNotice('Game canceled successfully');
 			persistSession();
 		} catch (error) {
@@ -463,10 +509,16 @@
 	}
 
 	function formatGameStatus(game: Game) {
-		if (game.status === 'finished') {
-			return 'Finished';
+		switch (game.status) {
+			case 'finished':
+				return 'Finished';
+			case 'running':
+				return 'In progress';
+			case 'canceled':
+				return 'Canceled'
+			default:
+				return 'Lobby'
 		}
-		return game.status === 'running' ? 'In progress' : 'Lobby';
 	}
 
 	function joinCodeInput(event: Event) {
@@ -603,29 +655,67 @@
 					</div>
 				</div>
 
-				<div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-sky-300">Current session</div>
-					{#if activeGame}
-						<button
-							class="mt-4 w-full rounded-3xl border border-white/10 bg-slate-950/40 p-5 text-left transition hover:border-sky-400/50 hover:bg-slate-950/60"
-							onclick={() => openCurrentSession()}
-						>
-							<div class="flex flex-wrap items-center justify-between gap-2">
-								<div>
-									<div class="text-sm text-slate-400">Game code</div>
-									<div class="mt-1 text-3xl font-semibold tracking-[0.35em] text-white">{activeGame.id}</div>
-								</div>
-								<div class="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-200">
-									{formatGameStatus(activeGame)}
-								</div>
-							</div>
-							<div class="mt-4 text-sm text-slate-300">
-								Human Players: {activeGame.humanPlayers.length}/4
-							</div>
-						</button>
-					{:else}
+				<div class="rounded-[1.75rem] flex flex-col h-[60%] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-sky-300">My games</div>
+					{#if myGamesLoading}
+						<div class="mt-4 text-sm text-slate-400">Loading games...</div>
+					{:else if myGames.length === 0}
 						<div class="mt-4 rounded-3xl border border-dashed border-white/15 bg-slate-950/30 p-5 text-sm text-slate-400">
-							No game is active yet.
+							No games created yet.
+						</div>
+					{:else}
+						<div class="mt-4 space-y-3 max-h-90 overflow-y-auto">
+							{#each myGames as game (game.id)}
+								<div class="relative">
+									<button
+										class="w-full rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-left transition hover:border-sky-400/50 hover:bg-slate-950/60"
+										onclick={() => openGameFromList(game)}
+									>
+										<div class="flex flex-wrap items-center justify-between gap-2">
+											<div>
+												<div class="flex items-center gap-2">
+													<div class="text-sm text-slate-400">{game.id}</div>
+													{#if game.createdBy === currentUser?.id}
+														<div class="rounded-full border border-orange-400/30 bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-200">
+															Owner
+														</div>
+													{/if}
+												</div>
+												<div class="mt-1 text-xs text-slate-500">
+													{#if game.startedAt}
+														{new Date(game.startedAt).toLocaleDateString()}
+													{:else}
+														Created
+													{/if}
+												</div>
+											</div>
+											<div class="rounded-full border px-2 py-1 text-xs font-medium {
+												game.status === 'running' ? 'border-green-400/30 bg-green-500/10 text-green-200' :
+												game.status === 'finished' ? 'border-blue-400/30 bg-blue-500/10 text-blue-200' :
+												game.status === 'canceled' ? 'border-blue-400/30 bg-grey-500/10 text-black-200' :
+												'border-amber-400/30 bg-amber-500/10 text-amber-200'
+											}">
+												{formatGameStatus(game)}
+											</div>
+										</div>
+										<div class="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
+											<div>Players: {game.humanPlayers.length}/4</div>
+											{#if game.durationSeconds}
+												<div>Duration: {Math.floor(game.durationSeconds / 60)}m</div>
+											{/if}
+										</div>
+									</button>
+									{#if game.createdBy === currentUser?.id}
+										<button
+											class="absolute top-2 right-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 px-2 py-1 text-xs font-medium transition cursor-pointer"
+											onclick={(e) => void handleCancelGameFromList(game, e)}
+											title="Delete game"
+										>
+											✕
+										</button>
+									{/if}
+								</div>
+							{/each}
 						</div>
 					{/if}
 					{#if mainMessage}

@@ -296,6 +296,12 @@ func RefreshJwtCtl(c *gin.Context) {
 	})
 }
 
+func MyGamesCtl(c *gin.Context) {
+	userId := c.GetString("userId")
+	games := DB.GetGamesByUser(userId)
+	c.JSON(http.StatusOK, gin.H{"games": games})
+}
+
 func CreateWsTicketCtl(c *gin.Context) {
 	userId := c.GetString("userId")
 	ticket := DB.CreateWsTicket(userId)

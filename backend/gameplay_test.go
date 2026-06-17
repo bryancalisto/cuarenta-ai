@@ -166,4 +166,3 @@ func TestCancelGame(t *testing.T) {
 		}
 	})
 }
-

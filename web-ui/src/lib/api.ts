@@ -107,6 +107,16 @@ export async function refreshToken(): Promise<string> {
 	return response.data.accessToken;
 }
 
+export async function getMyGames(token: string): Promise<Game[]> {
+	const response = await apiClient.get('/games', {
+		headers: {
+			Authorization: `Bearer ${token}`
+		}
+	});
+
+	return response.data.games || [];
+}
+
 export async function getGame(token: string, gameId: string): Promise<Game> {
 	const response = await apiClient.get(`/games/${encodeURIComponent(gameId)}`, {
 		headers: {
