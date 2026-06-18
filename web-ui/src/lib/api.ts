@@ -65,7 +65,7 @@ export type WsMessage =
 			};
 	  };
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080/api').replace(/\/$/, '');
 
 const apiClient = axios.create({
 	baseURL: API_BASE_URL
@@ -166,7 +166,7 @@ export async function getWebsocketTicket(token: string): Promise<string> {
 
 export function openGameSocket(ticket: string): WebSocket {
 	const url = new URL(API_BASE_URL);
-	url.pathname = '/ws';
+	url.pathname = '/api/ws';
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	url.searchParams.set('ticket', ticket);
 	return new WebSocket(url.toString());

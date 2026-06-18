@@ -108,6 +108,7 @@ func cancelRunningGames() {
 
 func main() {
 	r := gin.Default()
+	r.Use(corsMiddleware())
 	DB = NewDatabase(clock.New())
 	err := DB.LoadFromDisk()
 
@@ -126,8 +127,6 @@ func main() {
 	}
 	go runRecurrentJobs(recurrentJobsCtx, recurrentJobs)
 
-	r.Use(corsMiddleware())
-
 	if err := infer.StartEngine(); err != nil {
 		log.Fatalf("Couldn't start inference engine: %v", err)
 	}
@@ -136,11 +135,13 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	r.GET("/ping", func(c *gin.Context) {
+	api := r.Group("/api")
+	api.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "pong",
 		})
 	})
+	api.GET("/ws", WsCtl)
 
 	// r.GET("/debug/pprof/cmdline", gin.WrapH(http.HandlerFunc(pprof.Cmdline)))
 	// r.GET("/debug/pprof/profile", gin.WrapH(http.HandlerFunc(pprof.Profile)))
@@ -153,14 +154,13 @@ func main() {
 	// r.GET("/debug/pprof/block", gin.WrapH(pprof.Handler("block")))
 	// r.GET("/debug/pprof/mutex", gin.WrapH(pprof.Handler("mutex")))
 
-	authGroup := r.Group("/auth")
+	authGroup := api.Group("/auth")
 	authGroup.POST("/sign-up", SignUpCtl)
 	authGroup.POST("/sign-in", SignInCtl)
 	authGroup.Use(auth.AuthMiddleware())
 	authGroup.POST("/refresh-token", RefreshJwtCtl)
 	authGroup.POST("/ws-ticket", CreateWsTicketCtl)
 
-	api := r.Group("")
 	api.Use(auth.AuthMiddleware())
 	api.GET("/games", MyGamesCtl)
 	api.GET("/games/:code", GameSnapshotCtl)
@@ -170,8 +170,7 @@ func main() {
 	api.POST("/games/:code/play", PlayGameCtl)
 	api.POST("/games/:code/cancel", CancelGameCtl)
 
-	r.GET("/exit", ExitCtl(quit))
-	r.GET("/ws", WsCtl)
+	api.GET("/exit", ExitCtl(quit))
 
 	srv := &http.Server{
 		Addr:    ":8080",

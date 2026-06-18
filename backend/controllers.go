@@ -17,28 +17,32 @@ import (
 )
 
 type SignUpDTO struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type SignInDTO struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type GameCreateDTO struct {
-	SpotIndex int `json:"spotIndex"`
-	Team      int `json:"team"`
+	SpotIndex int `json:"spotIndex" binding:"required"`
+	Team      int `json:"team" binding:"required"`
 }
 
 type GameJoinDTO struct {
-	SpotIndex int `json:"spotIndex"`
-	Team      int `json:"team"`
+	SpotIndex int `json:"spotIndex" binding:"required"`
+	Team      int `json:"team" binding:"required"`
+}
+
+type ExitDTO struct {
+	Secret string `json:"secret" binding:"required"`
 }
 
 type wsClientMessage struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type    string          `json:"type" binding:"required"`
+	Payload json.RawMessage `json:"payload" binding:"required"`
 }
 
 type wsSubscribePayload struct {
@@ -151,6 +155,16 @@ func sendWsError(client *wsClient, code int, message string) {
 	})
 }
 
+func bindJSONDTO[T any](c *gin.Context, dto *T) error {
+
+	if err := c.ShouldBindJSON(&dto); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return err
+	}
+
+	return nil
+}
+
 func mapErrorToStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrUserExists):
@@ -208,8 +222,7 @@ func GameSnapshotCtl(c *gin.Context) {
 
 func SignUpCtl(c *gin.Context) {
 	var dto SignUpDTO
-	if err := c.ShouldBindJSON(&dto); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
@@ -256,8 +269,7 @@ func SignUpCtl(c *gin.Context) {
 
 func SignInCtl(c *gin.Context) {
 	var dto SignInDTO
-	if err := c.ShouldBindJSON(&dto); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
@@ -310,8 +322,7 @@ func CreateWsTicketCtl(c *gin.Context) {
 
 func CreateGameCtl(c *gin.Context) {
 	var dto GameCreateDTO
-	if err := c.ShouldBindJSON(&dto); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
@@ -333,8 +344,8 @@ func CreateGameCtl(c *gin.Context) {
 
 func JoinGameCtl(c *gin.Context) {
 	var dto GameJoinDTO
-	if err := c.ShouldBindJSON(&dto); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+
+	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
@@ -396,8 +407,8 @@ func CancelGameCtl(c *gin.Context) {
 
 func PlayGameCtl(c *gin.Context) {
 	var dto PlayGameDTO
-	if err := c.ShouldBindJSON(&dto); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+
+	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
@@ -415,6 +426,12 @@ func PlayGameCtl(c *gin.Context) {
 
 func ExitCtl(quit chan os.Signal) func(c *gin.Context) {
 	return func(c *gin.Context) {
+		var dto ExitDTO
+
+		if err := bindJSONDTO(c, &dto); err != nil {
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Shutting down server...",
 		})
@@ -450,6 +467,7 @@ func WsCtl(c *gin.Context) {
 	userId := ticket.UserId
 
 	if !valid {
+		log.Println("Invalid ticket")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
