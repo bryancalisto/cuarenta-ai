@@ -81,11 +81,11 @@
 		showNotification = true;
 
 		// Auto-hide after 2 seconds
-		const timer = setTimeout(() => {
-			showNotification = false;
-		}, 2000);
+		// const timer = setTimeout(() => {
+		// 	showNotification = false;
+		// }, 2000);
 
-		return () => clearTimeout(timer);
+		// return () => clearTimeout(timer);
 	});
 </script>
 
@@ -137,7 +137,7 @@
 					<div class="captured-label">Captured</div>
 					<div class="captured-cards">
 						{#each lastMoveNotification.captureIndices as cardIndex}
-							<div class="card-badge">{cardToString(cardIndex)}</div>
+							<div class="played-card">{cardToString(cardIndex)}</div>
 						{/each}
 					</div>
 				{/if}
@@ -154,8 +154,8 @@
 		<div class="table-cards">
 			{#if displayedTable.length > 0}
 				<div class="cards-display">
-					{#each displayedTable as cardIndex, idx}
-						<div class="card on-table" class:last-placed={idx === displayedTable.length - 1 && game.lastPlaced !== null}>
+					{#each displayedTable as cardIndex}
+						<div class="card on-table">
 							{cardToString(cardIndex)}
 						</div>
 					{/each}
@@ -171,7 +171,7 @@
 		<div class="capture-selection">
 			<div class="section-title">Choose which cards to capture:</div>
 			<div class="captures-grid">
-				{#each game.captureOptions as option, idx}
+				{#each game.captureOptions as option}
 					<button
 						class="capture-option"
 						onclick={() => {
@@ -264,7 +264,7 @@
 	}
 
 	.current-player-text {
-		font-size: 3rem;
+		font-size: clamp(1.5rem, 8vw, 3rem);
 		font-weight: 700;
 		color: #94a3b8;
 		text-align: center;
@@ -273,13 +273,13 @@
 
 	.current-player-text.your-turn {
 		color: #fbbf24;
-		font-size: 3.5rem;
+		font-size: clamp(1.75rem, 9vw, 3.5rem);
 		text-shadow: 0 0 20px rgba(251, 191, 36, 0.5);
 	}
 
 	.turn-label {
 		display: block;
-		font-size: 1.5rem;
+		font-size: clamp(0.875rem, 3vw, 1.5rem);
 		margin-top: 0.5rem;
 		color: #10b981;
 		font-weight: 600;
@@ -289,11 +289,11 @@
 		display: flex;
 		flex-direction: column;
 		justify-content: center;
-		height: 9rem;
+		min-height: clamp(6rem, 25vw, 9rem);
 		align-items: center;
 		border-radius: 1rem;
 		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
-		padding: 3rem;
+		padding: clamp(1rem, 4vw, 3rem);
 		gap: 1rem;
 	}
 
@@ -311,15 +311,20 @@
 	}
 
 	.card {
-		padding: 1rem 1rem;
+		padding: clamp(0.5rem, 2vw, 1rem) clamp(0.5rem, 2vw, 1rem);
 		border-radius: 0.5rem;
 		border: 2px solid white/30;
 		background: white;
 		color: black;
 		font-weight: 600;
-		font-size: 1.5rem;
+		font-size: clamp(1rem, 4vw, 1.5rem);
 		cursor: pointer;
 		transition: all 0.2s;
+		min-width: clamp(2rem, 8vw, 3rem);
+		min-height: clamp(2.5rem, 8vw, 3.5rem);
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.card.on-table {
@@ -327,11 +332,6 @@
 		pointer-events: none;
 	}
 
-	.card.on-table.last-placed {
-		background: linear-gradient(135deg, #fbbf24 0%, #fcd34d 100%);
-		box-shadow: 0 0 16px rgba(251, 191, 36, 0.5);
-		border-color: #f59e0b;
-	}
 
 	.card.playable:hover {
 		transform: scale(1.05);
@@ -428,15 +428,24 @@
 
 	.move-notification {
 		position: fixed;
-		top: 6rem;
-		left: 2rem;
+		bottom: clamp(5rem, 15vw, 8rem);
+		left: 50%;
+		transform: translateX(-50%);
 		z-index: 50;
 		border: 2px solid #3a3b3b;
 		border-radius: 1rem;
 		background: rgba(29, 30, 29, 0.577);
-		padding: 1.5rem;
+		padding: clamp(1rem, 3vw, 1.5rem);
 		box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);
-		max-width: 300px;
+		max-width: clamp(280px, 90vw, 400px);
+		width: 100%;
+	}
+
+	@media (min-width: 1024px) {
+		.move-notification {
+			bottom: auto;
+			top: clamp(1rem, 5vw, 6rem);
+		}
 	}
 
 	.notification-content {
@@ -454,13 +463,17 @@
 	}
 
 	.played-card {
-		font-size: 2rem;
-		font-weight: 700;
-		color: white;
-		padding: 0.5rem;
-		background: rgba(16, 185, 129, 0.2);
+		font-size: clamp(1rem, 4vw, 1.5rem);
+		font-weight: 600;
+		color: black;
+		padding: clamp(0.5rem, 2vw, 1rem) clamp(0.5rem, 2vw, 1rem);
+		background: white;
 		border-radius: 0.5rem;
 		text-align: center;
+		width: max-content;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.captured-label {

@@ -540,19 +540,19 @@
 	<title>Cuarenta Multiplayer</title>
 </svelte:head>
 
-<div class="min-h-screen flex px-4 py-8 text-slate-100 sm:px-6 lg:px-8">
-	<div class="mx-auto flex w-full flex-col gap-6">
-		<header class="rounded-[2rem] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-			<div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+<div class="min-h-screen flex px-3 py-4 sm:px-4 sm:py-6 md:px-6 lg:px-8 text-slate-100">
+	<div class="mx-auto flex w-full flex-col gap-3 sm:gap-4 md:gap-6">
+		<header class="rounded-xl sm:rounded-2xl lg:rounded-[2rem] border border-white/10 bg-white/5 p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<div class="flex flex-col gap-3 sm:gap-4 lg:flex-row lg:items-end lg:justify-between">
 				<div class="max-w-2xl">
-					<p class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Cuarenta Multiplayer</p>
+					<p class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">Cuarenta Multiplayer</p>
 				</div>
 			</div>
 		</header>
 
 		{#if screen === 'auth'}
-			<section class="grid gap-6 lg:grid-cols-[1.1fr_0.9fr] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[1.1fr_0.9fr] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					<div class="flex gap-2 rounded-full bg-white/5 p-1">
 						<button
 							class={`flex-1 rounded-full px-4 py-2 text-sm font-medium transition ${
@@ -618,16 +618,16 @@
 				</div>
 			</section>
 		{:else if screen === 'menu'}
-			<section class="grid gap-6 lg:grid-cols-[0.9fr_1.1fr] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Menu</div>
-					<p class="mt-3 text-sm leading-6 text-slate-300">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.9fr_1.1fr] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">Menu</div>
+					<p class="mt-2 sm:mt-3 text-xs sm:text-sm leading-6 text-slate-300">
 						You are signed in as {currentUser?.email}. Create a new game or join an existing game.
 					</p>
 
-					<div class="mt-6 grid gap-3">
+					<div class="mt-4 sm:mt-6 grid gap-2 sm:gap-3">
 						<button
-							class="rounded-2xl bg-amber-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-amber-300"
+							class="rounded-lg sm:rounded-2xl bg-amber-400 px-4 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-slate-950 transition hover:bg-amber-300 active:scale-95"
 							onclick={() => {
 								screen = 'create';
 								mainMessage = '';
@@ -637,7 +637,7 @@
 							New game
 						</button>
 						<button
-							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:border-sky-400/60 hover:bg-sky-400/10"
+							class="rounded-lg sm:rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-white transition hover:border-sky-400/60 hover:bg-sky-400/10 active:scale-95"
 							onclick={() => {
 								screen = 'join';
 								mainMessage = '';
@@ -647,7 +647,7 @@
 							Join game
 						</button>
 						<button
-							class="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-semibold text-slate-200 transition hover:bg-white/5"
+							class="rounded-lg sm:rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-slate-200 transition hover:bg-white/5 active:scale-95"
 							onclick={() => signOut()}
 						>
 							Sign out
@@ -655,26 +655,26 @@
 					</div>
 				</div>
 
-				<div class="rounded-[1.75rem] flex flex-col h-[60%] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-sky-300">My games</div>
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] flex flex-col max-h-96 sm:max-h-none lg:h-[60%] border border-white/10 bg-white/5 p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-sky-300">My games</div>
 					{#if myGamesLoading}
-						<div class="mt-4 text-sm text-slate-400">Loading games...</div>
+						<div class="mt-3 sm:mt-4 text-xs sm:text-sm text-slate-400">Loading games...</div>
 					{:else if myGames.length === 0}
-						<div class="mt-4 rounded-3xl border border-dashed border-white/15 bg-slate-950/30 p-5 text-sm text-slate-400">
+						<div class="mt-3 sm:mt-4 rounded-2xl sm:rounded-3xl border border-dashed border-white/15 bg-slate-950/30 p-3 sm:p-5 text-xs sm:text-sm text-slate-400">
 							No games created yet.
 						</div>
 					{:else}
-						<div class="mt-4 space-y-3 max-h-90 overflow-y-auto">
+						<div class="mt-3 sm:mt-4 space-y-2 sm:space-y-3 overflow-y-auto">
 							{#each myGames as game (game.id)}
 								<div class="relative">
 									<button
-										class="w-full rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-left transition hover:border-sky-400/50 hover:bg-slate-950/60"
+										class="w-full rounded-lg sm:rounded-2xl border border-white/10 bg-slate-950/40 p-3 sm:p-4 text-left transition hover:border-sky-400/50 hover:bg-slate-950/60 active:scale-95"
 										onclick={() => openGameFromList(game)}
 									>
-										<div class="flex flex-wrap items-center justify-between gap-2">
+										<div class="flex flex-wrap items-center justify-between gap-1 sm:gap-2">
 											<div>
-												<div class="flex items-center gap-2">
-													<div class="text-sm text-slate-400">{game.id}</div>
+												<div class="flex items-center gap-2 flex-wrap">
+													<div class="text-xs sm:text-sm text-slate-400 font-mono">{game.id}</div>
 													{#if game.createdBy === currentUser?.id}
 														<div class="rounded-full border border-orange-400/30 bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-200">
 															Owner
@@ -698,10 +698,10 @@
 												{formatGameStatus(game)}
 											</div>
 										</div>
-										<div class="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
-											<div>Players: {game.humanPlayers.length}/4</div>
+										<div class="mt-2 sm:mt-3 flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm text-slate-400">
+											<div class="whitespace-nowrap">Players: {game.humanPlayers.length}/4</div>
 											{#if game.durationSeconds}
-												<div>Duration: {Math.floor(game.durationSeconds / 60)}m</div>
+												<div class="whitespace-nowrap">Duration: {Math.floor(game.durationSeconds / 60)}m</div>
 											{/if}
 										</div>
 									</button>
@@ -726,8 +726,8 @@
 				</div>
 			</section>
 		{:else if screen === 'create'}
-			<section class="grid gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">New game</div>
 					<h2 class="mt-3 text-2xl font-semibold text-white">Pick your seat</h2>
 					<p class="mt-3 text-sm leading-6 text-slate-300">
@@ -797,8 +797,8 @@
 				</div>
 			</section>
 		{:else if screen === 'join'}
-			<section class="grid gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Join game</div>
 					<h2 class="mt-3 text-2xl font-semibold text-white">Enter the game 4-character code</h2>
 
@@ -901,8 +901,8 @@
 
 			</section>
 		{:else if screen === 'game'}
-			<section class="grid gap-6 lg:grid-cols-[1fr_120px] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[1fr_120px] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					{#if activeGame}
 						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} onReturnToLobby={returnToLobby} />
 					{/if}
@@ -918,7 +918,7 @@
 					{/if}
 				</div>
 
-				<div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-2 shadow-2xl shadow-black/30 backdrop-blur-xl">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-white/5 p-2 sm:p-3 shadow-2xl shadow-black/30 backdrop-blur-xl hidden lg:flex flex-col">
 					<div class="mt-4 grid gap-3">
 						<button
 							class="rounded-2xl hover:cursor-pointer p-1 font-semibold text-2xl transition hover:bg-white/10"
@@ -930,8 +930,8 @@
 				</div>
 			</section>
 		{:else if screen === 'lobby'}
-			<section class="grid gap-6 lg:grid-cols-[1.05fr_0.95fr] flex-1">
-				<div class="rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[1.05fr_0.95fr] flex-1">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					<div class="flex flex-wrap items-start justify-between gap-4">
 						<div>
 							<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Lobby</div>
@@ -991,8 +991,8 @@
 					{/if}
 				</div>
 
-				<div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="mt-4 grid gap-3">
+				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-white/5 p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+					<div class="mt-3 sm:mt-4 grid gap-2 sm:gap-3">
 						<button
 							class="rounded-2xl bg-amber-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
 							disabled={startLoading || (activeGame?.status !== 'running' && activeGame?.status !== 'finished' && activeGame?.createdBy !== currentUser?.id)}
