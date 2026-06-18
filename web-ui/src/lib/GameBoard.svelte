@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { fade } from 'svelte/transition';
+	import { untrack } from 'svelte';
 	import type { Game } from './api';
 	import GameResultsDialog from './GameResultsDialog.svelte';
 
@@ -46,13 +46,7 @@
 	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
 
 	let isSelectingCapture = $state(false);
-	let lastMoveNotification = $state<{ cardIndex: number; captureIndices: number[]; playerIndex: number } | null>(null);
-	let showNotification = $state(false);
-	let displayedTable: number[] = $state([]); 
-	
-	$effect(() => {
-	 	displayedTable = game.table ?? [];
-	});
+	let displayedTable: number[] = $state([]);
 
 	// Reset capture selection when a new capture prompt appears
 	$effect(() => {
@@ -66,27 +60,74 @@
 		return game.currentPlayer
 	};
 
+	// Side each player throws from / grabs to, relative to current user (always "down").
+	const DIRS = ['down', 'right', 'up', 'left'] as const;
+	const OFFSET: Record<string, { tx: string; ty: string }> = {
+		down: { tx: '0px', ty: '340px' },
+		right: { tx: '560px', ty: '0px' },
+		up: { tx: '0px', ty: '-340px' },
+		left: { tx: '-560px', ty: '0px' }
+	};
+
+	function dirFor(playerIndex: number): string {
+		const me = myArrayIndex ?? 0;
+		return DIRS[(playerIndex - me + 4) % 4];
+	}
+
+	let throwAnim = $state<{ card: number; dir: string; id: number } | null>(null);
+	let grabAnim = $state<{ cards: number[]; dir: string; id: number } | null>(null);
+	let animId = 0;
+
+	// Animation timings (ms) — must match the CSS animation durations.
+	const THROW_MS = 900;
+	const GAP_MS = 250;
+	const GRAB_MS = 900;
+
 	$effect(() => {
-		if (!game.move || game.currentPlayer === undefined) return;
-
-		const lastPlayerIndex = (game.currentPlayer - 1 + 4) % 4;
-
+		const table = game.table ?? [];
 		const move = game.move;
-		lastMoveNotification = {
-			cardIndex: move.cardIndex,
-			captureIndices: move.captureIndices ?? [],
-			playerIndex: lastPlayerIndex
-		};
+		const currentPlayer = game.currentPlayer;
 
+		// No move to animate: just mirror the table.
+		if (!move || currentPlayer === undefined) {
+			displayedTable = table;
+			return;
+		}
 
-		showNotification = true;
+		const before = untrack(() => displayedTable);
+		const dir = dirFor((currentPlayer - 1 + 4) % 4);
+		const id = ++animId;
+		const captures = move.captureIndices ?? [];
 
-		// Auto-hide after 2 seconds
-		const timer = setTimeout(() => {
-			showNotification = false;
-		}, 2000);
+		// 1. Throw: keep the old table visible while the played card flies in.
+		throwAnim = { card: move.cardIndex, dir, id };
+		grabAnim = null;
 
-		return () => clearTimeout(timer);
+		const timers: ReturnType<typeof setTimeout>[] = [];
+
+		// 2. Played card lands. Add it to the table; keep captured cards for now.
+		timers.push(setTimeout(() => {
+			if (animId !== id) return;
+			throwAnim = null;
+			displayedTable = captures.length > 0 ? [...before, move.cardIndex] : table;
+		}, THROW_MS));
+
+		if (captures.length > 0) {
+			// 3. Grab: pull the played card + captured cards off the table, laid out
+			//    horizontally, toward the player. Remove them from the table at the
+			//    same moment so the flying group represents them.
+			timers.push(setTimeout(() => {
+				if (animId !== id) return;
+				grabAnim = { cards: [move.cardIndex, ...captures], dir, id };
+				displayedTable = table;
+			}, THROW_MS + GAP_MS));
+			// 4. Grab done.
+			timers.push(setTimeout(() => {
+				if (animId === id) grabAnim = null;
+			}, THROW_MS + GAP_MS + GRAB_MS));
+		}
+
+		return () => timers.forEach(clearTimeout);
 	});
 </script>
 
@@ -128,24 +169,6 @@
 		{/if}
 	</div>
 
-	<!-- Move notification -->
-	{#if showNotification && lastMoveNotification}
-		<div class="move-notification" transition:fade={{duration: 300}}>
-			<div class="notification-content">
-				<div class="player-label">{getPlayerLabel(lastMoveNotification.playerIndex)} played</div>
-				<div class="played-card">{cardToString(lastMoveNotification.cardIndex)}</div>
-				{#if lastMoveNotification.captureIndices.length > 0}
-					<div class="captured-label">Captured</div>
-					<div class="captured-cards">
-						{#each lastMoveNotification.captureIndices as cardIndex}
-							<div class="played-card">{cardToString(cardIndex)}</div>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		</div>
-	{/if}
-
 	{#if game.done}
 		<GameResultsDialog {game} {onReturnToLobby} />
 	{/if}
@@ -163,6 +186,34 @@
 				</div>
 			{:else}
 				<div class="empty-table">Table is empty</div>
+			{/if}
+		</div>
+
+		<!-- Card throw / grab animations -->
+		<div class="anim-overlay">
+			{#if throwAnim}
+				{#key throwAnim.id}
+					<div
+						class="fly-card throw"
+						style="--tx:{OFFSET[throwAnim.dir].tx}; --ty:{OFFSET[throwAnim.dir].ty}"
+					>
+						{cardToString(throwAnim.card)}
+					</div>
+				{/key}
+			{/if}
+			{#if grabAnim}
+				{#key 'g' + grabAnim.id}
+					<div class="grab-group">
+						{#each grabAnim.cards as cardIndex}
+							<div
+								class="fly-card grab"
+								style="--tx:{OFFSET[grabAnim.dir].tx}; --ty:{OFFSET[grabAnim.dir].ty}"
+							>
+								{cardToString(cardIndex)}
+							</div>
+						{/each}
+					</div>
+				{/key}
 			{/if}
 		</div>
 	</div>
@@ -287,6 +338,7 @@
 	}
 
 	.table-area {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		justify-content: center;
@@ -296,6 +348,69 @@
 		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
 		padding: clamp(1rem, 4vw, 3rem);
 		gap: 1rem;
+	}
+
+	.anim-overlay {
+		position: absolute;
+		inset: 0;
+		overflow: visible;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+		z-index: 10;
+	}
+
+	.grab-group {
+		display: flex;
+		flex-wrap: nowrap;
+		gap: 0.5rem;
+	}
+
+	.fly-card {
+		padding: clamp(0.5rem, 2vw, 1rem);
+		border-radius: 0.5rem;
+		background: white;
+		color: black;
+		font-weight: 600;
+		font-size: clamp(1rem, 4vw, 1.5rem);
+		min-width: clamp(2rem, 8vw, 3rem);
+		min-height: clamp(2.5rem, 8vw, 3.5rem);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+		will-change: transform, opacity;
+	}
+
+	.fly-card.throw {
+		animation: throw-in 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+	}
+
+	.fly-card.grab {
+		animation: grab-out 0.9s cubic-bezier(0.55, 0, 0.55, 0.2) forwards;
+	}
+
+	@keyframes throw-in {
+		from {
+			transform: translate(var(--tx), var(--ty)) scale(0.6) rotate(8deg);
+			opacity: 0;
+		}
+		to {
+			transform: translate(0, 0) scale(1) rotate(0deg);
+			opacity: 1;
+		}
+	}
+
+	@keyframes grab-out {
+		from {
+			transform: translate(0, 0) scale(1);
+			opacity: 1;
+		}
+		to {
+			transform: translate(var(--tx), var(--ty)) scale(0.6);
+			opacity: 0;
+		}
 	}
 
 	.table-cards {
@@ -427,64 +542,4 @@
 		box-shadow: 0 0 12px rgba(251, 191, 36, 0.3);
 	}
 
-	.move-notification {
-		position: fixed;
-		z-index: 50;
-		border: 2px solid #3a3b3b;
-		border-radius: 1rem;
-		background: rgb(29 30 29 / 90%);
-		padding: clamp(1rem, 3vw, 1.5rem);
-		box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);
-		/* max-width: clamp(280px, 90vw, 400px); */
-		/* width: 100%; */
-	}
-
-	@media (min-width: 1024px) {
-		.move-notification {
-			bottom: auto;
-		}
-	}
-
-	.notification-content {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.player-label {
-		font-size: 0.875rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-		color: #86efac;
-	}
-
-	.played-card {
-		font-size: clamp(1rem, 4vw, 1.5rem);
-		font-weight: 600;
-		color: black;
-		padding: clamp(0.5rem, 2vw, 1rem) clamp(0.5rem, 2vw, 1rem);
-		background: white;
-		border-radius: 0.5rem;
-		text-align: center;
-		width: max-content;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.captured-label {
-		font-size: 0.75rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-		color: #86efac;
-		margin-top: 0.5rem;
-	}
-
-	.captured-cards {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
 </style>
