@@ -32,7 +32,7 @@
 		return myArrayIndex !== undefined && playerIndex === myArrayIndex;
 	}
 
-	function canPlayCard(cardIndex: number): boolean {
+	function canPlayCard(): boolean {
 		return game.currentPlayer === myArrayIndex;
 	}
 
@@ -61,7 +61,7 @@
 		}
 	});
 
-	// Get the current player during animation (before pending moves)
+	// Get the current player during animation
 	const getDisplayedCurrentPlayer = (): number | undefined => {
 		return game.currentPlayer
 	};
@@ -69,23 +69,24 @@
 	$effect(() => {
 		if (!game.move || game.currentPlayer === undefined) return;
 
+		const lastPlayerIndex = (game.currentPlayer - 1 + 4) % 4;
+
 		const move = game.move;
-		const playerIndex = game.currentPlayer;
 		lastMoveNotification = {
 			cardIndex: move.cardIndex,
 			captureIndices: move.captureIndices ?? [],
-			playerIndex
+			playerIndex: lastPlayerIndex
 		};
 
 
 		showNotification = true;
 
 		// Auto-hide after 2 seconds
-		// const timer = setTimeout(() => {
-		// 	showNotification = false;
-		// }, 2000);
+		const timer = setTimeout(() => {
+			showNotification = false;
+		}, 2000);
 
-		// return () => clearTimeout(timer);
+		return () => clearTimeout(timer);
 	});
 </script>
 
@@ -201,8 +202,8 @@
 					{#if cardIndex >= 0}
 						<button
 							class="card"
-							class:playable={canPlayCard(cardIndex)}
-							disabled={!canPlayCard(cardIndex)}
+							class:playable={canPlayCard()}
+							disabled={!canPlayCard()}
 							onclick={() => onPlayCard(cardIndex)}
 						>
 							{cardToString(cardIndex)}
@@ -428,23 +429,19 @@
 
 	.move-notification {
 		position: fixed;
-		bottom: clamp(5rem, 15vw, 8rem);
-		left: 50%;
-		transform: translateX(-50%);
 		z-index: 50;
 		border: 2px solid #3a3b3b;
 		border-radius: 1rem;
-		background: rgba(29, 30, 29, 0.577);
+		background: rgb(29 30 29 / 90%);
 		padding: clamp(1rem, 3vw, 1.5rem);
 		box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);
-		max-width: clamp(280px, 90vw, 400px);
-		width: 100%;
+		/* max-width: clamp(280px, 90vw, 400px); */
+		/* width: 100%; */
 	}
 
 	@media (min-width: 1024px) {
 		.move-notification {
 			bottom: auto;
-			top: clamp(1rem, 5vw, 6rem);
 		}
 	}
 
@@ -489,15 +486,5 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
-	}
-
-	.card-badge {
-		padding: 0.5rem 0.75rem;
-		background: rgba(16, 185, 129, 0.3);
-		border: 1px solid #10b981;
-		border-radius: 0.375rem;
-		color: #86efac;
-		font-size: 0.875rem;
-		font-weight: 600;
 	}
 </style>
