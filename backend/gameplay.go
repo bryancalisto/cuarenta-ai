@@ -349,7 +349,7 @@ func playAITurn(gameId string) error {
 
 // Return random milliseconds for slee[1, 3]
 func randomSleep() {
-	millis := []int{1800, 2000, 2500, 3000, 3500}
+	millis := []int{1500, 2000, 2500, 3000, 3500}
 	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
 }
 

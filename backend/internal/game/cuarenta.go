@@ -636,12 +636,11 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 	team := teamByPlayer[player]
 	points, reasons := scorePlay(action.Card, action.Capture, s.Table, s.LastPlaced, s.Scores[team] < MaxAchievablePointsByNonCaidaActions)
 	info := map[string]any{
-		"player":                 player,
-		"team":                   team,
-		"action":                 action.String(),
-		"points":                 points,
-		"reasons":                reasons,
-		"caida_exposure_penalty": 0.0,
+		"player":  player,
+		"team":    team,
+		"action":  action.String(),
+		"points":  points,
+		"reasons": reasons,
 	}
 
 	if len(action.Capture) > 0 {
@@ -712,15 +711,6 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 	}
 
 	return e.Observe(s.CurrentPlayer), false, info, nil
-}
-
-func containsCard(cards []Card, target Card) bool {
-	for _, card := range cards {
-		if card == target {
-			return true
-		}
-	}
-	return false
 }
 
 func (e *Env) Render() string {

@@ -476,6 +476,7 @@ func WsCtl(c *gin.Context) {
 		ReadBufferSize:  2048,
 		WriteBufferSize: 2048,
 		CheckOrigin: func(r *http.Request) bool {
+			log.Println("Host in ws upgrader: ", r.Host)
 			return true
 		},
 	}
@@ -491,22 +492,61 @@ func WsCtl(c *gin.Context) {
 		userId: userId,
 	}
 	defer func() {
+		log.Printf("[WS] Client %s disconnected from game %s", userId, client.gameId)
 		hub.detach(client)
 		_ = conn.Close()
 	}()
 
+	log.Printf("[WS] Client %s connected", userId)
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		// log.Printf("[WS] Pong received from %s, resetting deadline", userId)
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				// log.Printf("[WS] Sending ping to %s", userId)
+				client.writeMu.Lock()
+				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+					log.Printf("[WS] Ping write failed for %s: %v", userId, err)
+					client.writeMu.Unlock()
+					return
+				}
+				client.writeMu.Unlock()
+			case <-done:
+				log.Printf("[WS] Ping ticker stopped for %s", userId)
+				return
+			}
+		}
+	}()
+
 	_ = client.send(wsServerMessage{Type: "connection.ready"})
+	log.Printf("[WS] Sent connection.ready to %s", userId)
 
 	if initialGameId := c.Query("gameId"); initialGameId != "" {
+		log.Printf("[WS] Client %s subscribing to game %s", userId, initialGameId)
 		subscribeToGame(client, initialGameId)
 	}
 
 	for {
 		var message wsClientMessage
 		if err := conn.ReadJSON(&message); err != nil {
-			log.Println("websocket read:", err)
+			log.Printf("[WS] Read error from %s (game %s): %v", userId, client.gameId, err)
 			break
 		}
+
+		log.Printf("[WS] Message from %s: type=%s", userId, message.Type)
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch message.Type {
 		case "game.subscribe":
