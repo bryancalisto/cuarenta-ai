@@ -2,7 +2,7 @@ from pathlib import Path
 import torch
 import torch.onnx
 import torch.nn as nn
-from ..imitation_learning.imitation_learning import PolicyNetwork
+from imitation_learning.imitation_learning import PolicyNetwork
 
 
 class PolicyNetworkOnly(nn.Module):

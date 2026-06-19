@@ -131,5 +131,10 @@ then softmax over legal actions.
 - **No opponent modelling**: A dedicated opponent-modelling head could infer hidden hands.
 - **Single-process**: For serious training, parallelise envs with multiprocessing or use RLlib.
 
+## Generating ONNX model
+```bash
+cd src && python3 -m scripts.pth2onnx.py
+```
+
 # More info about Cuarenta
 https://40caidaylimpia.com/reglas-para-jugar-40/
