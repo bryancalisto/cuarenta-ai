@@ -1,5 +1,8 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { flip } from 'svelte/animate';
+	import { scale } from 'svelte/transition';
+	import { cubicIn } from 'svelte/easing';
 	import type { Game } from './api';
 	import GameResultsDialog from './GameResultsDialog.svelte';
 
@@ -45,6 +48,15 @@
 
 	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
 
+	function getCartonCount(capturedCards: number[] | undefined): number {
+		if (!capturedCards || capturedCards.length === 0) return 0;
+		const count = capturedCards.length;
+		if (count <= 19) return 0;
+		let points = count - 19 + 5;
+		if (points % 2 !== 0) points++;
+		return points;
+	}
+
 	let isSelectingCapture = $state(false);
 	let displayedTable: number[] = $state([]);
 
@@ -75,13 +87,27 @@
 	}
 
 	let throwAnim = $state<{ card: number; dir: string; id: number } | null>(null);
-	let grabAnim = $state<{ cards: number[]; dir: string; id: number } | null>(null);
+	// Direction the currently-leaving table cards fly toward (read by the out transition).
+	let removeDir = $state('down');
 	let animId = 0;
 
 	// Animation timings (ms) — must match the CSS animation durations.
 	const THROW_MS = 900;
 	const GAP_MS = 250;
 	const GRAB_MS = 900;
+
+	// Out transition: a table card flies off toward the player who grabbed it.
+	function flyToSide(_node: Element, { dir }: { dir: string }) {
+		const tx = parseFloat(OFFSET[dir].tx);
+		const ty = parseFloat(OFFSET[dir].ty);
+		return {
+			duration: GRAB_MS,
+			easing: cubicIn,
+			// t goes 1 -> 0; start centered/opaque, end translated/faded.
+			css: (t: number) =>
+				`transform: translate(${tx * (1 - t)}px, ${ty * (1 - t)}px) scale(${0.5 + 0.5 * t}); opacity: ${t};`
+		};
+	}
 
 	$effect(() => {
 		const table = game.table ?? [];
@@ -101,11 +127,11 @@
 
 		// 1. Throw: keep the old table visible while the played card flies in.
 		throwAnim = { card: move.cardIndex, dir, id };
-		grabAnim = null;
 
 		const timers: ReturnType<typeof setTimeout>[] = [];
 
-		// 2. Played card lands. Add it to the table; keep captured cards for now.
+		// 2. Played card lands -> inserted into the table (scale-in, neighbors reflow).
+		//    On a capture, also keep the captured cards so they can be grabbed next.
 		timers.push(setTimeout(() => {
 			if (animId !== id) return;
 			throwAnim = null;
@@ -113,18 +139,13 @@
 		}, THROW_MS));
 
 		if (captures.length > 0) {
-			// 3. Grab: pull the played card + captured cards off the table, laid out
-			//    horizontally, toward the player. Remove them from the table at the
-			//    same moment so the flying group represents them.
+			// 3. Grab: remove the played + captured cards from the table. Each flies off
+			//    toward the player (out transition); remaining cards reflow (flip).
 			timers.push(setTimeout(() => {
 				if (animId !== id) return;
-				grabAnim = { cards: [move.cardIndex, ...captures], dir, id };
+				removeDir = dir;
 				displayedTable = table;
 			}, THROW_MS + GAP_MS));
-			// 4. Grab done.
-			timers.push(setTimeout(() => {
-				if (animId === id) grabAnim = null;
-			}, THROW_MS + GAP_MS + GRAB_MS));
 		}
 
 		return () => timers.forEach(clearTimeout);
@@ -132,6 +153,10 @@
 </script>
 
 <div class="game-board">
+	{#if game.newRoundStart}
+		<div class="round-indicator">🎴 New Round Started!</div>
+	{/if}
+
 	<div class="board-header">
 		<div class="game-info">
 			<div class="info-item">
@@ -144,10 +169,24 @@
 			<div class="score-item">
 				<span class="label">Team 1</span>
 				<span class="value">{game.scores?.[0] ?? 0}</span>
+				{#if game.cardsCaptured}
+					<span class="carton-info">
+						<span class="carton-label">Cartón:</span>
+						<span class="carton-count">{getCartonCount(game.cardsCaptured[0])}</span>
+						<span class="captured-label">({game.cardsCaptured[0]?.length ?? 0})</span>
+					</span>
+				{/if}
 			</div>
 			<div class="score-item">
 				<span class="label">Team 2</span>
 				<span class="value">{game.scores?.[1] ?? 0}</span>
+				{#if game.cardsCaptured}
+					<span class="carton-info">
+						<span class="carton-label">Cartón:</span>
+						<span class="carton-count">{getCartonCount(game.cardsCaptured[1])}</span>
+						<span class="captured-label">({game.cardsCaptured[1]?.length ?? 0})</span>
+					</span>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -178,8 +217,13 @@
 		<div class="table-cards">
 			{#if displayedTable.length > 0}
 				<div class="cards-display">
-					{#each displayedTable as cardIndex}
-						<div class="card on-table">
+					{#each displayedTable as cardIndex (cardIndex)}
+						<div
+							class="card on-table"
+							animate:flip={{ duration: 350 }}
+							in:scale={{ duration: 300, start: 0.4 }}
+							out:flyToSide={{ dir: removeDir }}
+						>
 							{cardToString(cardIndex)}
 						</div>
 					{/each}
@@ -189,7 +233,7 @@
 			{/if}
 		</div>
 
-		<!-- Card throw / grab animations -->
+		<!-- Played card flying in from the player's side toward the table -->
 		<div class="anim-overlay">
 			{#if throwAnim}
 				{#key throwAnim.id}
@@ -198,20 +242,6 @@
 						style="--tx:{OFFSET[throwAnim.dir].tx}; --ty:{OFFSET[throwAnim.dir].ty}"
 					>
 						{cardToString(throwAnim.card)}
-					</div>
-				{/key}
-			{/if}
-			{#if grabAnim}
-				{#key 'g' + grabAnim.id}
-					<div class="grab-group">
-						{#each grabAnim.cards as cardIndex}
-							<div
-								class="fly-card grab"
-								style="--tx:{OFFSET[grabAnim.dir].tx}; --ty:{OFFSET[grabAnim.dir].ty}"
-							>
-								{cardToString(cardIndex)}
-							</div>
-						{/each}
 					</div>
 				{/key}
 			{/if}
@@ -361,12 +391,6 @@
 		z-index: 10;
 	}
 
-	.grab-group {
-		display: flex;
-		flex-wrap: nowrap;
-		gap: 0.5rem;
-	}
-
 	.fly-card {
 		padding: clamp(0.5rem, 2vw, 1rem);
 		border-radius: 0.5rem;
@@ -387,10 +411,6 @@
 		animation: throw-in 0.9s cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
-	.fly-card.grab {
-		animation: grab-out 0.9s cubic-bezier(0.55, 0, 0.55, 0.2) forwards;
-	}
-
 	@keyframes throw-in {
 		from {
 			transform: translate(var(--tx), var(--ty)) scale(0.6) rotate(8deg);
@@ -399,17 +419,6 @@
 		to {
 			transform: translate(0, 0) scale(1) rotate(0deg);
 			opacity: 1;
-		}
-	}
-
-	@keyframes grab-out {
-		from {
-			transform: translate(0, 0) scale(1);
-			opacity: 1;
-		}
-		to {
-			transform: translate(var(--tx), var(--ty)) scale(0.6);
-			opacity: 0;
 		}
 	}
 
@@ -540,6 +549,49 @@
 	.capture-option:hover {
 		background: rgba(251, 191, 36, 0.2);
 		box-shadow: 0 0 12px rgba(251, 191, 36, 0.3);
+	}
+
+	.round-indicator {
+		padding: 0.75rem 1rem;
+		background: linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(34, 197, 94, 0.1));
+		border: 2px solid #22c55e;
+		border-radius: 0.5rem;
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: #86efac;
+		text-align: center;
+		animation: pulse 0.5s ease-in-out;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.7; }
+	}
+
+	.carton-info {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		margin-top: 0.25rem;
+		font-size: 0.75rem;
+	}
+
+	.carton-label {
+		color: #94a3b8;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.carton-count {
+		color: #fbbf24;
+		font-weight: 700;
+		font-size: 1rem;
+	}
+
+	.captured-label {
+		color: #64748b;
+		font-size: 0.7rem;
 	}
 
 </style>

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -112,8 +113,12 @@ func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) 
 	}
 	snapshot.Table = cardIndices(state.Table)
 	snapshot.Scores = []int{state.Scores[0], state.Scores[1]}
+	snapshot.CardsCaptured = make([][]int, 2)
+	snapshot.CardsCaptured[0] = cardIndices(state.CardsCaptured[0])
+	snapshot.CardsCaptured[1] = cardIndices(state.CardsCaptured[1])
 	snapshot.CurrentPlayer = state.CurrentPlayer
 	snapshot.DeckRemaining = len(state.Deck)
+	snapshot.NewRoundStart = state.DecksConsumed > 0 && len(state.CardsCaptured[0]) == 0 && len(state.CardsCaptured[1]) == 0
 	snapshot.Done = state.Done
 	if state.LastPlaced != nil {
 		last := state.LastPlaced.Index()
@@ -342,6 +347,12 @@ func playAITurn(gameId string) error {
 	return nil
 }
 
+// Return random milliseconds for slee[1, 3]
+func randomSleep() {
+	millis := []int{1800, 2000, 2500, 3000, 3500}
+	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
+}
+
 func playAITurns(gameId string) error {
 	base, exists := DB.GetGame(gameId)
 
@@ -375,7 +386,7 @@ func playAITurns(gameId string) error {
 			break
 		}
 
-		time.Sleep(3 * time.Second)
+		randomSleep()
 
 		if err := playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)

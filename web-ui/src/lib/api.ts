@@ -29,11 +29,13 @@ export type Game = {
 	cards: number[][];
 	table?: number[];
 	scores?: number[];
+	cardsCaptured?: number[][];
 	currentPlayer?: number;
 	lastPlaced?: number | null;
 	winner?: number | null;
 	done?: boolean;
 	deckRemaining?: number;
+	newRoundStart?: boolean;
 	durationSeconds?: number;
 	createdBy: string;
 	createdAt: string;

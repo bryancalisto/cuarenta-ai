@@ -40,11 +40,13 @@ type Game struct {
 	Cards           [][]int         `json:"cards"`
 	Table           []int           `json:"table,omitempty"`
 	Scores          []int           `json:"scores,omitempty"`
+	CardsCaptured   [][]int         `json:"cardsCaptured,omitempty"`
 	CurrentPlayer   int             `json:"currentPlayer"`
 	LastPlaced      *int            `json:"lastPlaced,omitempty"`
 	Winner          *int            `json:"winner,omitempty"`
 	Done            bool            `json:"done,omitempty"`
 	DeckRemaining   int             `json:"deckRemaining,omitempty"`
+	NewRoundStart   bool            `json:"newRoundStart,omitempty"`
 	CreatedBy       string          `json:"createdBy"`
 	CreatedAt       string          `json:"createdAt"`
 	DurationSeconds int             `json:"durationSeconds"`
