@@ -29,14 +29,13 @@ class FlatActorCriticPolicyOnly(nn.Module):
         return self.policy.fc3(hidden)
 
 
-def save_onnx(pt_path: Path | None = None) -> Path:
+def save_onnx(pt_path: Path) -> Path:
     """Convert cuarenta policy checkpoint to ONNX format.
 
     Exports only the action logits output (for use in Go inference engine).
     """
-    if pt_path is None:
-        pt_path = Path(__file__).parent.parent.parent / "data" / "policies" / "cuarenta_policy_final.pt"
-
+    pt_filename = pt_path.name
+    onnx_filename = pt_filename.replace('.pt', '.onnx')
     checkpoint = torch.load(pt_path, map_location='cpu', weights_only=False)
 
     # Detect checkpoint format
@@ -51,7 +50,7 @@ def save_onnx(pt_path: Path | None = None) -> Path:
 
         dummy_input = torch.randn(1, obs_size)
 
-        output_path = pt_path.parent / "cuarenta_policy_final.onnx"
+        output_path = pt_path.parent / onnx_filename
         torch.onnx.export(
             model,
             dummy_input,
@@ -74,7 +73,7 @@ def save_onnx(pt_path: Path | None = None) -> Path:
         model.eval()
 
         dummy_input = torch.randn(1, 121)
-        output_path = pt_path.parent / "cuarenta_policy_final.onnx"
+        output_path = pt_path.parent / onnx_filename
         torch.onnx.export(
             model,
             dummy_input,
@@ -94,4 +93,5 @@ def save_onnx(pt_path: Path | None = None) -> Path:
         raise ValueError(f"Unknown checkpoint format. Keys: {list(checkpoint.keys())}")
 
 
-print(save_onnx())
+pt_path = Path("/Users/t1000/Documents/src/40-ai/data/policies/policy_901120.pt")
+print(save_onnx(pt_path))

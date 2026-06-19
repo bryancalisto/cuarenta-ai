@@ -1,28 +1,12 @@
-"""
-4 players: seats 0, 1, 2, 3.
-Teams: (0, 2) vs (1, 3)  — partners sit across from each other.
-Turn order: 0 → 1 → 2 → 3 → 0 → ...
-
-Each player is dealt 5 cards. When all hands empty, deal again until deck runs out.
-A full game is multiple deals; first team to reach 40 points wins.
-
-PettingZoo-style API:
-  env.reset()
-  while not done:
-      obs   = env.observe(agent)
-      legal = env.legal_actions(agent)
-      env.step(action)
-"""
-
 from __future__ import annotations
 
 import random
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
-from captures import detect_caida, valid_captures, score_play
+from captures import valid_captures, score_play
 
 # Constants
 
@@ -30,18 +14,17 @@ NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
-TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player → team index
+TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
 TEAM_PLAYERS = {0: [0, 2], 1: [1, 3]}
 
 
-# ---------------------------------------------------------------------------
 # Action encoding
-# ---------------------------------------------------------------------------
+#
 # An action is encoded as a single integer for RL compatibility.
-# We encode: action = card_index * 41 + capture_option_index
+# action = card_index * 41 + capture_option_index
 # capture_option_index = 0 means "no capture" (place only)
 # capture_option_index 1..40 index into the sorted list of valid captures
-# In practice we build the legal action list dynamically each turn.
+# in practice we build the legal action list dynamically each turn.
 
 @dataclass
 class Action:
@@ -73,26 +56,10 @@ class CuarentaState:
         return TEAMS[player]
 
 
-# Environment
-
 class CuarentaEnv:
-    """
-    Cuarenta 4-player card game environment.
-
-    Usage:
-        env = CuarentaEnv()
-        obs, info = env.reset()
-        done = False
-        while not done:
-            legal = env.legal_actions()
-            action = legal[0]          # replace with agent policy
-            obs, reward, done, info = env.step(action)
-    """
-
-    def __init__(self, seed: Optional[int] = None, caida_exposure_penalty: float = 0.0):
+    def __init__(self, seed: Optional[int] = None):
         self.random = random.Random(seed)
         self.state: Optional[CuarentaState] = None
-        self.caida_exposure_penalty = float(caida_exposure_penalty)
 
 
     def reset(self) -> Tuple[Dict, Dict]:
@@ -125,7 +92,7 @@ class CuarentaEnv:
         player = s.current_player
         reward = 0
 
-        # --- Validate action ---
+        # validate action
         # print(f'PLAYER: {player}, ACTION: {action}')
         assert action.card in s.hands[player], (
             f"Player {player} does not hold {action.card}. Hand: {s.hands[player]}"
@@ -135,12 +102,12 @@ class CuarentaEnv:
             a.card == action.card and a.capture == action.capture for a in legal
         ), f"Action {action} is not legal. Legal: {legal}"
 
-        # --- Remove card from hand ---
+        # remove card from hand
         s.hands[player].remove(action.card)
 
         team = TEAMS[player]
 
-        # --- Compute score & update table ---
+        # compute score and update table
         points, reasons = score_play(
             played=action.card,
             capture_set=action.capture,
@@ -155,29 +122,25 @@ class CuarentaEnv:
             "action": str(action),
             "points": points,
             "reasons": reasons,
-            "caida_exposure_penalty": 0.0,
         }
 
-        caida_exposure_penalty = 0.0
         if action.capture:
             # Remove captured cards from table and put them in the team's captured cards
             for card in action.capture:
                 s.table.remove(card)
                 s.cards_captured[team].append(card)
             s.last_placed = None   # table was modified; caída chain resets
-            reward += len(action.capture) * 0.25 # 0.25 reward points per captured card
+            reward += len(action.capture) * 1 # 1 reward point per captured card
         else:
             # Place card on table
             s.table.append(action.card)
             s.last_placed = action.card
-            caida_exposure_penalty = self._caida_exposure_penalty_for_next_player(action.card)
-            info["caida_exposure_penalty"] = caida_exposure_penalty
 
-        # --- Apply score ---
+        # apply score
         s.scores[team] += points
-        reward += points - caida_exposure_penalty
+        reward += points
 
-        # --- Check win ---
+        # check win
         if s.scores[team] >= WIN_SCORE:
             s.done = True
             s.winner = team
@@ -185,55 +148,37 @@ class CuarentaEnv:
             info["winner"] = team
             return self.observe(player), reward, True, info
 
-        # --- Advance turn ---
+        # advance turn
         s.current_player = (player + 1) % NUM_PLAYERS
 
-        # --- If all hands empty, count cartón and check end game. if no end game, then redeal ---
+        # if all hands empty, count cartón and check end game. if no end game, then redeal
         # Cartón means the amount of captured cards counted in this way: points = len(captured) - 19; if points > 0 then round(6 + points) to the next integer that's divisible by two
         if all(len(s.hands[p]) == 0 for p in range(NUM_PLAYERS)):
             if len(s.deck) >= NUM_PLAYERS * HAND_SIZE:
                 # There's still deck to play
                 self._redeal()
             else:
-                # Count carton for each team
+                # Count carton for each team and update scores
+                team_carton = {}
                 for team in range(2):
+                    team_carton[team] = 0
+
                     carton_points = len(s.cards_captured[team]) - 19
                     if carton_points > 0:
-                        carton_points += 5 # +5 because at 20 we start to count 6,7,8...
+                        carton_points += 5
                         if carton_points % 2 != 0:
                             carton_points += 1
-                        
-                        s.scores[team] += min(carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS) 
+                        team_carton[team] = carton_points
+                        s.scores[team] = min(s.scores[team] + carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
 
-                        # If there's carton points, give a reward
-                        is_current_player_team = team == TEAMS[player] 
+                # Reward current player for their team's carton only
+                current_team = TEAMS[player]
+                info["carton_points"] = team_carton[current_team]
 
-                        if is_current_player_team:
-                            reward += carton_points
                 self._new_round()
 
         return self.observe(s.current_player), reward, False, info
 
-    def _caida_exposure_penalty_for_next_player(self, played_card: Card) -> float:
-        """
-        Return a shaping penalty for leaving `played_card` on the table in a position
-        where the next player can immediately answer with a caída.
-
-        This does not alter the true game score; it only shapes RL rewards.
-        """
-        if self.caida_exposure_penalty <= 0.0:
-            return 0.0
-
-        s = self.state
-        next_player = (s.current_player + 1) % NUM_PLAYERS
-        table_after_play = s.table
-
-        for response_card in s.hands[next_player]:
-            for capture_set in valid_captures(response_card, table_after_play):
-                if played_card in capture_set and detect_caida(response_card, capture_set, played_card):
-                    return self.caida_exposure_penalty
-
-        return 0.0
 
     def legal_actions(self) -> List[Action]:
         """Return all legal Action objects for the current player."""
@@ -245,17 +190,11 @@ class CuarentaEnv:
         for card in hand:
             captures = valid_captures(card, s.table)
             if captures:
-                # Must capture — offer all valid capture choices
                 for cap in captures:
                     actions.append(Action(card=card, capture=cap))
             else:
-                # No capture available — can only place
                 actions.append(Action(card=card, capture=None))
 
-        # If a card CAN capture, the player cannot choose to just place it.
-        # Filter: if ANY card has a legal capture, remove all pure-place actions
-        # for THAT card (but other cards with no capture can still just place).
-        # (Per-card obligation: each card independently must capture if it can.)
         return actions
 
     def observe(self, player: int) -> Dict:
@@ -295,9 +234,7 @@ class CuarentaEnv:
         }
         return obs
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # helpers
 
     @staticmethod
     def _deal(deck: List[Card]) -> Tuple[Dict[int, List[Card]], List[Card]]:
@@ -338,10 +275,6 @@ class CuarentaEnv:
 
         # next player starts in new round
         s.current_player = (s.current_player + 1) % NUM_PLAYERS
-
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
 
     def render(self) -> str:
         """Human-readable game state string."""

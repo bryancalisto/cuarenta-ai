@@ -25,7 +25,6 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "onnxscript" },
-    { name = "stable-baselines3" },
     { name = "torch" },
     { name = "tqdm" },
 ]
@@ -41,7 +40,6 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "onnxscript", specifier = ">=0.7.0" },
-    { name = "stable-baselines3", specifier = ">=2.2.1" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]

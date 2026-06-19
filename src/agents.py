@@ -5,9 +5,7 @@ from typing import List
 
 import numpy as np
 import torch
-from stable_baselines3 import PPO
 
-from model import CuarentaNet, ActionMasks
 from env import Action
 from utils import obs_to_tensors
 from imitation_learning.imitation_learning import PolicyNetwork
@@ -73,24 +71,6 @@ class HeuristicAgent:
         places = [a for a in legal if a.capture is None]
         return min(places, key=lambda a: a.card.value)
 
-
-class NetAgent:
-    """Wraps a CuarentaNet for evaluation."""
-
-    def __init__(self, net: CuarentaNet, device: torch.device, deterministic: bool = True):
-        self.net = net
-        self.device = device
-        self.deterministic = deterministic
-        self.net.eval()
-
-    @torch.no_grad()
-    def act(self, obs, legal: List[Action]) -> Action:
-        obs_t = obs_to_tensors([obs], self.device)
-        masks = ActionMasks.from_env_actions([legal])
-        action_idx, _, _ = self.net.act(obs_t, masks, deterministic=self.deterministic)
-        return legal[action_idx]
-
-
 class FlatNetAgent:
     """Wraps a flat PolicyNetwork checkpoint for evaluation."""
 
@@ -114,44 +94,17 @@ class FlatNetAgent:
         return legal[choice]
 
 
-class SB3PPOAgent:
-    """Wraps a Stable-Baselines3 PPO checkpoint for evaluation and play."""
-
-    def __init__(self, model: PPO, deterministic: bool = True):
-        self.model = model
-        self.deterministic = deterministic
-
-    def act(self, obs, legal: List[Action]) -> int:
-        # SB3 expects the raw observation and returns a discrete action index.
-        action, _ = self.model.predict(obs, deterministic=self.deterministic)
-        return int(np.asarray(action).item())
-
-
 def load_agent_from_checkpoint(
     path: str,
     device: torch.device,
     deterministic: bool = True,
 ):
-    """Load a Torch checkpoint, a flat policy snapshot, or an SB3 PPO archive."""
-    if path.endswith(".zip"):
-        model = PPO.load(path, device=str(device))
-        return SB3PPOAgent(model, deterministic=deterministic)
-
     state = torch.load(path, map_location=device, weights_only=False)
 
-    if "net" in state:
-        net = CuarentaNet().to(device)
-        net.load_state_dict(state["net"])
-        net.eval()
-        return NetAgent(net, device, deterministic=deterministic)
-
-    if "policy_state" in state:
-        policy_state = state["policy_state"]
-        obs_size = int(state.get("obs_size", policy_state["fc1.weight"].shape[1]))
-        action_size = int(state.get("action_size", policy_state["fc3.weight"].shape[0]))
-        net = PolicyNetwork(obs_size=obs_size, action_size=action_size).to(device)
-        net.load_state_dict(policy_state)
-        net.eval()
-        return FlatNetAgent(net, device, deterministic=deterministic)
-
-    raise KeyError(f"Unsupported checkpoint format: {path}")
+    policy_state = state["policy_state"]
+    obs_size = int(state.get("obs_size", policy_state["fc1.weight"].shape[1]))
+    action_size = int(state.get("action_size", policy_state["fc3.weight"].shape[0]))
+    net = PolicyNetwork(obs_size=obs_size, action_size=action_size).to(device)
+    net.load_state_dict(policy_state)
+    net.eval()
+    return FlatNetAgent(net, device, deterministic=deterministic)

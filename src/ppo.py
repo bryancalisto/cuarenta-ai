@@ -13,7 +13,6 @@ from __future__ import annotations
 import collections
 import copy
 import random
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,15 +53,14 @@ class PPOConfig:
     # Optimiser
     lr: float = 3e-4
     # Self-play / checkpointing
-    checkpoint_every: int = 50_000
+    checkpoint_every: int = 100_000
     pool_size: int = 20
     opponent_latest: float = 0.8
     opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
-    caida_exposure_penalty: float = 0.5
     save_dir: str = "data/policies"
     init_policy: str = DEFAULT_POLICY_INIT
     # Logging / training length
-    log_every: int = 5
+    log_every: int = 1
     total_steps: int = 5_000_000
 
 
@@ -82,18 +80,6 @@ def clone_state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, to
     return {k: v.detach().cpu().clone() for k, v in state_dict.items()}
 
 
-def next_policy_iter(save_dir: Path) -> int:
-    """Return the next available iteration number for `cuarenta_policy_iterN.pt`."""
-    pattern = re.compile(r"^cuarenta_policy_iter(\d+)\.pt$")
-    max_iter = 0
-    if save_dir.exists():
-        for path in save_dir.glob("cuarenta_policy_iter*.pt"):
-            match = pattern.match(path.name)
-            if match:
-                max_iter = max(max_iter, int(match.group(1)))
-    return max_iter + 1
-
-
 def masked_legal_logits(
     logits_1d: torch.Tensor,
     legal_action_ids: List[int],
@@ -103,12 +89,7 @@ def masked_legal_logits(
 
 
 class FlatActorCritic(nn.Module):
-    """
-    Actor-critic built around the imitation-learning policy network.
-
-    The policy submodule keeps the original `PolicyNetwork` layer names so the
-    imitation checkpoint can be loaded directly into it.
-    """
+    """Actor-critic with imitation-learning policy network base."""
 
     def __init__(self, obs_size: int, action_size: int):
         super().__init__()
@@ -119,20 +100,17 @@ class FlatActorCritic(nn.Module):
             nn.Linear(128, 1),
         )
 
-    def encode(self, obs: torch.Tensor) -> torch.Tensor:
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.policy.relu(self.policy.fc1(obs))
         x = self.policy.relu(self.policy.fc2(x))
-        return x
-
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        hidden = self.encode(obs)
-        logits = self.policy.fc3(hidden)
-        value = self.value_head(hidden).squeeze(-1)
+        logits = self.policy.fc3(x)
+        value = self.value_head(x).squeeze(-1)
         return logits, value
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
-        hidden = self.encode(obs)
-        return self.value_head(hidden).squeeze(-1)
+        x = self.policy.relu(self.policy.fc1(obs))
+        x = self.policy.relu(self.policy.fc2(x))
+        return self.value_head(x).squeeze(-1)
 
 
 @dataclass
@@ -208,9 +186,8 @@ class PPOTrainer:
     """
     Trains a Cuarenta policy with PPO and self-play.
 
-    The agent learns as team 0 (players 0 and 2). Opponents are either a
-    heuristic policy, random policy, or a sampled checkpoint from the
-    current self-play pool.
+    Learns to play optimally from any team via randomized team assignment.
+    Opponents sampled from checkpoint pool (self-play).
     """
 
     def __init__(self, cfg: PPOConfig, device: Optional[str] = None):
@@ -220,7 +197,7 @@ class PPOTrainer:
 
         # Environments
         self.envs = [
-            CuarentaEnv(seed=i, caida_exposure_penalty=cfg.caida_exposure_penalty)
+            CuarentaEnv(seed=i)
             for i in range(cfg.n_envs)
         ]
         self.env_obs = [None] * cfg.n_envs
@@ -232,7 +209,6 @@ class PPOTrainer:
         self.obs_size = int(flatten_obs(sample_obs).shape[0])
         self.action_size = int(self.action_encoders[0].max_action_idx)
 
-        # Networks
         self.net = FlatActorCritic(self.obs_size, self.action_size).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
@@ -240,11 +216,9 @@ class PPOTrainer:
         self.opponent_net.load_state_dict(self.net.policy.state_dict())
         self.opponent_net.eval()
 
-        # Opponent pool for self-play
         self.ckpt_pool: List[Dict[str, torch.Tensor]] = []
         self.ckpt_step: List[int] = []
 
-        # Stats
         self.global_step = 0
         self.episode_rewards = collections.deque(maxlen=100)
         self.episode_lengths = collections.deque(maxlen=100)
@@ -255,23 +229,22 @@ class PPOTrainer:
         self.heuristic_agent = HeuristicAgent()
         self.save_dir = Path(cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        self.next_policy_iter = next_policy_iter(self.save_dir)
-
-    # ── Training loop ────────────────────────────────────────────────────────
 
     def train(self):
         cfg = self.cfg
         rollout_num = 0
-        t0 = time.time()
-        pbar = tqdm(total=cfg.total_steps, desc="Training", unit="step")
+        remaining_steps = cfg.total_steps - self.global_step
 
-        # print(f'self.global_step: {self.global_step}, cfg_total_steps: {cfg.total_steps}')
+        if self.global_step > 0:
+            print(f"[PPO] Resuming from step {self.global_step}. Running {remaining_steps} more steps to reach {cfg.total_steps}.")
+
+        pbar = tqdm(total=remaining_steps, desc="Training", unit="step")
+
         while self.global_step < cfg.total_steps:
             rollout_start = time.time()
             rollouts = self._collect_rollout()
             stats = self._ppo_update(rollouts)
 
-            prev_step = self.global_step
             self.global_step += cfg.n_envs * cfg.n_steps
             rollout_num += 1
 
@@ -282,35 +255,42 @@ class PPOTrainer:
                 self._save_policy_snapshot()
 
             if rollout_num % cfg.log_every == 0:
-                wr = np.mean(self.elo_score) if self.elo_score else float("nan")
+                rew = np.mean(self.episode_rewards) if self.episode_rewards else 0
+                ep_dur = np.mean(self.episode_lengths) if self.episode_lengths else 0
                 pbar.set_postfix_str(
-                    f"ep_rew={np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f} |"
-                    f"win_rate={wr:.3f} | "
-                    f"loss_pi={stats['loss_pi']:.4f} | "
-                    f"loss_vf={stats['loss_vf']:.4f} | "
-                    f"entropy={stats['entropy']:.4f} | "
+                    f"loss_pi={stats['loss_pi']:.4f} "
+                    f"loss_vf={stats['loss_vf']:.4f} "
+                    f"rew={rew:.2f} "
+                    f"ep_dur={ep_dur:.1f} "
+                    f"entropy={stats['entropy']:.4f}"
                 )
 
-            pbar.update(self.global_step - prev_step)
+            pbar.update(cfg.n_envs * cfg.n_steps)
 
         pbar.close()
         final_path = self._save_policy_snapshot()
         plot_path = self._save_training_plots()
+
+        print(f"\n{'='*60}")
         print(f"[PPO] Training complete. {self.global_step} steps.")
-        print(f"[PPO] Final policy snapshot → {final_path}")
-        print(f"[PPO] Training plot → {plot_path}")
+        print(f"{'='*60}")
+        print(f"Mean episode reward:  {np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f}")
+        print(f"Mean episode length:  {np.mean(self.episode_lengths) if self.episode_lengths else 0:.1f}")
+        print(f"Mean policy loss:     {np.mean(self.training_history['loss_pi']) if self.training_history['loss_pi'] else 0:.4f}")
+        print(f"Mean value loss:      {np.mean(self.training_history['loss_vf']) if self.training_history['loss_vf'] else 0:.4f}")
+        print(f"Mean win rate:        {np.mean(self.elo_score) if self.elo_score else 0:.3f}")
+        print(f"Final policy snapshot → {final_path}")
+        print(f"Training plot         → {plot_path}")
+        print(f"{'='*60}\n")
 
     
     def _collect_rollout(self) -> List[Rollout]:
-        """
-        Run n_steps in each env and collect experience for the learning team.
-
-        Team 0 (players 0 and 2) is trained. Team 1 uses the configured opponent.
-        """
+        """Collect experience for learning player (any seat) via self-play."""
         cfg = self.cfg
         rollouts = [Rollout() for _ in range(cfg.n_envs)]
         ep_reward = [0.0] * cfg.n_envs
         ep_len = [0] * cfg.n_envs
+        learning_team = [random.choice([0, 1]) for _ in range(cfg.n_envs)]
 
         self.net.eval()
         with torch.no_grad():
@@ -322,9 +302,10 @@ class PPOTrainer:
                         self.env_done[env_idx] = False
                         ep_reward[env_idx] = 0.0
                         ep_len[env_idx] = 0
+                        learning_team[env_idx] = random.choice([0, 1])
 
                     current_player = env.state.current_player
-                    is_learning = TEAMS[current_player] == 0
+                    is_learning = TEAMS[current_player] == learning_team[env_idx]
                     obs_flat = self.env_obs[env_idx]
                     legal_actions = env.legal_actions()
                     legal_action_ids = [self.action_encoders[env_idx].action_to_idx(a) for a in legal_actions]
@@ -364,7 +345,7 @@ class PPOTrainer:
                         self.episode_rewards.append(ep_reward[env_idx])
                         self.episode_lengths.append(ep_len[env_idx])
                         if "winner" in info:
-                            self.elo_score.append(1.0 if info["winner"] == 0 else 0.0)
+                            self.elo_score.append(1.0 if info["winner"] == learning_team[env_idx] else 0.0)
 
         self.net.train()
         return rollouts
@@ -372,7 +353,6 @@ class PPOTrainer:
 
     def _ppo_update(self, rollouts: List[Rollout]) -> Dict[str, float]:
         cfg = self.cfg
-
         all_obs: List[np.ndarray] = []
         all_actions: List[int] = []
         all_old_lps: List[float] = []
@@ -513,7 +493,7 @@ class PPOTrainer:
         axes[2, 0].set_ylabel("Metric value")
 
         fig.suptitle(
-            f"Cuarenta PPO Training Metrics (steps={int(self.global_step)}, iter={self.next_policy_iter - 1})",
+            f"Cuarenta PPO Training Metrics (steps={int(self.global_step)})",
             fontsize=16,
         )
         fig.tight_layout(rect=[0, 0.02, 1, 0.97])
@@ -530,8 +510,7 @@ class PPOTrainer:
         return plot_path
 
     def _save_policy_snapshot(self) -> Path:
-        path = self.save_dir / f"cuarenta_policy_iter{self.next_policy_iter}.pt"
-        self.next_policy_iter += 1
+        path = self.save_dir / f"policy_{self.global_step}.pt"
 
         state = {
             "step": self.global_step,
@@ -542,7 +521,7 @@ class PPOTrainer:
             "action_size": self.action_size,
         }
         torch.save(state, path)
-        print(f"[PPO] Saved policy snapshot → {path}")
+        print(f"[PPO] Checkpoint → {path}")
 
         self.ckpt_pool.append(clone_state_dict_to_cpu(self.net.policy.state_dict()))
         self.ckpt_step.append(self.global_step)
@@ -569,23 +548,22 @@ class PPOTrainer:
         self.opponent_net.eval()
 
     def load_policy(self, path: str):
-        """Warm-start from a policy checkpoint or an imitation-learning policy file."""
         state = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "net" in state:
-            self.net.load_state_dict(state["net"])
-            if "opt" in state:
-                self.opt.load_state_dict(state["opt"])
-            self.global_step = int(state.get("step", 0))
-        else:
-            if "policy_state" not in state:
-                raise KeyError(f"Unsupported checkpoint format: {path}")
-            self.net.policy.load_state_dict(state["policy_state"])
-            if "value_state" in state:
-                self.net.value_head.load_state_dict(state["value_state"])
-            if "optimizer_state" in state:
-                self.opt.load_state_dict(state["optimizer_state"])
-            self.global_step = int(state.get("step", 0))
+        # if "net" in state:
+        #     self.net.load_state_dict(state["net"])
+        #     if "opt" in state:
+        #         self.opt.load_state_dict(state["opt"])
+        #     self.global_step = int(state.get("step", 0))
+        # else:
+        if "policy_state" not in state:
+            raise KeyError(f"Unsupported checkpoint format: {path}")
+        self.net.policy.load_state_dict(state["policy_state"])
+        if "value_state" in state:
+            self.net.value_head.load_state_dict(state["value_state"])
+        if "optimizer_state" in state:
+            self.opt.load_state_dict(state["optimizer_state"])
+        self.global_step = int(state.get("step", 0))
 
         self.opponent_net.load_state_dict(self.net.policy.state_dict())
         self.opponent_net.eval()
@@ -621,7 +599,6 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         init_policy=args.init_policy,
         opponent_mode=args.opponent_mode,
-        caida_exposure_penalty=args.caida_exposure_penalty,
     )
 
     trainer = PPOTrainer(cfg, device=args.device)
