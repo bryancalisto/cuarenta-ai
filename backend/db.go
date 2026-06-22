@@ -27,7 +27,6 @@ type Database interface {
 	GetGame(gameId string) (models.Game, bool)
 	CreateGame(creatorId string, player models.HumanPlayer) (models.Game, error)
 	UpdateGame(gameId string, game models.Game) error
-	FindGame(gameId string) (*models.Game, bool)
 	JoinGame(gameId string, player models.HumanPlayer) (models.Game, error)
 	StartGame(gameId string, requesterId string) (models.Game, error)
 	CancelGame(gameId string, requesterId string) (models.Game, error)
@@ -287,17 +286,6 @@ func (db *MemDatabase) UpdateGame(gameId string, game models.Game) error {
 
 	db.games[gameId] = game
 	return nil
-}
-
-func (db *MemDatabase) FindGame(gameId string) (*models.Game, bool) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if game, found := db.games[gameId]; !found {
-		return nil, false
-	} else {
-		return &game, true
-	}
 }
 
 func (db *MemDatabase) JoinGame(gameId string, player models.HumanPlayer) (models.Game, error) {

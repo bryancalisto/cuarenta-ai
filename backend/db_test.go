@@ -79,19 +79,20 @@ func TestUpdateGame(t *testing.T) {
 		db := NewMemDatabase(context.Background(), clock.NewMock())
 		// create a mock game
 		creatorId := getUid()
-		game, err := db.CreateGame(creatorId, models.HumanPlayer{UserId: creatorId})
+		game, err := db.CreateGame(creatorId, models.HumanPlayer{UserId: creatorId, Index: 1, Team: 1})
 
 		if err != nil {
-			t.Error("CreateGame failed")
+			t.Errorf("CreateGame failed: %v", err)
 		}
+		gameCopy := game
 
-		game.DurationSeconds = 123456
+		gameCopy.DurationSeconds = 123456
 
-		if err := db.UpdateGame(game.Id, game); err != nil {
+		if err := db.UpdateGame(game.Id, gameCopy); err != nil {
 			t.Errorf("Update Game failed: %v", err)
 		}
 
-		updatedGame, _ := db.FindGame(game.Id)
+		updatedGame, _ := db.GetGame(game.Id)
 
 		if reflect.DeepEqual(game, updatedGame) {
 			t.Error("game and updatedGame look the same")

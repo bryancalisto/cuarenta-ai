@@ -72,10 +72,8 @@ func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 	}
 
 	// Act
-	clock := clock.NewMock()
-	db := NewMemDatabase(context.TODO(), clock)
 	inferService := infer.NewInferenceService()
-	gameplay := NewMainGameplay(db, clock, inferService)
+	gameplay := NewMainGameplay(DB, clockMock, inferService)
 	_, err = gameplay.playHumanTurn(gameObj.Id, creatorID, dto)
 	if err != nil {
 		t.Fatalf("playHumanTurn failed: %v", err)
