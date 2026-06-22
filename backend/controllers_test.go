@@ -1,4 +1,4 @@
-package main
+package cua
 
 import (
 	"bytes"
@@ -62,4 +62,9 @@ func TestBindJSONDTO(t *testing.T) {
 			t.Errorf("expected default status (200), got %d", r.Code)
 		}
 	})
+}
+
+func TestSignUpCtl(t *testing.T) {
+	t.Run("StatusConflict if user already exists", func(t *testing.T) {})
+	t.Run("StatusConflict if user already exists", func(t *testing.T) {})
 }

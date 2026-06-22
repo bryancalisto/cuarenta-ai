@@ -1,8 +1,7 @@
-package main
+package cua
 
 import (
-	"cuarenta/internal/auth"
-	"cuarenta/internal/models"
+	"cua/internal/models"
 	"encoding/json"
 	"errors"
 	"log"
@@ -205,22 +204,28 @@ func publicUser(user models.User) gin.H {
 	}
 }
 
-func GameSnapshotCtl(c *gin.Context) {
+func (s *Server) PingCtl(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "pong",
+	})
+}
+
+func (s *Server) GameSnapshotCtl(c *gin.Context) {
 	gameId := normalizeGameId(c.Param("code"))
-	game, exists := DB.GetGame(gameId)
+	game, exists := s.DB.GetGame(gameId)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Game not found"})
 		return
 	}
 
-	if err := playAITurns(gameId); err != nil {
+	if err := s.gameplay.playAITurns(gameId); err != nil {
 		log.Printf("GameSnapshotCtl error: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"game": game})
 }
 
-func SignUpCtl(c *gin.Context) {
+func (s *Server) SignUpCtl(c *gin.Context) {
 	var dto SignUpDTO
 	if err := bindJSONDTO(c, &dto); err != nil {
 		return
@@ -232,12 +237,12 @@ func SignUpCtl(c *gin.Context) {
 		return
 	}
 
-	if _, exists := DB.FindUserByEmail(email); exists {
+	if _, exists := s.DB.FindUserByEmail(email); exists {
 		c.JSON(http.StatusConflict, gin.H{"error": "A user with that email already exists"})
 		return
 	}
 
-	hash, err := auth.HashPassword(dto.Password)
+	hash, err := s.AuthService.HashPassword(dto.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not hash password"})
 		return
@@ -249,13 +254,13 @@ func SignUpCtl(c *gin.Context) {
 		Password: hash,
 	}
 
-	if err := DB.AddUser(user); err != nil {
+	if err := s.DB.AddUser(user); err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
 
-	token, err := auth.GenerateJWT(user.Id)
+	token, err := s.AuthService.GenerateJWT(user.Id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate access token"})
 		return
@@ -267,20 +272,20 @@ func SignUpCtl(c *gin.Context) {
 	})
 }
 
-func SignInCtl(c *gin.Context) {
+func (s *Server) SignInCtl(c *gin.Context) {
 	var dto SignInDTO
 	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
 	email := normalizeEmail(dto.Email)
-	user, exists := DB.FindUserByEmail(email)
-	if !exists || !auth.CheckPasswordHash(dto.Password, user.Password) {
+	user, exists := s.DB.FindUserByEmail(email)
+	if !exists || !s.AuthService.CheckPasswordHash(dto.Password, user.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
 	}
 
-	token, err := auth.GenerateJWT(user.Id)
+	token, err := s.AuthService.GenerateJWT(user.Id)
 	if err != nil {
 		log.Println(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate access token"})
@@ -293,10 +298,10 @@ func SignInCtl(c *gin.Context) {
 	})
 }
 
-func RefreshJwtCtl(c *gin.Context) {
+func (s *Server) RefreshJwtCtl(c *gin.Context) {
 	userId := c.GetString("userId")
 
-	token, err := auth.GenerateJWT(userId)
+	token, err := s.AuthService.GenerateJWT(userId)
 	if err != nil {
 		log.Println(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate access token"})
@@ -308,26 +313,26 @@ func RefreshJwtCtl(c *gin.Context) {
 	})
 }
 
-func MyGamesCtl(c *gin.Context) {
+func (s *Server) MyGamesCtl(c *gin.Context) {
 	userId := c.GetString("userId")
-	games := DB.GetGamesByUser(userId)
+	games := s.DB.GetGamesByUser(userId)
 	c.JSON(http.StatusOK, gin.H{"games": games})
 }
 
-func CreateWsTicketCtl(c *gin.Context) {
+func (s *Server) CreateWsTicketCtl(c *gin.Context) {
 	userId := c.GetString("userId")
-	ticket := DB.CreateWsTicket(userId)
+	ticket := s.DB.CreateWsTicket(userId)
 	c.JSON(http.StatusOK, gin.H{"ticket": ticket.Code})
 }
 
-func CreateGameCtl(c *gin.Context) {
+func (s *Server) CreateGameCtl(c *gin.Context) {
 	var dto GameCreateDTO
 	if err := bindJSONDTO(c, &dto); err != nil {
 		return
 	}
 
 	userId := c.GetString("userId")
-	game, err := DB.CreateGame(userId, models.HumanPlayer{
+	game, err := s.DB.CreateGame(userId, models.HumanPlayer{
 		UserId: userId,
 		Index:  dto.SpotIndex,
 		Team:   dto.Team,
@@ -342,7 +347,7 @@ func CreateGameCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"game": game})
 }
 
-func JoinGameCtl(c *gin.Context) {
+func (s *Server) JoinGameCtl(c *gin.Context) {
 	var dto GameJoinDTO
 
 	if err := bindJSONDTO(c, &dto); err != nil {
@@ -350,7 +355,7 @@ func JoinGameCtl(c *gin.Context) {
 	}
 
 	userId := c.GetString("userId")
-	game, err := DB.JoinGame(c.Param("code"), models.HumanPlayer{
+	game, err := s.DB.JoinGame(c.Param("code"), models.HumanPlayer{
 		UserId: userId,
 		Index:  dto.SpotIndex,
 		Team:   dto.Team,
@@ -365,16 +370,16 @@ func JoinGameCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"game": game})
 }
 
-func StartGameCtl(c *gin.Context) {
+func (s *Server) StartGameCtl(c *gin.Context) {
 	userId := c.GetString("userId")
-	game, err := DB.StartGame(c.Param("code"), userId)
+	game, err := s.DB.StartGame(c.Param("code"), userId)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
 
-	updated, err := startRunningGame(game)
+	updated, err := s.gameplay.startRunningGame(game)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
@@ -384,11 +389,11 @@ func StartGameCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"game": updated})
 }
 
-func CancelGameCtl(c *gin.Context) {
+func (s *Server) CancelGameCtl(c *gin.Context) {
 	userId := c.GetString("userId")
 	gameId := c.Param("code")
 
-	game, err := DB.CancelGame(gameId, userId)
+	game, err := s.DB.CancelGame(gameId, userId)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
@@ -398,14 +403,14 @@ func CancelGameCtl(c *gin.Context) {
 	hub.broadcast(game)
 
 	if session, ok := getSession(gameId); ok {
-		close(session.aiTurnChan)
+		close(session.AiTurnChan)
 	}
 	deleteSession(gameId)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
 }
 
-func PlayGameCtl(c *gin.Context) {
+func (s *Server) PlayGameCtl(c *gin.Context) {
 	var dto PlayGameDTO
 
 	if err := bindJSONDTO(c, &dto); err != nil {
@@ -414,7 +419,7 @@ func PlayGameCtl(c *gin.Context) {
 
 	userId := c.GetString("userId")
 	log.Println("Calling playHumanTurn in PlayGameCtl")
-	updated, err := playHumanTurn(c.Param("code"), userId, dto)
+	updated, err := s.gameplay.playHumanTurn(c.Param("code"), userId, dto)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
@@ -442,13 +447,13 @@ func ExitCtl(quit chan os.Signal) func(c *gin.Context) {
 	}
 }
 
-func subscribeToGame(client *wsClient, gameId string) {
+func (s *Server) subscribeToGame(client *wsClient, gameId string) {
 	gameId = normalizeGameId(gameId)
 	if gameId == "" {
 		return
 	}
 
-	if game, exists := DB.GetGame(gameId); exists {
+	if game, exists := s.DB.GetGame(gameId); exists {
 		hub.attach(client, gameId)
 		_ = client.send(wsServerMessage{
 			Type: "game.snapshot",
@@ -460,9 +465,9 @@ func subscribeToGame(client *wsClient, gameId string) {
 	sendWsError(client, http.StatusNotFound, "Game not found")
 }
 
-func WsCtl(c *gin.Context) {
+func (s *Server) WsCtl(c *gin.Context) {
 	ticketCode := strings.TrimSpace(c.Query("ticket"))
-	ticket, valid := DB.ValidateWsTicket(ticketCode)
+	ticket, valid := s.DB.ValidateWsTicket(ticketCode)
 
 	userId := ticket.UserId
 
@@ -535,7 +540,7 @@ func WsCtl(c *gin.Context) {
 
 	if initialGameId := c.Query("gameId"); initialGameId != "" {
 		log.Printf("[WS] Client %s subscribing to game %s", userId, initialGameId)
-		subscribeToGame(client, initialGameId)
+		s.subscribeToGame(client, initialGameId)
 	}
 
 	for {
@@ -545,7 +550,7 @@ func WsCtl(c *gin.Context) {
 			break
 		}
 
-		log.Printf("[WS] Message from %s: type=%s", userId, message.Type)
+		// log.Printf("[WS] Message from %s: type=%s", userId, message.Type)
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch message.Type {
@@ -555,7 +560,7 @@ func WsCtl(c *gin.Context) {
 				sendWsError(client, http.StatusBadRequest, "Invalid subscribe payload")
 				continue
 			}
-			subscribeToGame(client, payload.GameId)
+			s.subscribeToGame(client, payload.GameId)
 		case "game.action":
 			var payload map[string]interface{}
 			if err := json.Unmarshal(message.Payload, &payload); err != nil {
@@ -587,7 +592,7 @@ func WsCtl(c *gin.Context) {
 				CardIndex:      int(cardIndex),
 				CaptureIndices: captureIndices,
 			}
-			_, err := playHumanTurn(gameId, client.userId, dto)
+			_, err := s.gameplay.playHumanTurn(gameId, client.userId, dto)
 			if err != nil {
 				sendWsError(client, http.StatusBadRequest, err.Error())
 				continue

@@ -1,6 +1,7 @@
-package main
+package cua
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -8,10 +9,29 @@ import (
 	"sync"
 	"time"
 
-	"cuarenta/internal/game"
-	infer "cuarenta/internal/inference"
-	"cuarenta/internal/models"
+	"cua/internal/game"
+	"cua/internal/models"
+
+	"github.com/benbjohnson/clock"
 )
+
+type Gameplay interface {
+	processGameAction(clien *wsClient, payload map[string]interface{}) error
+	startRunningGame(snapshot models.Game) (models.Game, error)
+	playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, error)
+	playAITurns(gameId string) error
+	cancelRunningGames() int
+}
+
+type MainGameplay struct {
+	clock        clock.Clock
+	db           Database
+	inferService InferenceService
+}
+
+func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService) Gameplay {
+	return &MainGameplay{db: db, clock: clock, inferService: inferService}
+}
 
 type PlayGameDTO struct {
 	CardIndex      int   `json:"cardIndex"`
@@ -19,18 +39,56 @@ type PlayGameDTO struct {
 }
 
 type gameSession struct {
-	mu         sync.Mutex
-	aiTurnChan chan int
+	Mu         sync.Mutex
+	AiTurnChan chan int
 	env        *game.Env
 	stepCount  int
 	humanSeats map[int]string
 }
 
-var sessions = struct {
-	mu sync.RWMutex
-	m  map[string]*gameSession
+var Sessions = struct {
+	Mu sync.RWMutex
+	M  map[string]*gameSession
 }{
-	m: make(map[string]*gameSession),
+	M: make(map[string]*gameSession),
+}
+
+var (
+	ErrMissingGameId   = errors.New("missing game ID")
+	ErrMissingCardIdx  = errors.New("missing cardIndex")
+	ErrHumanTurnFailed = errors.New("error on human turn")
+)
+
+func (g MainGameplay) processGameAction(client *wsClient, payload map[string]interface{}) error {
+	// log.Println("game.action:", payload)
+	gameId, ok := payload["gameId"].(string)
+	if !ok {
+		return ErrMissingGameId
+	}
+	cardIndex, ok := payload["cardIndex"].(float64)
+	if !ok {
+		return ErrMissingCardIdx
+	}
+
+	captureIndices := []int{}
+	if captures, ok := payload["captureIndices"].([]interface{}); ok {
+		for _, c := range captures {
+			if idx, ok := c.(float64); ok {
+				captureIndices = append(captureIndices, int(idx))
+			}
+		}
+	}
+
+	dto := PlayGameDTO{
+		CardIndex:      int(cardIndex),
+		CaptureIndices: captureIndices,
+	}
+
+	if _, err := g.playHumanTurn(gameId, client.userId, dto); err != nil {
+		return ErrHumanTurnFailed
+	}
+
+	return nil
 }
 
 func normalizeCaptureIndices(indices []int) []int {
@@ -84,23 +142,23 @@ func humanSeats(snapshot models.Game) map[int]string {
 }
 
 func getSession(gameId string) (*gameSession, bool) {
-	sessions.mu.RLock()
-	defer sessions.mu.RUnlock()
+	Sessions.Mu.RLock()
+	defer Sessions.Mu.RUnlock()
 
-	session, ok := sessions.m[normalizeGameId(gameId)]
+	session, ok := Sessions.M[normalizeGameId(gameId)]
 	return session, ok
 }
 
 func setSession(gameId string, session *gameSession) {
-	sessions.mu.Lock()
-	defer sessions.mu.Unlock()
-	sessions.m[normalizeGameId(gameId)] = session
+	Sessions.Mu.Lock()
+	defer Sessions.Mu.Unlock()
+	Sessions.M[normalizeGameId(gameId)] = session
 }
 
 func deleteSession(gameId string) {
-	sessions.mu.Lock()
-	defer sessions.mu.Unlock()
-	delete(sessions.m, normalizeGameId(gameId))
+	Sessions.Mu.Lock()
+	defer Sessions.Mu.Unlock()
+	delete(Sessions.M, normalizeGameId(gameId))
 }
 
 func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) models.Game {
@@ -151,18 +209,8 @@ func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) 
 	return snapshot
 }
 
-func persistGameSnapshot(snapshot models.Game) {
-	if DB == nil {
-		return
-	}
-
-	DB.mu.Lock()
-	defer DB.mu.Unlock()
-	DB.games[normalizeGameId(snapshot.Id)] = snapshot
-}
-
-func publishGameSnapshot(snapshot models.Game) {
-	persistGameSnapshot(snapshot)
+func (g *MainGameplay) publishGameSnapshot(snapshot models.Game) {
+	g.db.UpdateGame(snapshot.Id, snapshot)
 	hub.broadcast(snapshot)
 }
 
@@ -171,7 +219,7 @@ func newGameSession(snapshot models.Game) *gameSession {
 	return &gameSession{
 		env:        game.NewEnv(time.Now().UnixNano(), aiTurnChan),
 		humanSeats: humanSeats(snapshot),
-		aiTurnChan: aiTurnChan,
+		AiTurnChan: aiTurnChan,
 	}
 }
 
@@ -187,13 +235,13 @@ func prepareSession(snapshot models.Game) (*gameSession, models.Game, error) {
 	return session, sessionSnapshot(snapshot, session, nil), nil
 }
 
-func startRunningGame(snapshot models.Game) (models.Game, error) {
+func (g *MainGameplay) startRunningGame(snapshot models.Game) (models.Game, error) {
 	_, updated, err := prepareSession(snapshot)
 	if err != nil {
 		return models.Game{}, err
 	}
 
-	publishGameSnapshot(updated)
+	g.publishGameSnapshot(updated)
 
 	session, ok := getSession(snapshot.Id)
 
@@ -203,9 +251,9 @@ func startRunningGame(snapshot models.Game) (models.Game, error) {
 
 	updated = sessionSnapshot(snapshot, session, nil)
 
-	go aiTurnsRunner(updated.Id, session.aiTurnChan)
+	go g.aiTurnsRunner(updated.Id, session.AiTurnChan)
 
-	session.aiTurnChan <- updated.CurrentPlayer
+	session.AiTurnChan <- updated.CurrentPlayer
 	return updated, nil
 }
 
@@ -256,9 +304,9 @@ func matchLegalAction(action game.Action, legal []game.Action) (game.Action, boo
 	return game.Action{}, false
 }
 
-func aiTurnsRunner(gameId string, aiTurnChan chan int) {
+func (g *MainGameplay) aiTurnsRunner(gameId string, aiTurnChan chan int) {
 	for range aiTurnChan {
-		playAITurns(gameId)
+		g.playAITurns(gameId)
 	}
 }
 
@@ -272,16 +320,16 @@ func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {
 	return matches
 }
 
-func getGameDurationSeconds(game models.Game) int {
+func (g *MainGameplay) getGameDurationSeconds(game models.Game) int {
 	duration, err := time.Parse(time.RFC3339, game.StartedAt)
 	if err != nil {
 		log.Fatal("Failed to parsed date")
 	}
-	return int(DB.clock.Now().Sub(duration).Seconds())
+	return int(g.clock.Now().Sub(duration).Seconds())
 }
 
-func playAITurn(gameId string) error {
-	base, exists := DB.GetGame(gameId)
+func (g *MainGameplay) playAITurn(gameId string) error {
+	base, exists := g.db.GetGame(gameId)
 
 	if !exists {
 		return ErrGameNotFound
@@ -295,8 +343,8 @@ func playAITurn(gameId string) error {
 		return ErrGameNotRunning
 	}
 
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.Mu.Lock()
+	defer session.Mu.Unlock()
 
 	state := session.env.State()
 	if state == nil {
@@ -305,7 +353,7 @@ func playAITurn(gameId string) error {
 
 	if state.Done {
 		snapshot := sessionSnapshot(base, session, nil)
-		publishGameSnapshot(snapshot)
+		g.publishGameSnapshot(snapshot)
 		return nil
 	}
 
@@ -316,7 +364,7 @@ func playAITurn(gameId string) error {
 		return fmt.Errorf("ai turn has no legal actions")
 	}
 	obs := game.FlattenObservation(session.env.Observe(currentSeat))
-	action, _, err := infer.PredictAction(obs, legal)
+	action, _, err := g.inferService.PredictAction(obs, legal)
 	if err != nil {
 		log.Printf("AI inference failed for game %s: %v; falling back to first legal action", base.Id, err)
 		action = legal[0]
@@ -325,7 +373,7 @@ func playAITurn(gameId string) error {
 	_, done, _, err := session.env.Step(action)
 
 	if done {
-		base.DurationSeconds = getGameDurationSeconds(base)
+		base.DurationSeconds = g.getGameDurationSeconds(base)
 		log.Println("Game has ended in AI turn")
 	}
 
@@ -339,12 +387,17 @@ func playAITurn(gameId string) error {
 
 	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
-		publishGameSnapshot(snapshot)
+		g.publishGameSnapshot(snapshot)
 		return err
 	}
 
-	publishGameSnapshot(snapshot)
+	g.publishGameSnapshot(snapshot)
 	return nil
+}
+
+func (g *MainGameplay) cancelRunningGames() int {
+	count := g.db.CancelInProgressGames()
+	return count
 }
 
 // Return random milliseconds for slee[1, 3]
@@ -353,8 +406,8 @@ func randomSleep() {
 	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
 }
 
-func playAITurns(gameId string) error {
-	base, exists := DB.GetGame(gameId)
+func (g *MainGameplay) playAITurns(gameId string) error {
+	base, exists := g.db.GetGame(gameId)
 
 	if !exists {
 		return ErrGameNotFound
@@ -388,7 +441,7 @@ func playAITurns(gameId string) error {
 
 		randomSleep()
 
-		if err := playAITurn(gameId); err != nil {
+		if err := g.playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
 		}
 	}
@@ -396,8 +449,8 @@ func playAITurns(gameId string) error {
 	return nil
 }
 
-func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, error) {
-	base, exists := DB.GetGame(gameId)
+func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, error) {
+	base, exists := g.db.GetGame(gameId)
 	if !exists {
 		return models.Game{}, ErrGameNotFound
 	}
@@ -410,8 +463,8 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 		return models.Game{}, ErrGameNotRunning
 	}
 
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.Mu.Lock()
+	defer session.Mu.Unlock()
 
 	state := session.env.State()
 	if state == nil {
@@ -419,7 +472,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	}
 	if state.Done {
 		snapshot := sessionSnapshot(base, session, nil)
-		publishGameSnapshot(snapshot)
+		g.publishGameSnapshot(snapshot)
 		return snapshot, nil
 	}
 
@@ -452,7 +505,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 				CaptureIndices: cardIndices(act.Capture),
 			}
 		}
-		publishGameSnapshot(snapshot)
+		g.publishGameSnapshot(snapshot)
 		return snapshot, nil
 	}
 
@@ -468,7 +521,7 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 	_, done, _, err := session.env.Step(action)
 
 	if done {
-		base.DurationSeconds = getGameDurationSeconds(base)
+		base.DurationSeconds = g.getGameDurationSeconds(base)
 		log.Println("Game has ended in human turn")
 	}
 
@@ -482,12 +535,12 @@ func playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, 
 
 	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
-		publishGameSnapshot(snapshot)
+		g.publishGameSnapshot(snapshot)
 		return snapshot, err
 	}
 
-	publishGameSnapshot(snapshot)
+	g.publishGameSnapshot(snapshot)
 
-	session.aiTurnChan <- snapshot.CurrentPlayer
+	session.AiTurnChan <- snapshot.CurrentPlayer
 	return models.Game{}, nil
 }

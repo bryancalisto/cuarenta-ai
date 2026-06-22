@@ -1,9 +1,10 @@
-package main
+package cua
 
 import (
+	"context"
 	"crypto/rand"
-	"cuarenta/internal/config"
-	"cuarenta/internal/models"
+	"cua/internal/config"
+	"cua/internal/models"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -17,6 +18,29 @@ import (
 	"github.com/benbjohnson/clock"
 )
 
+type Database interface {
+	WriteToDisk() error
+	LoadFromDisk() error
+	AddUser(user models.User) error
+	FindUserByEmail(email string) (models.User, bool)
+	GetUser(userId string) (models.User, bool)
+	GetGame(gameId string) (models.Game, bool)
+	CreateGame(creatorId string, player models.HumanPlayer) (models.Game, error)
+	UpdateGame(gameId string, game models.Game) error
+	FindGame(gameId string) (*models.Game, bool)
+	JoinGame(gameId string, player models.HumanPlayer) (models.Game, error)
+	StartGame(gameId string, requesterId string) (models.Game, error)
+	CancelGame(gameId string, requesterId string) (models.Game, error)
+	CreateWsTicket(userId string) models.WsTicket
+	DeleteExpiredWsTickets() int
+	ValidateWsTicket(ticketCode string) (*models.WsTicket, bool)
+	// Cancels in-progress games. Used on shutdown because currently the session and games are corrupted on server shutdown / restart.
+	CancelInProgressGames() int
+	GetGamesByCreator(creatorId string) []models.Game
+	GetGamesByUser(userId string) []models.Game
+	Setup() error
+}
+
 // to be able to write it to disk
 type serializableDatabase struct {
 	Users     map[string]models.User
@@ -25,7 +49,8 @@ type serializableDatabase struct {
 	CreatedAt time.Time
 }
 
-type Database struct {
+type MemDatabase struct {
+	ctx       context.Context
 	clock     clock.Clock
 	mu        sync.RWMutex
 	users     map[string]models.User
@@ -34,7 +59,7 @@ type Database struct {
 	createdAt time.Time
 }
 
-func (d *Database) WriteToDisk() error {
+func (d *MemDatabase) WriteToDisk() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	dbPath := config.GetEnv().DbPath
@@ -54,7 +79,7 @@ func (d *Database) WriteToDisk() error {
 	return nil
 }
 
-func (d *Database) LoadFromDisk() error {
+func (d *MemDatabase) LoadFromDisk() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -97,16 +122,31 @@ var (
 	ErrAlreadyInGame           = errors.New("player already in game")
 	ErrLoadDbFromDisk          = errors.New("could not load DB from disk")
 	ErrWriteDbToDisk           = errors.New("could not write DB into disk")
+	ErrNotFound                = errors.New("record not found")
 )
 
-func NewDatabase(clock clock.Clock) *Database {
-	return &Database{
+func NewMemDatabase(ctx context.Context, clock clock.Clock) Database {
+	return &MemDatabase{
+		ctx:       ctx,
 		clock:     clock,
 		createdAt: clock.Now().UTC(),
 		users:     make(map[string]models.User),
 		games:     make(map[string]models.Game),
 		tickets:   make(map[string]models.WsTicket),
 	}
+}
+
+func (d *MemDatabase) Setup() error {
+	err := d.LoadFromDisk()
+
+	if err != nil {
+		log.Printf("Failed to load DB file from disk: %v", err)
+		return err
+	} else {
+		log.Println("Loaded DB from disk")
+	}
+
+	return nil
 }
 
 func normalizeEmail(email string) string {
@@ -142,7 +182,7 @@ func validatePlayerPlacement(player models.HumanPlayer) error {
 	return nil
 }
 
-func (db *Database) AddUser(user models.User) error {
+func (db *MemDatabase) AddUser(user models.User) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -156,7 +196,7 @@ func (db *Database) AddUser(user models.User) error {
 	return nil
 }
 
-func (db *Database) FindUserByEmail(email string) (models.User, bool) {
+func (db *MemDatabase) FindUserByEmail(email string) (models.User, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -169,7 +209,7 @@ func (db *Database) FindUserByEmail(email string) (models.User, bool) {
 	return models.User{}, false
 }
 
-func (db *Database) GetUser(userId string) (models.User, bool) {
+func (db *MemDatabase) GetUser(userId string) (models.User, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -177,7 +217,7 @@ func (db *Database) GetUser(userId string) (models.User, bool) {
 	return user, ok
 }
 
-func (db *Database) GetGame(gameId string) (models.Game, bool) {
+func (db *MemDatabase) GetGame(gameId string) (models.Game, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -185,7 +225,7 @@ func (db *Database) GetGame(gameId string) (models.Game, bool) {
 	return game, ok
 }
 
-func (db *Database) uniqueGameId() (string, error) {
+func (db *MemDatabase) uniqueGameId() (string, error) {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 	for attempts := 0; attempts < 64; attempts++ {
@@ -209,7 +249,7 @@ func (db *Database) uniqueGameId() (string, error) {
 	return "", fmt.Errorf("could not generate unique game id")
 }
 
-func (db *Database) CreateGame(creatorId string, player models.HumanPlayer) (models.Game, error) {
+func (db *MemDatabase) CreateGame(creatorId string, player models.HumanPlayer) (models.Game, error) {
 	if err := validatePlayerPlacement(player); err != nil {
 		return models.Game{}, err
 	}
@@ -237,7 +277,30 @@ func (db *Database) CreateGame(creatorId string, player models.HumanPlayer) (mod
 	return game, nil
 }
 
-func (db *Database) JoinGame(gameId string, player models.HumanPlayer) (models.Game, error) {
+func (db *MemDatabase) UpdateGame(gameId string, game models.Game) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, found := db.games[gameId]; !found {
+		return ErrNotFound
+	}
+
+	db.games[gameId] = game
+	return nil
+}
+
+func (db *MemDatabase) FindGame(gameId string) (*models.Game, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if game, found := db.games[gameId]; !found {
+		return nil, false
+	} else {
+		return &game, true
+	}
+}
+
+func (db *MemDatabase) JoinGame(gameId string, player models.HumanPlayer) (models.Game, error) {
 	if err := validatePlayerPlacement(player); err != nil {
 		return models.Game{}, err
 	}
@@ -271,7 +334,7 @@ func (db *Database) JoinGame(gameId string, player models.HumanPlayer) (models.G
 	return game, nil
 }
 
-func (db *Database) StartGame(gameId string, requesterId string) (models.Game, error) {
+func (db *MemDatabase) StartGame(gameId string, requesterId string) (models.Game, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -298,7 +361,7 @@ func (db *Database) StartGame(gameId string, requesterId string) (models.Game, e
 	return game, nil
 }
 
-func (db *Database) CancelGame(gameId string, requesterId string) (models.Game, error) {
+func (db *MemDatabase) CancelGame(gameId string, requesterId string) (models.Game, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -317,7 +380,7 @@ func (db *Database) CancelGame(gameId string, requesterId string) (models.Game, 
 	return game, nil
 }
 
-func (db *Database) CreateWsTicket(userId string) models.WsTicket {
+func (db *MemDatabase) CreateWsTicket(userId string) models.WsTicket {
 	const secondsToLive = 3
 	code := getUid()
 	expiresAt := db.clock.Now().UTC().Add(time.Second * secondsToLive)
@@ -330,7 +393,7 @@ func (db *Database) CreateWsTicket(userId string) models.WsTicket {
 	return ticket
 }
 
-func (db *Database) DeleteExpiredWsTickets() int {
+func (db *MemDatabase) DeleteExpiredWsTickets() int {
 	count := 0
 	currentTime := db.clock.Now().UTC()
 	for _, ticket := range db.tickets {
@@ -345,7 +408,7 @@ func (db *Database) DeleteExpiredWsTickets() int {
 	return count
 }
 
-func (db *Database) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool) {
+func (db *MemDatabase) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool) {
 	db.mu.RLock()
 	ticket, ok := db.tickets[ticketCode]
 	db.mu.RUnlock()
@@ -361,7 +424,7 @@ func (db *Database) ValidateWsTicket(ticketCode string) (*models.WsTicket, bool)
 }
 
 // Cancels in-progress games. Used on shutdown because currently the session and games are corrupted on server shutdown / restart.
-func (db *Database) CancelInProgressGames() int {
+func (db *MemDatabase) CancelInProgressGames() int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -377,7 +440,7 @@ func (db *Database) CancelInProgressGames() int {
 	return count
 }
 
-func (db *Database) GetGamesByCreator(creatorId string) []models.Game {
+func (db *MemDatabase) GetGamesByCreator(creatorId string) []models.Game {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -390,7 +453,7 @@ func (db *Database) GetGamesByCreator(creatorId string) []models.Game {
 	return games
 }
 
-func (db *Database) GetGamesByUser(userId string) []models.Game {
+func (db *MemDatabase) GetGamesByUser(userId string) []models.Game {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 

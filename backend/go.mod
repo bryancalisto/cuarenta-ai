@@ -1,4 +1,4 @@
-module cuarenta
+module cua
 
 go 1.25.0
 

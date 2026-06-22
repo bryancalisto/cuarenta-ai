@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"cuarenta/internal/config"
+	"cua/internal/config"
 	"net/http"
 	"strings"
 
@@ -10,7 +10,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func GenerateJWT(userId string) (string, error) {
+type AuthService struct{}
+
+func NewAuthService() *AuthService {
+	return &AuthService{}
+}
+
+func (a *AuthService) GenerateJWT(userId string) (string, error) {
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"userId": userId,
 	})
@@ -23,7 +29,7 @@ func GenerateJWT(userId string) (string, error) {
 	return s, nil
 }
 
-func ValidateJWT(tokenString string) (bool, string, error) {
+func (a *AuthService) ValidateJWT(tokenString string) (bool, string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
@@ -47,11 +53,11 @@ func ValidateJWT(tokenString string) (bool, string, error) {
 	return token.Valid, userId, nil
 }
 
-func RefreshJWT(userId string) (string, error) {
-	return GenerateJWT(userId)
+func (a *AuthService) RefreshJWT(userId string) (string, error) {
+	return a.GenerateJWT(userId)
 }
 
-func AuthMiddleware() gin.HandlerFunc {
+func (a *AuthService) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		parts := strings.Split(authHeader, " ")
@@ -62,7 +68,7 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		tokenString := parts[1]
 
-		valid, userId, err := ValidateJWT(tokenString)
+		valid, userId, err := a.ValidateJWT(tokenString)
 
 		if err != nil || !valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
@@ -75,11 +81,11 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-func HashPassword(password string) (string, error) {
+func (a *AuthService) HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(bytes), err
 }
 
-func CheckPasswordHash(password, hash string) bool {
+func (a *AuthService) CheckPasswordHash(password, hash string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }

@@ -1,8 +1,8 @@
 package infer
 
 import (
-	"cuarenta/internal/config"
-	"cuarenta/internal/game"
+	"cua/internal/config"
+	"cua/internal/game"
 	"fmt"
 	"log"
 	"sync"
@@ -21,7 +21,13 @@ var (
 	outputName   string
 )
 
-func StartEngine() error {
+type InferenceService struct{}
+
+func NewInferenceService() *InferenceService {
+	return &InferenceService{}
+}
+
+func (i *InferenceService) StartEngine() error {
 	once.Do(func() {
 		sharedLibPath := config.GetEnv().OnnxRuntimeSharedLibPath
 		ort.SetSharedLibraryPath(sharedLibPath)
@@ -97,7 +103,7 @@ func StartEngine() error {
 	return initErr
 }
 
-func ShutdownEngine() error {
+func (i *InferenceService) ShutdownEngine() error {
 	var firstErr error
 
 	if onnxSession != nil {
@@ -148,8 +154,8 @@ func normalizeShape(shape ort.Shape) ort.Shape {
 	return normalized
 }
 
-func Infer(input []float32) ([]float32, error) {
-	if err := StartEngine(); err != nil {
+func (i *InferenceService) Infer(input []float32) ([]float32, error) {
+	if err := i.StartEngine(); err != nil {
 		return nil, err
 	}
 
@@ -174,8 +180,8 @@ func Infer(input []float32) ([]float32, error) {
 	return out, nil
 }
 
-func PredictAction(input []float32, legal []game.Action) (game.Action, int, error) {
-	logits, err := Infer(input)
+func (i *InferenceService) PredictAction(input []float32, legal []game.Action) (game.Action, int, error) {
+	logits, err := i.Infer(input)
 	if err != nil {
 		return game.Action{}, 0, err
 	}

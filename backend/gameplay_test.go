@@ -1,8 +1,10 @@
-package main
+package cua
 
 import (
-	"cuarenta/internal/game"
-	"cuarenta/internal/models"
+	"context"
+	"cua/internal/game"
+	infer "cua/internal/inference"
+	"cua/internal/models"
 	"testing"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 	// arrange
 	clockMock := clock.NewMock()
-	DB = NewDatabase(clockMock)
+	DB := NewMemDatabase(context.Background(), clockMock)
 
 	// Set initial time
 	initialTime := time.Date(2026, 6, 16, 10, 0, 0, 0, time.UTC)
@@ -70,7 +72,11 @@ func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 	}
 
 	// Act
-	_, err = playHumanTurn(gameObj.Id, creatorID, dto)
+	clock := clock.NewMock()
+	db := NewMemDatabase(context.TODO(), clock)
+	inferService := infer.NewInferenceService()
+	gameplay := NewMainGameplay(db, clock, inferService)
+	_, err = gameplay.playHumanTurn(gameObj.Id, creatorID, dto)
 	if err != nil {
 		t.Fatalf("playHumanTurn failed: %v", err)
 	}
@@ -100,7 +106,7 @@ func TestCancelGame(t *testing.T) {
 	t.Run("creator can cancel game and it is deleted", func(t *testing.T) {
 		// arrange
 		clockMock := clock.NewMock()
-		DB = NewDatabase(clockMock)
+		DB := NewMemDatabase(context.Background(), clockMock)
 		creatorID := "creator-1"
 		creator := models.HumanPlayer{
 			UserId: creatorID,
@@ -111,9 +117,9 @@ func TestCancelGame(t *testing.T) {
 
 		// Create a session so we can test that it gets cleaned up too
 		session := newGameSession(gameObj)
-		sessions.mu.Lock()
-		sessions.m[normalizeGameId(gameObj.Id)] = session
-		sessions.mu.Unlock()
+		Sessions.Mu.Lock()
+		Sessions.M[normalizeGameId(gameObj.Id)] = session
+		Sessions.Mu.Unlock()
 
 		// act
 		canceledGame, err := DB.CancelGame(gameObj.Id, creatorID)
@@ -143,7 +149,7 @@ func TestCancelGame(t *testing.T) {
 	t.Run("non-creator cannot cancel game", func(t *testing.T) {
 		// arrange
 		clockMock := clock.NewMock()
-		DB = NewDatabase(clockMock)
+		DB := NewMemDatabase(context.Background(), clockMock)
 		creatorID := "creator-1"
 		creator := models.HumanPlayer{
 			UserId: creatorID,
