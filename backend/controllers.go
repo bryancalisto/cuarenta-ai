@@ -402,9 +402,6 @@ func (s *Server) CancelGameCtl(c *gin.Context) {
 
 	hub.broadcast(game)
 
-	if session, ok := getSession(gameId); ok {
-		close(session.AiTurnChan)
-	}
 	deleteSession(gameId)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
@@ -419,7 +416,7 @@ func (s *Server) PlayGameCtl(c *gin.Context) {
 
 	userId := c.GetString("userId")
 	log.Println("Calling playHumanTurn in PlayGameCtl")
-	updated, err := s.gameplay.playHumanTurn(c.Param("code"), userId, dto)
+	updated, err := s.gameplay.playHumanTurnAndAdvanceAI(c.Param("code"), userId, dto)
 	if err != nil {
 		status, message := mapErrorToStatus(err)
 		c.JSON(status, gin.H{"error": message})
@@ -592,7 +589,7 @@ func (s *Server) WsCtl(c *gin.Context) {
 				CardIndex:      int(cardIndex),
 				CaptureIndices: captureIndices,
 			}
-			_, err := s.gameplay.playHumanTurn(gameId, client.userId, dto)
+			_, err := s.gameplay.playHumanTurnAndAdvanceAI(gameId, client.userId, dto)
 			if err != nil {
 				sendWsError(client, http.StatusBadRequest, err.Error())
 				continue

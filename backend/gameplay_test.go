@@ -40,7 +40,9 @@ func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 	}
 
 	// Prepare session using the game snapshot
-	session, _, err := prepareSession(gameObj)
+	inferService := infer.NewInferenceService()
+	gameplayHandler := NewMainGameplay(DB, clockMock, inferService)
+	session, _, err := gameplayHandler.prepareSession(gameObj)
 	if err != nil {
 		t.Fatalf("Failed to prepare session: %v", err)
 	}
@@ -72,9 +74,7 @@ func TestGameDurationSecondsOnGameEnd(t *testing.T) {
 	}
 
 	// Act
-	inferService := infer.NewInferenceService()
-	gameplay := NewMainGameplay(DB, clockMock, inferService)
-	_, err = gameplay.playHumanTurn(gameObj.Id, creatorID, dto)
+	_, err = gameplayHandler.playHumanTurnAndAdvanceAI(gameObj.Id, creatorID, dto)
 	if err != nil {
 		t.Fatalf("playHumanTurn failed: %v", err)
 	}
@@ -112,9 +112,11 @@ func TestCancelGame(t *testing.T) {
 			Team:   1,
 		}
 		gameObj, _ := DB.CreateGame(creatorID, creator)
+		inferService := infer.NewInferenceService()
+		gameplayHandler := NewMainGameplay(DB, clockMock, inferService)
 
 		// Create a session so we can test that it gets cleaned up too
-		session := newGameSession(gameObj)
+		session := gameplayHandler.newGameSession(gameObj)
 		Sessions.Mu.Lock()
 		Sessions.M[normalizeGameId(gameObj.Id)] = session
 		Sessions.Mu.Unlock()

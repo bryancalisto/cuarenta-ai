@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -16,9 +15,11 @@ import (
 )
 
 type Gameplay interface {
+	newGameSession(snapshot models.Game) *gameSession
+	prepareSession(snapshot models.Game) (*gameSession, models.Game, error)
 	processGameAction(clien *wsClient, payload map[string]interface{}) error
 	startRunningGame(snapshot models.Game) (models.Game, error)
-	playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, error)
+	playHumanTurnAndAdvanceAI(gameId string, userID string, dto PlayGameDTO) (models.Game, error)
 	playAITurns(gameId string) error
 	cancelRunningGames() int
 }
@@ -39,11 +40,11 @@ type PlayGameDTO struct {
 }
 
 type gameSession struct {
-	Mu         sync.Mutex
-	AiTurnChan chan int
-	env        *game.Env
-	stepCount  int
-	humanSeats map[int]string
+	Mu            sync.Mutex
+	aiTurnsRunner func() error
+	env           *game.Env
+	stepCount     int
+	humanSeats    map[int]string
 }
 
 var Sessions = struct {
@@ -84,7 +85,7 @@ func (g MainGameplay) processGameAction(client *wsClient, payload map[string]int
 		CaptureIndices: captureIndices,
 	}
 
-	if _, err := g.playHumanTurn(gameId, client.userId, dto); err != nil {
+	if _, err := g.playHumanTurnAndAdvanceAI(gameId, client.userId, dto); err != nil {
 		return ErrHumanTurnFailed
 	}
 
@@ -214,29 +215,28 @@ func (g *MainGameplay) publishGameSnapshot(snapshot models.Game) {
 	hub.broadcast(snapshot)
 }
 
-func newGameSession(snapshot models.Game) *gameSession {
-	aiTurnChan := make(chan int, 1)
+func (g *MainGameplay) newGameSession(snapshot models.Game) *gameSession {
 	return &gameSession{
-		env:        game.NewEnv(time.Now().UnixNano(), aiTurnChan),
-		humanSeats: humanSeats(snapshot),
-		AiTurnChan: aiTurnChan,
+		env:           game.NewEnv(time.Now().UnixNano(), func() error { return g.playAITurns(snapshot.Id) }),
+		humanSeats:    humanSeats(snapshot),
+		aiTurnsRunner: func() error { return g.playAITurns(snapshot.Id) },
 	}
 }
 
-func prepareSession(snapshot models.Game) (*gameSession, models.Game, error) {
+func (g *MainGameplay) prepareSession(snapshot models.Game) (*gameSession, models.Game, error) {
 	session, ok := getSession(snapshot.Id)
 	if ok {
 		return session, sessionSnapshot(snapshot, session, nil), nil
 	}
 
-	session = newGameSession(snapshot)
+	session = g.newGameSession(snapshot)
 	session.env.Reset()
 	setSession(snapshot.Id, session)
 	return session, sessionSnapshot(snapshot, session, nil), nil
 }
 
 func (g *MainGameplay) startRunningGame(snapshot models.Game) (models.Game, error) {
-	_, updated, err := prepareSession(snapshot)
+	_, updated, err := g.prepareSession(snapshot)
 	if err != nil {
 		return models.Game{}, err
 	}
@@ -251,9 +251,10 @@ func (g *MainGameplay) startRunningGame(snapshot models.Game) (models.Game, erro
 
 	updated = sessionSnapshot(snapshot, session, nil)
 
-	go g.aiTurnsRunner(updated.Id, session.AiTurnChan)
+	if err := g.playAITurns(snapshot.Id); err != nil {
+		return updated, err
+	}
 
-	session.AiTurnChan <- updated.CurrentPlayer
 	return updated, nil
 }
 
@@ -304,12 +305,6 @@ func matchLegalAction(action game.Action, legal []game.Action) (game.Action, boo
 	return game.Action{}, false
 }
 
-func (g *MainGameplay) aiTurnsRunner(gameId string, aiTurnChan chan int) {
-	for range aiTurnChan {
-		g.playAITurns(gameId)
-	}
-}
-
 func legalCapturesForCard(card game.Card, legal []game.Action) []game.Action {
 	matches := make([]game.Action, 0)
 	for _, action := range legal {
@@ -344,16 +339,17 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	}
 
 	session.Mu.Lock()
-	defer session.Mu.Unlock()
 
 	state := session.env.State()
 	if state == nil {
+		session.Mu.Unlock()
 		return fmt.Errorf("game session is not initialized")
 	}
 
 	if state.Done {
 		snapshot := sessionSnapshot(base, session, nil)
 		g.publishGameSnapshot(snapshot)
+		session.Mu.Unlock()
 		return nil
 	}
 
@@ -361,6 +357,7 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 
 	legal := session.env.LegalActions()
 	if len(legal) == 0 {
+		session.Mu.Unlock()
 		return fmt.Errorf("ai turn has no legal actions")
 	}
 	obs := game.FlattenObservation(session.env.Observe(currentSeat))
@@ -370,7 +367,7 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 		action = legal[0]
 	}
 
-	_, done, _, err := session.env.Step(action)
+	_, done, info, err := session.env.Step(action)
 
 	if done {
 		base.DurationSeconds = g.getGameDurationSeconds(base)
@@ -388,10 +385,22 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
 		g.publishGameSnapshot(snapshot)
+		session.Mu.Unlock()
 		return err
 	}
 
 	g.publishGameSnapshot(snapshot)
+
+	// If newRound happened during step, recursively continue AI turns from new state
+	if newRound, ok := info["newRound"].(bool); ok && newRound {
+		session.Mu.Unlock()
+		if err := g.playAITurns(gameId); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	session.Mu.Unlock()
 	return nil
 }
 
@@ -402,8 +411,9 @@ func (g *MainGameplay) cancelRunningGames() int {
 
 // Return random milliseconds for slee[1, 3]
 func randomSleep() {
-	millis := []int{1500, 2000, 2500, 3000, 3500}
-	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
+	// millis := []int{1500, 1800, 2000, 2400, 3000}
+	// time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 }
 
 func (g *MainGameplay) playAITurns(gameId string) error {
@@ -421,17 +431,11 @@ func (g *MainGameplay) playAITurns(gameId string) error {
 		return ErrGameNotRunning
 	}
 
-	state := session.env.State()
-	if state == nil {
-		return fmt.Errorf("game session is not initialized")
-	}
-
-	// play the AI agents turns
-	for currentSeat := state.CurrentPlayer; currentSeat < 4; currentSeat++ {
-		_, isHumanSeat := session.humanSeats[currentSeat]
-
-		if isHumanSeat {
-			break
+	// play the AI agents turns until hitting a human seat or game end
+	for {
+		state := session.env.State()
+		if state == nil {
+			return fmt.Errorf("game session is not initialized")
 		}
 
 		if state.Done {
@@ -439,7 +443,17 @@ func (g *MainGameplay) playAITurns(gameId string) error {
 			break
 		}
 
-		randomSleep()
+		currentSeat := state.CurrentPlayer
+		if currentSeat >= 4 {
+			break
+		}
+
+		_, isHumanSeat := session.humanSeats[currentSeat]
+		if isHumanSeat {
+			break
+		}
+
+		// randomSleep()
 
 		if err := g.playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
@@ -449,7 +463,7 @@ func (g *MainGameplay) playAITurns(gameId string) error {
 	return nil
 }
 
-func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameDTO) (models.Game, error) {
+func (g *MainGameplay) playHumanTurnAndAdvanceAI(gameId string, userID string, dto PlayGameDTO) (models.Game, error) {
 	base, exists := g.db.GetGame(gameId)
 	if !exists {
 		return models.Game{}, ErrGameNotFound
@@ -464,29 +478,33 @@ func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameD
 	}
 
 	session.Mu.Lock()
-	defer session.Mu.Unlock()
 
 	state := session.env.State()
 	if state == nil {
+		session.Mu.Unlock()
 		return models.Game{}, fmt.Errorf("game session is not initialized")
 	}
 	if state.Done {
 		snapshot := sessionSnapshot(base, session, nil)
 		g.publishGameSnapshot(snapshot)
+		session.Mu.Unlock()
 		return snapshot, nil
 	}
 
 	currentSeat := state.CurrentPlayer
 	humanUserID, isHumanSeat := session.humanSeats[currentSeat]
 	if !isHumanSeat {
+		session.Mu.Unlock()
 		return models.Game{}, ErrNotYourTurn
 	}
 	if humanUserID != userID {
+		session.Mu.Unlock()
 		return models.Game{}, ErrForbiddenAction
 	}
 
 	action, err := actionFromDTO(dto)
 	if err != nil {
+		session.Mu.Unlock()
 		return models.Game{}, err
 	}
 
@@ -506,6 +524,7 @@ func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameD
 			}
 		}
 		g.publishGameSnapshot(snapshot)
+		session.Mu.Unlock()
 		return snapshot, nil
 	}
 
@@ -515,6 +534,7 @@ func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameD
 	} else if matched, ok := matchLegalAction(action, legal); ok {
 		action = matched
 	} else {
+		session.Mu.Unlock()
 		return models.Game{}, ErrIllegalAction
 	}
 
@@ -536,11 +556,20 @@ func (g *MainGameplay) playHumanTurn(gameId string, userID string, dto PlayGameD
 	snapshot := sessionSnapshot(base, session, &move)
 	if err != nil {
 		g.publishGameSnapshot(snapshot)
+		session.Mu.Unlock()
 		return snapshot, err
 	}
 
 	g.publishGameSnapshot(snapshot)
+	session.Mu.Unlock()
 
-	session.AiTurnChan <- snapshot.CurrentPlayer
-	return models.Game{}, nil
+	if err := g.playAITurns(gameId); err != nil {
+		if err == ErrGameNotRunning {
+			return snapshot, nil
+		}
+
+		return snapshot, err
+	}
+
+	return snapshot, nil
 }

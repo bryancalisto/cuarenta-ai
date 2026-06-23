@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"time"
 
@@ -44,7 +45,7 @@ func (s *Server) Setup() {
 	// s.r.GET("/debug/pprof/symbol", gin.WrapH(http.HandlerFunc(pprof.Symbol)))
 	// s.r.GET("/debug/pprof/trace", gin.WrapH(http.HandlerFunc(pprof.Trace)))
 	// // For the handlers that return a Handler interface:
-	// s.r.GET("/debug/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+	s.r.GET("/debug/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
 	// s.r.GET("/debug/pprof/heap", gin.WrapH(pprof.Handler("heap")))
 	// s.r.GET("/debug/pprof/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
 	// s.r.GET("/debug/pprof/block", gin.WrapH(pprof.Handler("block")))

@@ -393,12 +393,13 @@ type State struct {
 }
 
 type Env struct {
-	rng        *rand.Rand
-	state      *State
-	aiTurnChan chan int
+	rng   *rand.Rand
+	state *State
+	// aiTurnChan chan int
+	aiTurnsRunner func() error
 }
 
-func NewEnv(seed int64, aiTurnChan chan int) *Env {
+func NewEnv(seed int64, aiTurnsRunner func() error) *Env {
 	var rng *rand.Rand
 	if seed != 0 {
 		rng = rand.New(rand.NewSource(seed))
@@ -406,8 +407,8 @@ func NewEnv(seed int64, aiTurnChan chan int) *Env {
 		rng = rand.New(rand.NewSource(rand.Int63()))
 	}
 	return &Env{
-		rng:        rng,
-		aiTurnChan: aiTurnChan,
+		rng:           rng,
+		aiTurnsRunner: aiTurnsRunner,
 	}
 }
 
@@ -462,9 +463,6 @@ func (e *Env) newRound() {
 	s.Table = nil
 	s.LastPlaced = nil
 	s.CurrentPlayer = (s.CurrentPlayer + 1) % NumPlayers
-	if e.aiTurnChan != nil {
-		e.aiTurnChan <- s.CurrentPlayer
-	}
 }
 
 func cardsToBitVec(cards []Card) []float32 {
@@ -707,6 +705,7 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 			}
 
 			e.newRound()
+			info["newRound"] = true
 		}
 	}
 
