@@ -20,17 +20,20 @@ import (
 
 type Database interface {
 	WriteToDisk() error
-	LoadFromDisk() error
+	LoadFromDisk(path ...string) error
 	AddUser(user models.User) error
 	FindUserByEmail(email string) (models.User, bool)
 	GetUser(userId string) (models.User, bool)
+	Users() []models.User
 	GetGame(gameId string) (models.Game, bool)
+	Games() []models.Game
 	CreateGame(creatorId string, player models.HumanPlayer) (models.Game, error)
 	UpdateGame(gameId string, game models.Game) error
 	JoinGame(gameId string, player models.HumanPlayer) (models.Game, error)
 	StartGame(gameId string, requesterId string) (models.Game, error)
 	CancelGame(gameId string, requesterId string) (models.Game, error)
 	CreateWsTicket(userId string) models.WsTicket
+	WsTickets() []models.WsTicket
 	DeleteExpiredWsTickets() int
 	ValidateWsTicket(ticketCode string) (*models.WsTicket, bool)
 	// Cancels in-progress games. Used on shutdown because currently the session and games are corrupted on server shutdown / restart.
@@ -78,11 +81,16 @@ func (d *MemDatabase) WriteToDisk() error {
 	return nil
 }
 
-func (d *MemDatabase) LoadFromDisk() error {
+func (d *MemDatabase) LoadFromDisk(path ...string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	dbPath := config.GetEnv().DbPath
+
+	if len(path) > 0 {
+		dbPath = path[0]
+	}
+
 	file, err := os.Open(dbPath)
 	if err != nil {
 		return err
@@ -216,12 +224,36 @@ func (db *MemDatabase) GetUser(userId string) (models.User, bool) {
 	return user, ok
 }
 
+func (db *MemDatabase) Users() []models.User {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	users := make([]models.User, 0, len(db.users))
+	for _, u := range db.users {
+		users = append(users, u)
+	}
+
+	return users
+}
+
 func (db *MemDatabase) GetGame(gameId string) (models.Game, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	game, ok := db.games[normalizeGameId(gameId)]
 	return game, ok
+}
+
+func (db *MemDatabase) Games() []models.Game {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	games := make([]models.Game, 0, len(db.games))
+	for _, g := range db.games {
+		games = append(games, g)
+	}
+
+	return games
 }
 
 func (db *MemDatabase) uniqueGameId() (string, error) {
@@ -379,6 +411,18 @@ func (db *MemDatabase) CreateWsTicket(userId string) models.WsTicket {
 	db.mu.Unlock()
 
 	return ticket
+}
+
+func (db *MemDatabase) WsTickets() []models.WsTicket {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	tickets := make([]models.WsTicket, 0, len(db.tickets))
+	for _, t := range db.tickets {
+		tickets = append(tickets, t)
+	}
+
+	return tickets
 }
 
 func (db *MemDatabase) DeleteExpiredWsTickets() int {
