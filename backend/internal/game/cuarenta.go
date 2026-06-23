@@ -395,11 +395,9 @@ type State struct {
 type Env struct {
 	rng   *rand.Rand
 	state *State
-	// aiTurnChan chan int
-	aiTurnsRunner func() error
 }
 
-func NewEnv(seed int64, aiTurnsRunner func() error) *Env {
+func NewEnv(seed int64) *Env {
 	var rng *rand.Rand
 	if seed != 0 {
 		rng = rand.New(rand.NewSource(seed))
@@ -407,8 +405,7 @@ func NewEnv(seed int64, aiTurnsRunner func() error) *Env {
 		rng = rand.New(rand.NewSource(rand.Int63()))
 	}
 	return &Env{
-		rng:           rng,
-		aiTurnsRunner: aiTurnsRunner,
+		rng: rng,
 	}
 }
 

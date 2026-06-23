@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -40,11 +41,10 @@ type PlayGameDTO struct {
 }
 
 type gameSession struct {
-	Mu            sync.Mutex
-	aiTurnsRunner func() error
-	env           *game.Env
-	stepCount     int
-	humanSeats    map[int]string
+	Mu         sync.Mutex
+	env        *game.Env
+	stepCount  int
+	humanSeats map[int]string
 }
 
 var Sessions = struct {
@@ -217,9 +217,8 @@ func (g *MainGameplay) publishGameSnapshot(snapshot models.Game) {
 
 func (g *MainGameplay) newGameSession(snapshot models.Game) *gameSession {
 	return &gameSession{
-		env:           game.NewEnv(time.Now().UnixNano(), func() error { return g.playAITurns(snapshot.Id) }),
-		humanSeats:    humanSeats(snapshot),
-		aiTurnsRunner: func() error { return g.playAITurns(snapshot.Id) },
+		env:        game.NewEnv(time.Now().UnixNano()),
+		humanSeats: humanSeats(snapshot),
 	}
 }
 
@@ -411,9 +410,8 @@ func (g *MainGameplay) cancelRunningGames() int {
 
 // Return random milliseconds for slee[1, 3]
 func randomSleep() {
-	// millis := []int{1500, 1800, 2000, 2400, 3000}
-	// time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
-	time.Sleep(500 * time.Millisecond)
+	millis := []int{1500, 1800, 2000, 2400, 3000}
+	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
 }
 
 func (g *MainGameplay) playAITurns(gameId string) error {
@@ -453,7 +451,7 @@ func (g *MainGameplay) playAITurns(gameId string) error {
 			break
 		}
 
-		// randomSleep()
+		randomSleep()
 
 		if err := g.playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
