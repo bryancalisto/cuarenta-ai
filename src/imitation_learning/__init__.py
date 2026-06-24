@@ -5,11 +5,9 @@ from .imitation_learning import (
     CuarentaPolicyLearner,
     create_dagger_trainer,
 )
-from .ui import CuarentaUI
 
 __all__ = [
     "ExpertPolicy",
     "CuarentaPolicyLearner",
     "create_dagger_trainer",
-    "CuarentaUI",
 ]

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from card import build_deck
 from env import CuarentaEnv
 from agents import load_agent_from_checkpoint
-from imitation_learning.ui import CuarentaUI
+from ui import CuarentaUI
 from env import Action
 
 

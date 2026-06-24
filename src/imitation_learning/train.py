@@ -1,7 +1,7 @@
 """
 Main training script for DAgger-based imitation learning.
 
-Run as: python train.py [--checkpoint <path>]
+Run as: python train.py [--resume <path>]
 """
 
 import sys
@@ -12,14 +12,14 @@ import argparse
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from env import CuarentaEnv
-from imitation_learning.ui import CuarentaUI
+from ui import CuarentaUI
 from imitation_learning.imitation_learning import create_dagger_trainer
 
 
 def main():
     """Run DAgger training with UI expert."""
     parser = argparse.ArgumentParser(description="Train Cuarenta policy with DAgger")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to policy checkpoint to resume from")
+    parser.add_argument("--resume", type=str, default=None, help="Path to policy checkpoint to resume from")
     args = parser.parse_args()
 
     # Initialize environment
@@ -43,9 +43,9 @@ def main():
     trainer = create_dagger_trainer(env, expert_callback, device="mps")
 
     # Load checkpoint if provided
-    if args.checkpoint:
-        print(f"Loading checkpoint from {args.checkpoint}...")
-        trainer.load_policy(args.checkpoint)
+    if args.resume:
+        print(f"Loading checkpoint from {args.resume}...")
+        trainer.load_policy(args.resume)
 
     # Training loop
     num_dagger_iterations = 5
