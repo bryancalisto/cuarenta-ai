@@ -1,8 +1,8 @@
 """
-DAgger-based imitation learning for Cuarenta.
+DAgger-based imitation learning for Cuarenta
 
 Collects expert trajectories via UI, trains policy with DAgger.
-Policy can be saved/loaded for later RL finetuning.
+Policy is saved for later RL finetuning.
 """
 
 import sys
@@ -15,88 +15,11 @@ from torch.utils.data import DataLoader, TensorDataset
 import pickle
 from datetime import datetime
 
+from networks import PolicyNetwork
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from env import CuarentaEnv, Action
-from card import build_deck
-
-
-class PolicyNetwork(nn.Module):
-    """Neural network policy for action selection."""
-
-    def __init__(self, obs_size: int = 121, action_size: int = 200):
-        """
-        obs_size: total observation vector size
-        action_size: max number of possible action encodings
-        """
-        super().__init__()
-        self.fc1 = nn.Linear(obs_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, action_size)
-        self.relu = nn.ReLU()
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """Forward pass. obs shape: (batch, obs_size). Output: (batch, action_size)."""
-        x = self.relu(self.fc1(obs))
-        x = self.relu(self.fc2(x))
-        return self.fc3(x)
-
-
-class ActionEncoder:
-    """Convert between Action objects and integer indices."""
-
-    def __init__(self, env: CuarentaEnv):
-        self.env = env
-        self.all_cards = build_deck()  # 40 cards
-        self.max_action_idx = 40 * 41  # 40 cards × 41 capture options (0=no capture, 1-40 for captures)
-
-    def action_to_idx(self, action: Action) -> int:
-        """Encode action as integer."""
-        card_idx = self.all_cards.index(action.card)
-        if action.capture is None:
-            capture_idx = 0
-        else:
-            # Get legal actions for this card and find which one matches
-            legal_actions = [a for a in self.env.legal_actions() if a.card == action.card]
-            try:
-                capture_idx = legal_actions.index(action) + 1
-            except ValueError:
-                capture_idx = 0  # Fallback
-        return card_idx * 41 + capture_idx
-
-    def idx_to_action(self, idx: int) -> Optional[Action]:
-        """Decode integer to action (if legal). Returns None if illegal."""
-        card_idx = idx // 41
-        capture_idx = idx % 41
-
-        if card_idx >= len(self.all_cards):
-            return None
-
-        card = self.all_cards[card_idx]
-
-        # Check if card is in current player's hand
-        player = self.env.state.current_player
-        if card not in self.env.state.hands[player]:
-            return None
-
-        # Get legal actions for this card
-        legal_actions = [a for a in self.env.legal_actions() if a.card == card]
-        if not legal_actions:
-            return None
-
-        if capture_idx == 0:
-            # Looking for place-only action
-            for action in legal_actions:
-                if action.capture is None:
-                    return action
-            # No place-only action; return first legal action with this card
-            return legal_actions[0] if legal_actions else None
-        else:
-            # Looking for specific capture
-            if capture_idx - 1 < len(legal_actions):
-                return legal_actions[capture_idx - 1]
-
-        return None
+from env import ActionEncoder, CuarentaEnv, Action
 
 
 class ExpertPolicy:

@@ -1,8 +1,5 @@
 """
-Play Cuarenta against a trained policy using the existing Tk UI.
-
-This reuses the imitation-learning UI for rendering and human input, while an
-agent loaded from a checkpoint plays the non-human seats.
+Play Cuarenta against a trained policy using the existing Tkinter UI
 """
 
 from __future__ import annotations

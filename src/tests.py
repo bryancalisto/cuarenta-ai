@@ -1,11 +1,8 @@
-"""
-Exhaustive tests for Cuarenta card.py, captures.py, and env.py.
-"""
-
 import sys
 import random
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
+from card import Card, Rank, Suit, build_deck, shuffled_deck
+from captures import valid_captures, detect_caida, detect_ronda, score_play
+from env import CuarentaEnv, NUM_PLAYERS, HAND_SIZE
 
 passed = 0
 failed = 0
@@ -24,13 +21,6 @@ def section(title: str):
     print(f"  {title}")
     print(f"{'─'*55}")
 
-# ─── Imports ─────────────────────────────────────────────────────────────────
-
-from card import Card, Rank, Suit, build_deck, shuffled_deck
-from captures import valid_captures, detect_caida, detect_ronda, score_play
-from env import CuarentaEnv, NUM_PLAYERS, HAND_SIZE
-
-# ─── card.py tests ───────────────────────────────────────────────────────────
 
 section("card.py — Deck structure")
 

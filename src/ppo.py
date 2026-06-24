@@ -1,17 +1,6 @@
-"""
-ppo.py - PPO trainer for Cuarenta.
-
-This trainer starts from the imitation-learned policy in
-`data/policies/cuarenta_policy_final.pt`, then improves it with PPO in
-self-play. Policy snapshots are written as
-`data/policies/cuarenta_policy_iterN.pt`, where N is the next available
-integer in that directory.
-"""
-
 from __future__ import annotations
 
 import collections
-import copy
 import random
 import time
 from dataclasses import dataclass, field
@@ -19,6 +8,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
+
+from networks import PolicyNetwork
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,8 +20,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from agents import HeuristicAgent
-from env import CuarentaEnv, TEAMS
-from imitation_learning.imitation_learning import ActionEncoder, PolicyNetwork
+from env import ActionEncoder, CuarentaEnv, TEAMS
 
 
 DEFAULT_POLICY_INIT = "data/policies/cuarenta_dagger_policy_final.pt"
@@ -48,12 +38,15 @@ class PPOConfig:
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
-    gamma: float = 0.99
+    gamma: float = 0.989
     gae_lambda: float = 0.95
     # Optimiser
     lr: float = 3e-4
+    # Model
+    use_lstm: bool = True
+    lstm_hidden: int = 128
     # Self-play / checkpointing
-    checkpoint_every: int = 100_000
+    checkpoint_every: int = 500_000
     pool_size: int = 20
     opponent_latest: float = 0.8
     opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
@@ -89,27 +82,54 @@ def masked_legal_logits(
 
 
 class FlatActorCritic(nn.Module):
-    """Actor-critic with imitation-learning policy network base."""
-
-    def __init__(self, obs_size: int, action_size: int):
+    def __init__(self, obs_size: int, action_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
         super().__init__()
         self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
+        self.use_lstm = use_lstm
+        self.lstm_hidden = lstm_hidden
+
+        if use_lstm:
+            self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
+            self.fc3 = nn.Linear(lstm_hidden, action_size)
+            feature_size = lstm_hidden
+        else:
+            feature_size = 256
+
         self.value_head = nn.Sequential(
-            nn.Linear(256, 128),
+            nn.Linear(feature_size, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
         )
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor, lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple]]:
         x = self.policy.relu(self.policy.fc1(obs))
         x = self.policy.relu(self.policy.fc2(x))
-        logits = self.policy.fc3(x)
-        value = self.value_head(x).squeeze(-1)
-        return logits, value
 
-    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.use_lstm:
+            if x.dim() == 2:
+                x = x.unsqueeze(1)
+            x, new_state = self.lstm(x, lstm_state)
+            if x.dim() == 3:
+                x = x[:, -1, :]
+            logits = self.fc3(x)
+        else:
+            new_state = None
+            logits = self.policy.fc3(x)
+
+        value = self.value_head(x).squeeze(-1)
+        return logits, value, new_state
+
+    def get_value(self, obs: torch.Tensor, lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> torch.Tensor:
         x = self.policy.relu(self.policy.fc1(obs))
         x = self.policy.relu(self.policy.fc2(x))
+
+        if self.use_lstm:
+            if x.dim() == 2:
+                x = x.unsqueeze(1)
+            x, _ = self.lstm(x, lstm_state)
+            if x.dim() == 3:
+                x = x[:, -1, :]
+
         return self.value_head(x).squeeze(-1)
 
 
@@ -194,6 +214,7 @@ class PPOTrainer:
         self.cfg = cfg
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         print(f"[PPO] Using device: {self.device}")
+        print(f"[PPO] LSTM enabled: {cfg.use_lstm}")
 
         # Environments
         self.envs = [
@@ -203,13 +224,14 @@ class PPOTrainer:
         self.env_obs = [None] * cfg.n_envs
         self.env_done = [True] * cfg.n_envs
         self.action_encoders = [ActionEncoder(env) for env in self.envs]
+        self.lstm_states = [None] * cfg.n_envs if cfg.use_lstm else None
 
         # Infer observation/action sizes from the real environment.
         sample_obs, _ = self.envs[0].reset()
         self.obs_size = int(flatten_obs(sample_obs).shape[0])
         self.action_size = int(self.action_encoders[0].max_action_idx)
 
-        self.net = FlatActorCritic(self.obs_size, self.action_size).to(self.device)
+        self.net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
         self.opponent_net = PolicyNetwork(obs_size=self.obs_size, action_size=self.action_size).to(self.device)
@@ -218,11 +240,18 @@ class PPOTrainer:
 
         self.ckpt_pool: List[Dict[str, torch.Tensor]] = []
         self.ckpt_step: List[int] = []
+        self.opponent_is_latest = True
 
         self.global_step = 0
         self.episode_rewards = collections.deque(maxlen=100)
         self.episode_lengths = collections.deque(maxlen=100)
         self.elo_score = collections.deque(maxlen=500)  # 1 = win, 0 = loss
+        self.team_0_wins = 0
+        self.team_1_wins = 0
+        self.total_games = 0
+        self.team_0_wins_vs_latest = 0
+        self.team_1_wins_vs_latest = 0
+        self.games_vs_latest = 0
         self.training_history: Dict[str, List[float]] = collections.defaultdict(list)
 
         # Misc
@@ -274,6 +303,12 @@ class PPOTrainer:
         print(f"\n{'='*60}")
         print(f"[PPO] Training complete. {self.global_step} steps.")
         print(f"{'='*60}")
+        print(f"Total games:          {self.total_games}")
+        print(f"Team 0 wins (all):    {self.team_0_wins} ({100*self.team_0_wins/max(self.total_games,1):.1f}%)")
+        print(f"Team 1 wins (all):    {self.team_1_wins} ({100*self.team_1_wins/max(self.total_games,1):.1f}%)")
+        print(f"Games vs latest ckpt: {self.games_vs_latest}")
+        print(f"Team 0 wins (latest): {self.team_0_wins_vs_latest} ({100*self.team_0_wins_vs_latest/max(self.games_vs_latest,1):.1f}%)")
+        print(f"Team 1 wins (latest): {self.team_1_wins_vs_latest} ({100*self.team_1_wins_vs_latest/max(self.games_vs_latest,1):.1f}%)")
         print(f"Mean episode reward:  {np.mean(self.episode_rewards) if self.episode_rewards else 0:.2f}")
         print(f"Mean episode length:  {np.mean(self.episode_lengths) if self.episode_lengths else 0:.1f}")
         print(f"Mean policy loss:     {np.mean(self.training_history['loss_pi']) if self.training_history['loss_pi'] else 0:.4f}")
@@ -283,7 +318,7 @@ class PPOTrainer:
         print(f"Training plot         → {plot_path}")
         print(f"{'='*60}\n")
 
-    
+
     def _collect_rollout(self) -> List[Rollout]:
         """Collect experience for learning player (any seat) via self-play."""
         cfg = self.cfg
@@ -303,6 +338,8 @@ class PPOTrainer:
                         ep_reward[env_idx] = 0.0
                         ep_len[env_idx] = 0
                         learning_team[env_idx] = random.choice([0, 1])
+                        if cfg.use_lstm:
+                            self.lstm_states[env_idx] = None
 
                     current_player = env.state.current_player
                     is_learning = TEAMS[current_player] == learning_team[env_idx]
@@ -312,7 +349,11 @@ class PPOTrainer:
 
                     if is_learning:
                         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
-                        logits, value = self.net(obs_t)
+                        if cfg.use_lstm:
+                            logits, value, lstm_state = self.net(obs_t, self.lstm_states[env_idx])
+                            self.lstm_states[env_idx] = lstm_state
+                        else:
+                            logits, value, _ = self.net(obs_t)
                         action_pos, log_prob, _ = select_legal_action(logits[0], legal_action_ids)
                         action = legal_actions[action_pos]
                     else:
@@ -345,6 +386,17 @@ class PPOTrainer:
                         self.episode_rewards.append(ep_reward[env_idx])
                         self.episode_lengths.append(ep_len[env_idx])
                         if "winner" in info:
+                            self.total_games += 1
+                            if info["winner"] == 0:
+                                self.team_0_wins += 1
+                            else:
+                                self.team_1_wins += 1
+                            if self.opponent_is_latest:
+                                self.games_vs_latest += 1
+                                if info["winner"] == 0:
+                                    self.team_0_wins_vs_latest += 1
+                                else:
+                                    self.team_1_wins_vs_latest += 1
                             self.elo_score.append(1.0 if info["winner"] == learning_team[env_idx] else 0.0)
 
         self.net.train()
@@ -369,7 +421,8 @@ class PPOTrainer:
             else:
                 with torch.no_grad():
                     obs_t = torch.tensor(self.env_obs[env_idx], dtype=torch.float32, device=self.device).unsqueeze(0)
-                    last_val = float(self.net.get_value(obs_t).item())
+                    lstm_state = self.lstm_states[env_idx] if cfg.use_lstm else None
+                    last_val = float(self.net.get_value(obs_t, lstm_state).item())
 
             rewards = np.array(rl.rewards, dtype=np.float32)
             values = np.array(rl.values, dtype=np.float32)
@@ -409,7 +462,7 @@ class PPOTrainer:
                 mb_rets = rets_tensor[mb_idx]
                 mb_legal_ids = [all_legal_ids[i] for i in mb_idx.tolist()]
 
-                logits, values = self.net(mb_obs)
+                logits, values, _ = self.net(mb_obs)
 
                 log_probs = []
                 entropies = []
@@ -453,6 +506,10 @@ class PPOTrainer:
         self.training_history["win_rate"].append(float(np.mean(self.elo_score)) if self.elo_score else float("nan"))
         self.training_history["episode_reward"].append(float(np.mean(self.episode_rewards)) if self.episode_rewards else 0.0)
         self.training_history["episode_length"].append(float(np.mean(self.episode_lengths)) if self.episode_lengths else 0.0)
+        self.training_history["team_0_wins"].append(float(self.team_0_wins))
+        self.training_history["team_1_wins"].append(float(self.team_1_wins))
+        self.training_history["team_0_wins_vs_latest"].append(float(self.team_0_wins_vs_latest))
+        self.training_history["team_1_wins_vs_latest"].append(float(self.team_1_wins_vs_latest))
         self.training_history["sps"].append(float((self.cfg.n_envs * self.cfg.n_steps) / max(rollout_elapsed, 1e-8)))
 
     def _save_training_plots(self) -> Path:
@@ -476,13 +533,14 @@ class PPOTrainer:
 
         for row, col, key, title in plots:
             ax = axes[row, col]
-            values = np.array(self.training_history[key], dtype=np.float32)
-            ax.plot(steps, values, label=title, color="#1f77b4", linewidth=1.8)
-            if len(values) >= 5 and key in {"loss_pi", "loss_vf", "entropy", "episode_reward", "episode_length"}:
-                window = min(10, len(values))
-                smooth = np.convolve(values, np.ones(window) / window, mode="valid")
-                smooth_steps = steps[window - 1 :]
-                ax.plot(smooth_steps, smooth, color="#ff7f0e", linewidth=2.0, label=f"{window}-roll mean")
+            values = np.array(self.training_history.get(key, []), dtype=np.float32)
+            if len(values) > 0:
+                ax.plot(steps[:len(values)], values, label=title, color="#1f77b4", linewidth=1.8)
+                if len(values) >= 5 and key in {"loss_pi", "loss_vf", "entropy", "episode_reward", "episode_length"}:
+                    window = min(10, len(values))
+                    smooth = np.convolve(values, np.ones(window) / window, mode="valid")
+                    smooth_steps = steps[window - 1 : window - 1 + len(smooth)]
+                    ax.plot(smooth_steps, smooth, color="#ff7f0e", linewidth=2.0, label=f"{window}-roll mean")
             ax.set_title(title)
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=8)
@@ -516,9 +574,11 @@ class PPOTrainer:
             "step": self.global_step,
             "policy_state": clone_state_dict_to_cpu(self.net.policy.state_dict()),
             "value_state": clone_state_dict_to_cpu(self.net.value_head.state_dict()),
+            "lstm_state": clone_state_dict_to_cpu(self.net.lstm.state_dict()) if self.cfg.use_lstm else None,
             "optimizer_state": self.opt.state_dict(),
             "obs_size": self.obs_size,
             "action_size": self.action_size,
+            "use_lstm": self.cfg.use_lstm,
         }
         torch.save(state, path)
         print(f"[PPO] Checkpoint → {path}")
@@ -541,8 +601,10 @@ class PPOTrainer:
 
         if random.random() < cfg.opponent_latest:
             sd = self.ckpt_pool[-1]
+            self.opponent_is_latest = True
         else:
             sd = random.choice(self.ckpt_pool)
+            self.opponent_is_latest = False
 
         self.opponent_net.load_state_dict(sd)
         self.opponent_net.eval()
@@ -550,17 +612,13 @@ class PPOTrainer:
     def load_policy(self, path: str):
         state = torch.load(path, map_location=self.device, weights_only=False)
 
-        # if "net" in state:
-        #     self.net.load_state_dict(state["net"])
-        #     if "opt" in state:
-        #         self.opt.load_state_dict(state["opt"])
-        #     self.global_step = int(state.get("step", 0))
-        # else:
         if "policy_state" not in state:
             raise KeyError(f"Unsupported checkpoint format: {path}")
         self.net.policy.load_state_dict(state["policy_state"])
         if "value_state" in state:
             self.net.value_head.load_state_dict(state["value_state"])
+        if "lstm_state" in state and state["lstm_state"] is not None and self.cfg.use_lstm:
+            self.net.lstm.load_state_dict(state["lstm_state"])
         if "optimizer_state" in state:
             self.opt.load_state_dict(state["optimizer_state"])
         self.global_step = int(state.get("step", 0))
@@ -588,6 +646,8 @@ if __name__ == "__main__":
         default="selfplay",
         choices=["heuristic", "selfplay", "random"],
     )
+    parser.add_argument("--use-lstm", type=bool, default=True)
+    parser.add_argument("--lstm-hidden", type=int, default=128)
     parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
@@ -599,6 +659,8 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         init_policy=args.init_policy,
         opponent_mode=args.opponent_mode,
+        use_lstm=args.use_lstm,
+        lstm_hidden=args.lstm_hidden,
     )
 
     trainer = PPOTrainer(cfg, device=args.device)

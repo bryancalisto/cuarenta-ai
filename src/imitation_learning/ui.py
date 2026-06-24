@@ -12,10 +12,10 @@ from env import CuarentaEnv, Action, NUM_PLAYERS, TEAMS
 
 # Suit icons
 SUIT_ICONS = {
-    Suit.BRILLOS: '♦️',           # Diamonds (Coins)
-    Suit.CORAZONES_ROJOS: '♥️',   # Hearts (Cups)
-    Suit.CORAZONES_NEGROS: '♠️',  # Spades (Swords)
-    Suit.TREBOLES: '♣️',          # Clubs
+    Suit.BRILLOS: '♦️',
+    Suit.CORAZONES_ROJOS: '♥️',
+    Suit.CORAZONES_NEGROS: '♠️',
+    Suit.TREBOLES: '♣️',
 }
 
 

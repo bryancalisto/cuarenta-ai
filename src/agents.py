@@ -7,8 +7,7 @@ import numpy as np
 import torch
 
 from env import Action
-from utils import obs_to_tensors
-from imitation_learning.imitation_learning import PolicyNetwork
+from networks import PolicyNetwork
 
 
 def flatten_obs(obs) -> np.ndarray:

@@ -6,10 +6,10 @@ import random
 
 
 class Suit(IntEnum):
-    BRILLOS = 0      # Coins
-    CORAZONES_ROJOS = 1     # Cups
-    CORAZONES_NEGROS = 2   # Swords
-    TREBOLES = 3    # Clubs
+    BRILLOS = 0
+    CORAZONES_ROJOS = 1
+    CORAZONES_NEGROS = 2
+    TREBOLES = 3
 
 
 class Rank(IntEnum):

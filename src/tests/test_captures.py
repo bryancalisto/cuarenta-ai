@@ -1,13 +1,8 @@
-"""
-Tests for capture functions in captures.py
-"""
-
 import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 os.chdir(os.path.dirname(__file__))
 
-import pytest
 from card import Card, Rank, Suit
 from captures import (
     get_same_rank_captures,

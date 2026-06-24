@@ -8,8 +8,6 @@ from typing import Dict, List, Optional, Tuple, FrozenSet
 from card import Card, build_deck, shuffled_deck
 from captures import valid_captures, score_play
 
-# Constants
-
 NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
@@ -80,6 +78,19 @@ class CuarentaEnv:
         )
         return self.observe(0), {}
 
+    def _count_carton_points(self, cards_captured: List[int]) -> List[int]:
+        carton_points = len(cards_captured) - 19
+
+        if carton_points > 0:
+            carton_points += 5
+            if carton_points % 2 != 0:
+                carton_points += 1
+        
+        else:
+            carton_points = 0        
+
+        return carton_points
+
     def step(self, action: Action) -> Tuple[Dict, float, bool, Dict]:
         """
         Apply action for the current player.
@@ -130,15 +141,19 @@ class CuarentaEnv:
                 s.table.remove(card)
                 s.cards_captured[team].append(card)
             s.last_placed = None   # table was modified; caída chain resets
-            reward += len(action.capture) * 1 # 1 reward point per captured card
+            # Reduced capture reward. If score >= 38, don't reward captures to force caida
+            if s.scores[team] < 38:
+                # reward += len(action.capture) * 0.25
+                reward += len(action.capture) * 0
         else:
             # Place card on table
             s.table.append(action.card)
             s.last_placed = action.card
 
-        # apply score
+        # apply score (but don't reward it if score >= 38, to force caida)
         s.scores[team] += points
-        reward += points
+        if s.scores[team] < 38:
+            reward += points
 
         # check win
         if s.scores[team] >= WIN_SCORE:
@@ -163,13 +178,13 @@ class CuarentaEnv:
                 for team in range(2):
                     team_carton[team] = 0
 
-                    carton_points = len(s.cards_captured[team]) - 19
-                    if carton_points > 0:
-                        carton_points += 5
-                        if carton_points % 2 != 0:
-                            carton_points += 1
-                        team_carton[team] = carton_points
-                        s.scores[team] = min(s.scores[team] + carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
+                    carton_points = self._count_carton_points(s.cards_captured[team])
+                    # Reduce carton reward if score >= 38 to force caida
+                    if s.scores[team] >= 38:
+                        carton_points = 0
+
+                    team_carton[team] = carton_points
+                    s.scores[team] = min(s.scores[team] + carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
 
                 # Reward current player for their team's carton only
                 current_team = TEAMS[player]
@@ -291,3 +306,60 @@ class CuarentaEnv:
             lines.append(f"  P{p} (team {TEAMS[p]}): {' '.join(str(c) for c in sorted(s.hands[p]))}{marker}")
         lines.append("=" * 50)
         return "\n".join(lines)
+
+
+class ActionEncoder:
+    """Convert between Action objects and integer indices."""
+
+    def __init__(self, env: CuarentaEnv):
+        self.env = env
+        self.all_cards = build_deck()  # 40 cards
+        self.max_action_idx = 40 * 41  # 40 cards × 41 capture options (0=no capture, 1-40 for captures)
+
+    def action_to_idx(self, action: Action) -> int:
+        """Encode action as integer."""
+        card_idx = self.all_cards.index(action.card)
+        if action.capture is None:
+            capture_idx = 0
+        else:
+            # Get legal actions for this card and find which one matches
+            legal_actions = [a for a in self.env.legal_actions() if a.card == action.card]
+            try:
+                capture_idx = legal_actions.index(action) + 1
+            except ValueError:
+                capture_idx = 0  # Fallback
+        return card_idx * 41 + capture_idx
+
+    def idx_to_action(self, idx: int) -> Optional[Action]:
+        """Decode integer to action (if legal). Returns None if illegal."""
+        card_idx = idx // 41
+        capture_idx = idx % 41
+
+        if card_idx >= len(self.all_cards):
+            return None
+
+        card = self.all_cards[card_idx]
+
+        # Check if card is in current player's hand
+        player = self.env.state.current_player
+        if card not in self.env.state.hands[player]:
+            return None
+
+        # Get legal actions for this card
+        legal_actions = [a for a in self.env.legal_actions() if a.card == card]
+        if not legal_actions:
+            return None
+
+        if capture_idx == 0:
+            # Looking for place-only action
+            for action in legal_actions:
+                if action.capture is None:
+                    return action
+            # No place-only action; return first legal action with this card
+            return legal_actions[0] if legal_actions else None
+        else:
+            # Looking for specific capture
+            if capture_idx - 1 < len(legal_actions):
+                return legal_actions[capture_idx - 1]
+
+        return None

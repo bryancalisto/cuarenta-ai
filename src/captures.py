@@ -19,7 +19,6 @@ NOTE on figure captures (Jack/Caballo/Rey = 11/12/13):
 """
 
 from __future__ import annotations
-from itertools import combinations
 from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
 from utils import sort_cards_by_rank
