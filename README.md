@@ -133,7 +133,7 @@ then softmax over legal actions.
 
 ## Generating ONNX model
 ```bash
-cd src && python3 -m scripts.pth2onnx.py
+python3 -m scripts.pth2onnx <path to .pt file>
 ```
 
 # More info about Cuarenta

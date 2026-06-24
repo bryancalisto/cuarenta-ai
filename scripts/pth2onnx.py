@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 import torch
 import torch.onnx
 import torch.nn as nn
-from imitation_learning.imitation_learning import PolicyNetwork
+
+from src.networks import PolicyNetwork
 
 
 class PolicyNetworkOnly(nn.Module):
@@ -19,20 +21,33 @@ class PolicyNetworkOnly(nn.Module):
 class FlatActorCriticPolicyOnly(nn.Module):
     """Actor-critic wrapper that only outputs action logits."""
 
-    def __init__(self, obs_size: int, action_size: int):
+    def __init__(self, obs_size: int, action_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
         super().__init__()
         self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
+        self.use_lstm = use_lstm
+
+        if use_lstm:
+            self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
+            self.fc3 = nn.Linear(lstm_hidden, action_size)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         hidden = self.policy.relu(self.policy.fc1(obs))
         hidden = self.policy.relu(self.policy.fc2(hidden))
-        return self.policy.fc3(hidden)
+
+        if self.use_lstm:
+            hidden = hidden.unsqueeze(1)
+            hidden, _ = self.lstm(hidden, None)
+            hidden = hidden[:, -1, :]
+            return self.fc3(hidden)
+        else:
+            return self.policy.fc3(hidden)
 
 
 def save_onnx(pt_path: Path) -> Path:
     """Convert cuarenta policy checkpoint to ONNX format.
 
     Exports only the action logits output (for use in Go inference engine).
+    Handles both LSTM and non-LSTM models.
     """
     pt_filename = pt_path.name
     onnx_filename = pt_filename.replace('.pt', '.onnx')
@@ -40,12 +55,18 @@ def save_onnx(pt_path: Path) -> Path:
 
     # Detect checkpoint format
     if 'policy_state' in checkpoint and 'value_state' in checkpoint:
-        # PPO FlatActorCritic checkpoint
+        # PPO FlatActorCritic checkpoint (may include LSTM)
         obs_size = checkpoint.get('obs_size', 121)
         action_size = checkpoint.get('action_size', 200)
+        use_lstm = checkpoint.get('use_lstm', False)
+        lstm_hidden = 128
 
-        model = FlatActorCriticPolicyOnly(obs_size, action_size)
+        model = FlatActorCriticPolicyOnly(obs_size, action_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
         model.policy.load_state_dict(checkpoint['policy_state'])
+
+        if use_lstm and 'lstm_state' in checkpoint and checkpoint['lstm_state'] is not None:
+            model.lstm.load_state_dict(checkpoint['lstm_state'])
+
         model.eval()
 
         dummy_input = torch.randn(1, obs_size)
@@ -65,6 +86,7 @@ def save_onnx(pt_path: Path) -> Path:
                 'action_logits': {0: 'batch_size'},
             }
         )
+        print(f"[ONNX] Exported {'LSTM ' if use_lstm else ''}policy → {output_path}")
         return output_path
     elif isinstance(checkpoint, dict) and any('fc' in k for k in checkpoint.keys()):
         # Raw PolicyNetwork checkpoint (imitation learning)
@@ -88,10 +110,17 @@ def save_onnx(pt_path: Path) -> Path:
                 'action_logits': {0: 'batch_size'},
             }
         )
+        print(f"[ONNX] Exported policy network → {output_path}")
         return output_path
     else:
         raise ValueError(f"Unknown checkpoint format. Keys: {list(checkpoint.keys())}")
 
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print('usage: python3 -m scripts.pth2onnx <path to .pt>')
+        exit(1)
 
-pt_path = Path("/Users/t1000/Documents/src/40-ai/data/policies/policy_901120.pt")
-print(save_onnx(pt_path))
+    path = sys.argv[1]
+    print(f'Converting {path} to ONNX format')
+    pt_path = Path(path)
+    print(save_onnx(pt_path))
