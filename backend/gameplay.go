@@ -31,7 +31,7 @@ type MainGameplay struct {
 	inferService InferenceService
 }
 
-func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService) Gameplay {
+func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService) *MainGameplay {
 	return &MainGameplay{db: db, clock: clock, inferService: inferService}
 }
 

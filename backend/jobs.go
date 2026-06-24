@@ -20,7 +20,7 @@ type MainJobsService struct {
 	db Database
 }
 
-func NewMainJobsService(db Database) JobsService {
+func NewMainJobsService(db Database) *MainJobsService {
 	return &MainJobsService{db: db}
 }
 
