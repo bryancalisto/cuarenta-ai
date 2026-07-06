@@ -19,7 +19,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
-from agents import HeuristicAgent
 from env import ActionEncoder, CuarentaEnv, TEAMS
 
 
@@ -40,25 +39,26 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     gamma: float = 0.989
     gae_lambda: float = 0.95
-    # Optimiser
+    # optimiser
     lr: float = 3e-4
-    # Model
+    # model
     use_lstm: bool = True
     lstm_hidden: int = 128
-    # Self-play / checkpointing
+    # checkpointing
     checkpoint_every: int = 500_000
-    pool_size: int = 20
-    opponent_latest: float = 0.8
-    opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
     save_dir: str = "data/policies"
     init_policy: str = DEFAULT_POLICY_INIT
+    # self-play
+    pool_size: int = 20
+    opponent_latest: float = 0.8
+    opponent_mode: str = "selfplay"  # "selfplay" | "random"
     # Logging / training length
     log_every: int = 1
     total_steps: int = 5_000_000
 
 
 def flatten_obs(obs: Dict[str, np.ndarray]) -> np.ndarray:
-    """Flatten an observation dict in the same order used by imitation learning."""
+    """Flatten an observation dict"""
     keys = sorted(obs.keys())
     return np.concatenate([obs[k].reshape(-1) for k in keys]).astype(np.float32)
 
@@ -255,7 +255,6 @@ class PPOTrainer:
         self.training_history: Dict[str, List[float]] = collections.defaultdict(list)
 
         # Misc
-        self.heuristic_agent = HeuristicAgent()
         self.save_dir = Path(cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -357,9 +356,7 @@ class PPOTrainer:
                         action_pos, log_prob, _ = select_legal_action(logits[0], legal_action_ids)
                         action = legal_actions[action_pos]
                     else:
-                        if cfg.opponent_mode == "heuristic":
-                            action = self.heuristic_agent.act(env.observe(current_player), legal_actions)
-                        elif cfg.opponent_mode == "random":
+                        if cfg.opponent_mode == "random":
                             action = random.choice(legal_actions)
                         else:
                             obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -636,7 +633,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--save-dir", type=str, default="data/policies")
+    parser.add_argument("--save-dir", type=str, default="output/policies")
     parser.add_argument("--init-policy", type=str, default=DEFAULT_POLICY_INIT)
     parser.add_argument("--caida-exposure-penalty", type=float, default=0.5)
     parser.add_argument("--resume", type=str, default=None)
@@ -644,7 +641,7 @@ if __name__ == "__main__":
         "--opponent-mode",
         type=str,
         default="selfplay",
-        choices=["heuristic", "selfplay", "random"],
+        choices=["selfplay", "random"],
     )
     parser.add_argument("--use-lstm", type=bool, default=True)
     parser.add_argument("--lstm-hidden", type=int, default=128)

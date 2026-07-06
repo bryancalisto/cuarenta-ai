@@ -11,7 +11,6 @@ python tests.py
 python src/ppo.py
 
 ## Evaluate after training
-python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
 python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
 
 # Cuarenta RL Agent
@@ -27,7 +26,7 @@ PPO + self-play agent for the Ecuadorian card game Cuarenta, implemented in PyTo
 | `env.py` | 4-player game environment (PettingZoo-style) |
 | `model.py` | PyTorch actor-critic — Transformer encoder + two-headed policy |
 | `ppo.py` | PPO trainer with GAE, self-play checkpoint pool, optional caida-exposure shaping |
-| `evaluate.py` | Evaluation — vs random, vs heuristic, watch mode |
+| `evaluate.py` | Evaluation — vs random, watch mode |
 | `tests.py` | Full test suite for the environment |
 
 ## Setup
@@ -59,12 +58,6 @@ step=   81920 | sps=  4231 | win_rate=0.523 | loss_pi=0.0312 | loss_vf=0.4821 | 
 ```bash
 # Win rate vs random agent (200 games)
 python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-random
-
-# Win rate vs rule-based heuristic
-python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode vs-heuristic
-
-# Watch a game played against the heuristic
-python evaluate.py data/policies/cuarenta_policy_iter1.pt --mode watch
 ```
 
 ## Play 2 humans team vs 2 agents team 

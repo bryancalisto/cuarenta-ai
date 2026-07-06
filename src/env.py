@@ -78,7 +78,7 @@ class CuarentaEnv:
         )
         return self.observe(0), {}
 
-    def _count_carton_points(self, cards_captured: List[int]) -> List[int]:
+    def _count_carton_points(self, cards_captured: List[int]) -> int:
         carton_points = len(cards_captured) - 19
 
         if carton_points > 0:
@@ -143,8 +143,7 @@ class CuarentaEnv:
             s.last_placed = None   # table was modified; caída chain resets
             # Reduced capture reward. If score >= 38, don't reward captures to force caida
             if s.scores[team] < 38:
-                # reward += len(action.capture) * 0.25
-                reward += len(action.capture) * 0
+                reward += len(action.capture) * 0.25
         else:
             # Place card on table
             s.table.append(action.card)
@@ -159,7 +158,7 @@ class CuarentaEnv:
         if s.scores[team] >= WIN_SCORE:
             s.done = True
             s.winner = team
-            reward += 100.0   # terminal bonus
+            reward += 50   # terminal bonus
             info["winner"] = team
             return self.observe(player), reward, True, info
 

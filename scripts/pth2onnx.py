@@ -10,9 +10,9 @@ from src.networks import PolicyNetwork
 class PolicyNetworkOnly(nn.Module):
     """Wrapper that only outputs action logits (for ONNX inference)."""
 
-    def __init__(self, obs_size: int, action_size: int):
+    def __init__(self, obs_size: int, action_size: int, hidden_size: int):
         super().__init__()
-        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
+        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size, hidden_size=hidden_size)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.policy(obs)
@@ -21,9 +21,9 @@ class PolicyNetworkOnly(nn.Module):
 class FlatActorCriticPolicyOnly(nn.Module):
     """Actor-critic wrapper that only outputs action logits."""
 
-    def __init__(self, obs_size: int, action_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
+    def __init__(self, obs_size: int, action_size: int, hidden_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
         super().__init__()
-        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
+        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size, hidden_size=hidden_size)
         self.use_lstm = use_lstm
 
         if use_lstm:
@@ -58,10 +58,11 @@ def save_onnx(pt_path: Path) -> Path:
         # PPO FlatActorCritic checkpoint (may include LSTM)
         obs_size = checkpoint.get('obs_size', 121)
         action_size = checkpoint.get('action_size', 200)
+        hidden_size = checkpoint.get('hidden_size', 256)
         use_lstm = checkpoint.get('use_lstm', False)
         lstm_hidden = 128
 
-        model = FlatActorCriticPolicyOnly(obs_size, action_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
+        model = FlatActorCriticPolicyOnly(obs_size, action_size, hidden_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
         model.policy.load_state_dict(checkpoint['policy_state'])
 
         if use_lstm and 'lstm_state' in checkpoint and checkpoint['lstm_state'] is not None:
