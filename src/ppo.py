@@ -319,12 +319,27 @@ class PPOTrainer:
 
 
     def _collect_rollout(self) -> List[Rollout]:
-        """Collect experience for learning player (any seat) via self-play."""
+        """
+        Collect experience for a SINGLE learning player per env via self-play.
+
+        Exactly one seat (`learning_player`) generates gradient transitions.
+        The other three seats are played by the opponent policy (or random) and
+        never produce training data. Their effect on the game is only felt
+        through the reward the learning seat receives.
+
+        Reward attribution: every env step yields a reward from the acting
+        player's team perspective. We re-express it from the LEARNING player's
+        team perspective (sign-flipped when an opponent-team seat acted) and
+        accumulate it onto the learning seat's most recent transition. This way
+        an opponent's caída against us, or a teammate's capture for us, both
+        shape the learning seat's move that led to it.
+        """
         cfg = self.cfg
         rollouts = [Rollout() for _ in range(cfg.n_envs)]
         ep_reward = [0.0] * cfg.n_envs
         ep_len = [0] * cfg.n_envs
-        learning_team = [random.choice([0, 1]) for _ in range(cfg.n_envs)]
+        learning_player = [random.randrange(4) for _ in range(cfg.n_envs)]
+        pending_reward = [0.0] * cfg.n_envs  # reward awaiting attribution to last learning move
 
         self.net.eval()
         with torch.no_grad():
@@ -336,17 +351,25 @@ class PPOTrainer:
                         self.env_done[env_idx] = False
                         ep_reward[env_idx] = 0.0
                         ep_len[env_idx] = 0
-                        learning_team[env_idx] = random.choice([0, 1])
+                        pending_reward[env_idx] = 0.0
+                        learning_player[env_idx] = random.randrange(4)
                         if cfg.use_lstm:
                             self.lstm_states[env_idx] = None
 
+                    learner = learning_player[env_idx]
                     current_player = env.state.current_player
-                    is_learning = TEAMS[current_player] == learning_team[env_idx]
+                    is_learning = current_player == learner
                     obs_flat = self.env_obs[env_idx]
                     legal_actions = env.legal_actions()
                     legal_action_ids = [self.action_encoders[env_idx].action_to_idx(a) for a in legal_actions]
 
                     if is_learning:
+                        # Flush reward accrued since the previous learning move
+                        # (its own outcome + intervening opponents) onto it.
+                        if rollouts[env_idx].rewards:
+                            rollouts[env_idx].rewards[-1] += pending_reward[env_idx]
+                        pending_reward[env_idx] = 0.0
+
                         obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
                         if cfg.use_lstm:
                             logits, value, lstm_state = self.net(obs_t, self.lstm_states[env_idx])
@@ -355,6 +378,14 @@ class PPOTrainer:
                             logits, value, _ = self.net(obs_t)
                         action_pos, log_prob, _ = select_legal_action(logits[0], legal_action_ids)
                         action = legal_actions[action_pos]
+
+                        rollouts[env_idx].obs.append(obs_flat.copy())
+                        rollouts[env_idx].actions.append(action_pos)
+                        rollouts[env_idx].log_probs.append(log_prob.item())
+                        rollouts[env_idx].rewards.append(0.0)  # filled by accumulation
+                        rollouts[env_idx].values.append(value.item())
+                        rollouts[env_idx].dones.append(False)
+                        rollouts[env_idx].legal_action_ids.append(legal_action_ids)
                     else:
                         if cfg.opponent_mode == "random":
                             action = random.choice(legal_actions)
@@ -365,20 +396,21 @@ class PPOTrainer:
                             action = legal_actions[action_pos]
 
                     next_obs, reward, done, info = env.step(action)
-                    ep_reward[env_idx] += reward
-                    ep_len[env_idx] += 1
 
-                    if is_learning:
-                        rollouts[env_idx].obs.append(obs_flat.copy())
-                        rollouts[env_idx].actions.append(action_pos)
-                        rollouts[env_idx].log_probs.append(log_prob.item())
-                        rollouts[env_idx].rewards.append(reward)
-                        rollouts[env_idx].values.append(value.item())
-                        rollouts[env_idx].dones.append(done)
-                        rollouts[env_idx].legal_action_ids.append(legal_action_ids)
+                    # Re-express reward from the learning seat's team perspective.
+                    signed = reward if TEAMS[current_player] == TEAMS[learner] else -reward
+                    pending_reward[env_idx] += signed
+                    ep_reward[env_idx] += signed
+                    ep_len[env_idx] += 1
 
                     self.env_obs[env_idx] = flatten_obs(next_obs)
                     if done:
+                        # Attribute the terminal outcome to the last learning move.
+                        if rollouts[env_idx].rewards:
+                            rollouts[env_idx].rewards[-1] += pending_reward[env_idx]
+                            rollouts[env_idx].dones[-1] = True
+                        pending_reward[env_idx] = 0.0
+
                         self.env_done[env_idx] = True
                         self.episode_rewards.append(ep_reward[env_idx])
                         self.episode_lengths.append(ep_len[env_idx])
@@ -394,7 +426,7 @@ class PPOTrainer:
                                     self.team_0_wins_vs_latest += 1
                                 else:
                                     self.team_1_wins_vs_latest += 1
-                            self.elo_score.append(1.0 if info["winner"] == learning_team[env_idx] else 0.0)
+                            self.elo_score.append(1.0 if info["winner"] == TEAMS[learner] else 0.0)
 
         self.net.train()
         return rollouts

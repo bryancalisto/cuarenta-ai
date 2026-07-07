@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import List, Dict
 
 import numpy as np
@@ -17,3 +19,8 @@ def obs_to_tensors(obs_list: List[Dict], device: torch.device) -> Dict[str, torc
 
 def sort_cards_by_rank(table: List[Card]) -> List[Card]:
     return sorted(table, key=lambda c: c.rank.value)
+
+
+class PointsReasons(StrEnum):
+    CAIDA='caida'
+    LIMPIA='limpia'

@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
 from captures import valid_captures, score_play
+from utils import PointsReasons
 
 NUM_PLAYERS = 4
 HAND_SIZE = 5
@@ -136,23 +137,26 @@ class CuarentaEnv:
         }
 
         if action.capture:
+            # print(f'captured: {action.capture}')
             # Remove captured cards from table and put them in the team's captured cards
             for card in action.capture:
                 s.table.remove(card)
                 s.cards_captured[team].append(card)
+            
+            # add the thrown card to cards captured
+            s.cards_captured[team].append(action.card)
             s.last_placed = None   # table was modified; caída chain resets
-            # Reduced capture reward. If score >= 38, don't reward captures to force caida
-            if s.scores[team] < 38:
-                reward += len(action.capture) * 0.25
+
+            if reasons == PointsReasons.CAIDA:
+                reward += 2 
+            elif reasons == PointsReasons.LIMPIA:
+                reward += 2
         else:
             # Place card on table
             s.table.append(action.card)
             s.last_placed = action.card
 
-        # apply score (but don't reward it if score >= 38, to force caida)
         s.scores[team] += points
-        if s.scores[team] < 38:
-            reward += points
 
         # check win
         if s.scores[team] >= WIN_SCORE:
@@ -178,16 +182,20 @@ class CuarentaEnv:
                     team_carton[team] = 0
 
                     carton_points = self._count_carton_points(s.cards_captured[team])
-                    # Reduce carton reward if score >= 38 to force caida
-                    if s.scores[team] >= 38:
+                    # Carton points don't count if points are 38 or higher
+                    if s.scores[team] >= MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS:
                         carton_points = 0
 
                     team_carton[team] = carton_points
                     s.scores[team] = min(s.scores[team] + carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
 
-                # Reward current player for their team's carton only
+                # Reward current player for their team's carton, net of the
+                # opponent's carton (round-end is the only step where both
+                # teams score at once, so the opponent gain must register here)
                 current_team = TEAMS[player]
+                opp_team = 1 - current_team
                 info["carton_points"] = team_carton[current_team]
+                reward += team_carton[current_team] - team_carton[opp_team]
 
                 self._new_round()
 

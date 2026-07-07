@@ -1,7 +1,7 @@
 import sys
 import random
 from card import Card, Rank, Suit, build_deck, shuffled_deck
-from captures import valid_captures, detect_caida, detect_ronda, score_play
+from captures import valid_captures, detect_caida, detect_limpia, score_play
 from env import CuarentaEnv, NUM_PLAYERS, HAND_SIZE
 
 passed = 0
@@ -148,24 +148,24 @@ table = [c(5, 1), c(3, 2)]
 cap = frozenset([c(5, 1)])
 last_placed = c(5, 1)
 test("Caída detected when last placed matches played and captured",
-     detect_caida(played, cap, table, last_placed))
+     detect_caida(played, cap, last_placed))
 
 # No caída if last placed not in capture set
 cap2 = frozenset([c(3, 2)])
-test("No caída when last placed not in capture", 
-     not detect_caida(played, cap2, table, last_placed))
+test("No caída when last placed not in capture",
+     not detect_caida(played, cap2, last_placed))
 
 # No caída if last placed is None
 test("No caída when no last placed",
-     not detect_caida(played, cap, table, None))
+     not detect_caida(played, cap, None))
 
-section("captures.py — Ronda detection")
+section("captures.py — Limpia detection")
 
 table_full = [c(3), c(5, 1)]
 cap_all = frozenset(table_full)
 cap_partial = frozenset([c(3)])
-test("Ronda detected when all table cards captured", detect_ronda(cap_all, table_full))
-test("No ronda when partial capture", not detect_ronda(cap_partial, table_full))
+test("Limpia detected when all table cards captured", detect_limpia(cap_all, table_full))
+test("No limpia when partial capture", not detect_limpia(cap_partial, table_full))
 
 section("captures.py — Score computation")
 

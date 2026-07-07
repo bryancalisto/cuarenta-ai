@@ -21,7 +21,7 @@ NOTE on figure captures (Jack/Caballo/Rey = 11/12/13):
 from __future__ import annotations
 from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
-from utils import sort_cards_by_rank
+from utils import sort_cards_by_rank, PointsReasons
 
 # Ranks that can only be captured by exact match (not as part of a sum from numbers)
 FIGURE_RANKS = {Rank.JACK, Rank.QUEEN, Rank.KING, Rank.AS}
@@ -235,11 +235,11 @@ def score_play(
         # Caída bonus
         if detect_caida(played, capture_set, last_placed):
             points += CAIDA_POINTS
-            reasons.append("caída (+2)")
+            reasons.append(PointsReasons.CAIDA)
 
         # Limpia bonus
         elif detect_limpia(capture_set, table) and non_caida_allowed:
             points += LIMPIA_POINTS
-            reasons.append("limpia (+2)")
+            reasons.append(PointsReasons.LIMPIA)
 
     return points, reasons
