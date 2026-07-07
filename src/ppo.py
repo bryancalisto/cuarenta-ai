@@ -6,10 +6,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from agents import HeuristicAgent, RandomAgent
 
 import matplotlib
 
-from networks import PolicyNetwork
+from networks import PolicyNetwork, FlatActorCritic
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,6 +25,8 @@ from env import ActionEncoder, CuarentaEnv, TEAMS
 
 DEFAULT_POLICY_INIT = "data/policies/cuarenta_dagger_policy_final.pt"
 
+LSTMState = Tuple[torch.Tensor, torch.Tensor]
+
 
 @dataclass
 class PPOConfig:
@@ -32,7 +35,8 @@ class PPOConfig:
     n_steps: int = 512
     # PPO
     n_epochs: int = 4
-    minibatch_size: int = 128
+    minibatch_size: int = 128          # used only when use_lstm=False
+    envs_per_minibatch: int = 4        # used only when use_lstm=True
     clip_eps: float = 0.2
     vf_coef: float = 0.5
     ent_coef: float = 0.01
@@ -45,13 +49,13 @@ class PPOConfig:
     use_lstm: bool = True
     lstm_hidden: int = 128
     # checkpointing
-    checkpoint_every: int = 500_000
+    checkpoint_every: int = 100_000
     save_dir: str = "data/policies"
     init_policy: str = DEFAULT_POLICY_INIT
     # self-play
     pool_size: int = 20
     opponent_latest: float = 0.8
-    opponent_mode: str = "selfplay"  # "selfplay" | "random"
+    opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
     # Logging / training length
     log_every: int = 1
     total_steps: int = 5_000_000
@@ -73,6 +77,21 @@ def clone_state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, to
     return {k: v.detach().cpu().clone() for k, v in state_dict.items()}
 
 
+def clone_lstm_state(state: Optional[LSTMState]) -> Optional[LSTMState]:
+    """Detach + clone an (h, c) LSTM state so it can be safely stashed for later reuse."""
+    if state is None:
+        return None
+    h, c = state
+    return (h.detach().cpu().clone(), c.detach().cpu().clone())
+
+
+def lstm_state_to_device(state: Optional[LSTMState], device: torch.device) -> Optional[LSTMState]:
+    if state is None:
+        return None
+    h, c = state
+    return (h.to(device), c.to(device))
+
+
 def masked_legal_logits(
     logits_1d: torch.Tensor,
     legal_action_ids: List[int],
@@ -81,61 +100,54 @@ def masked_legal_logits(
     return logits_1d[legal_action_ids]
 
 
-class FlatActorCritic(nn.Module):
-    def __init__(self, obs_size: int, action_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
-        super().__init__()
-        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
-        self.use_lstm = use_lstm
-        self.lstm_hidden = lstm_hidden
+def run_recurrent_forward(
+    net: FlatActorCritic,
+    obs_seq: torch.Tensor,      # (T, obs_size), time-ordered for ONE environment
+    dones: torch.Tensor,        # (T,) float32, 1.0 marks the last step of an episode
+    init_state: Optional[LSTMState],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Replay a full, time-ordered sequence of transitions from a single
+    environment through the recurrent actor-critic, returning logits and
+    values for EVERY timestep (unlike FlatActorCritic.forward, which only
+    returns the last step).
 
-        if use_lstm:
-            self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
-            self.fc3 = nn.Linear(lstm_hidden, action_size)
-            feature_size = lstm_hidden
-        else:
-            feature_size = 256
+    The hidden state is carried across steps exactly as it was during
+    rollout collection, and is reset to zero immediately after any step
+    flagged `done` — mirroring `self.lstm_states[env_idx] = None` on episode
+    reset in `_collect_rollout`. This is what makes recurrent training
+    correct: episode boundaries in the buffered data produce the same
+    resets here as they did when the data was generated.
+    """
+    T = obs_seq.shape[0]
 
-        self.value_head = nn.Sequential(
-            nn.Linear(feature_size, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
-        )
+    # Split into contiguous segments; a segment ends right after a `done`.
+    segments: List[Tuple[int, int]] = []
+    seg_start = 0
+    for t in range(T):
+        if dones[t].item() > 0.5:
+            segments.append((seg_start, t + 1))
+            seg_start = t + 1
+    if seg_start < T:
+        segments.append((seg_start, T))
 
-    def forward(self, obs: torch.Tensor, lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple]]:
-        x = self.policy.relu(self.policy.fc1(obs))
-        x = self.policy.relu(self.policy.fc2(x))
+    state = init_state
+    logits_chunks, values_chunks = [], []
+    for s, e in segments:
+        seq = obs_seq[s:e].unsqueeze(0)  # (1, seg_len, obs_size)
+        x = net.policy.relu(net.policy.fc1(seq))
+        x = net.policy.relu(net.policy.fc2(x))
+        x, state = net.lstm(x, state)
+        logits_chunks.append(net.fc3(x).squeeze(0))
+        values_chunks.append(net.value_head(x).squeeze(0).squeeze(-1))
+        state = None  # a `done` ended this segment; the next one starts fresh
 
-        if self.use_lstm:
-            if x.dim() == 2:
-                x = x.unsqueeze(1)
-            x, new_state = self.lstm(x, lstm_state)
-            if x.dim() == 3:
-                x = x[:, -1, :]
-            logits = self.fc3(x)
-        else:
-            new_state = None
-            logits = self.policy.fc3(x)
-
-        value = self.value_head(x).squeeze(-1)
-        return logits, value, new_state
-
-    def get_value(self, obs: torch.Tensor, lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> torch.Tensor:
-        x = self.policy.relu(self.policy.fc1(obs))
-        x = self.policy.relu(self.policy.fc2(x))
-
-        if self.use_lstm:
-            if x.dim() == 2:
-                x = x.unsqueeze(1)
-            x, _ = self.lstm(x, lstm_state)
-            if x.dim() == 3:
-                x = x[:, -1, :]
-
-        return self.value_head(x).squeeze(-1)
+    return torch.cat(logits_chunks, dim=0), torch.cat(values_chunks, dim=0)
 
 
 @dataclass
 class Rollout:
-    """Stores one rollout's worth of data for a single learning seat."""
+    """Stores one rollout's worth of data for a single learning seat, in order."""
 
     obs: List[np.ndarray] = field(default_factory=list)
     actions: List[int] = field(default_factory=list)  # index within the legal action list
@@ -144,6 +156,9 @@ class Rollout:
     values: List[float] = field(default_factory=list)
     dones: List[bool] = field(default_factory=list)
     legal_action_ids: List[List[int]] = field(default_factory=list)
+    # LSTM hidden state as it existed immediately before this rollout's first
+    # transition. None if the env was mid-reset at collection start.
+    hidden_start: Optional[LSTMState] = None
 
     def clear(self):
         self.obs.clear()
@@ -153,6 +168,7 @@ class Rollout:
         self.values.clear()
         self.dones.clear()
         self.legal_action_ids.clear()
+        self.hidden_start = None
 
 
 def compute_gae(
@@ -208,6 +224,17 @@ class PPOTrainer:
 
     Learns to play optimally from any team via randomized team assignment.
     Opponents sampled from checkpoint pool (self-play).
+
+    Recurrence design note: when `cfg.use_lstm` is True, both the learner and
+    the opponent maintain a persistent per-environment LSTM hidden state that
+    is only advanced on that seat's own turns (the observation already
+    encodes everything that happened on other seats' turns). During the PPO
+    update, each environment's buffered transitions are replayed through the
+    network IN ORDER starting from the hidden state recorded at rollout time
+    (a "stored state" approach, as in R2D2 / sample-factory), rather than
+    being shuffled into independent single-step samples. This is what makes
+    the recurrence actually learn something — shuffling timesteps (the
+    original approach) trains the LSTM as if it were a stateless layer.
     """
 
     def __init__(self, cfg: PPOConfig, device: Optional[str] = None):
@@ -224,7 +251,8 @@ class PPOTrainer:
         self.env_obs = [None] * cfg.n_envs
         self.env_done = [True] * cfg.n_envs
         self.action_encoders = [ActionEncoder(env) for env in self.envs]
-        self.lstm_states = [None] * cfg.n_envs if cfg.use_lstm else None
+        self.lstm_states: Optional[List[Optional[LSTMState]]] = [None] * cfg.n_envs if cfg.use_lstm else None
+        self.opponent_lstm_states: Optional[List[Optional[LSTMState]]] = [None] * cfg.n_envs if cfg.use_lstm else None
 
         # Infer observation/action sizes from the real environment.
         sample_obs, _ = self.envs[0].reset()
@@ -234,8 +262,10 @@ class PPOTrainer:
         self.net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
-        self.opponent_net = PolicyNetwork(obs_size=self.obs_size, action_size=self.action_size).to(self.device)
-        self.opponent_net.load_state_dict(self.net.policy.state_dict())
+        # Opponent shares the SAME architecture as the learner (including the
+        # LSTM), so checkpoints in the pool can be loaded into it directly.
+        self.opponent_net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
+        self.opponent_net.load_state_dict(self.net.state_dict())
         self.opponent_net.eval()
 
         self.ckpt_pool: List[Dict[str, torch.Tensor]] = []
@@ -255,8 +285,44 @@ class PPOTrainer:
         self.training_history: Dict[str, List[float]] = collections.defaultdict(list)
 
         # Misc
+        self.heuristic_agent = HeuristicAgent()
         self.save_dir = Path(cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
+
+    @torch.no_grad()
+    def _evaluate_vs(self, opponent_agent, n_games: int = 50) -> float:
+        """Play n_games full games with the current net vs a fixed opponent,
+        net always deterministic, opponent controlling 3 of 4 seats (rotated
+        randomly like in training). Returns win rate for the net's team."""
+        self.net.eval()
+        wins = 0
+        for _ in range(n_games):
+            env = CuarentaEnv(seed=random.randrange(1_000_000))
+            encoder = ActionEncoder(env)
+            obs, _ = env.reset()
+            learner = random.randrange(4)
+            lstm_state = None
+            if hasattr(opponent_agent, "reset"):
+                opponent_agent.reset()
+
+            done, info = False, {}
+            while not done:
+                player = env.state.current_player
+                legal = env.legal_actions()
+                if player == learner:
+                    obs_t = torch.tensor(flatten_obs(obs), dtype=torch.float32, device=self.device).unsqueeze(0)
+                    logits, _, lstm_state = self.net(obs_t, lstm_state if self.cfg.use_lstm else None)
+                    legal_ids = [encoder.action_to_idx(a) for a in legal]
+                    action_pos, _, _ = select_legal_action(logits[0], legal_ids, deterministic=True)
+                    action = legal[action_pos]
+                else:
+                    action = opponent_agent.act(env.observe(player), legal)
+                obs, _, done, info = env.step(action)
+
+            if info.get("winner") == TEAMS[learner]:
+                wins += 1
+        self.net.train()
+        return wins / n_games
 
     def train(self):
         cfg = self.cfg
@@ -281,6 +347,12 @@ class PPOTrainer:
 
             if self.global_step % cfg.checkpoint_every < cfg.n_envs * cfg.n_steps:
                 self._save_policy_snapshot()
+                heuristic_wr = self._evaluate_vs(self.heuristic_agent, n_games=50)
+                random_wr = self._evaluate_vs(RandomAgent(seed=0), n_games=50)
+                self.training_history["eval_step"].append(float(self.global_step))
+                self.training_history["win_rate_vs_heuristic"].append(heuristic_wr)
+                self.training_history["win_rate_vs_random"].append(random_wr)
+                print(f"[PPO] Eval @ {self.global_step}: vs heuristic={heuristic_wr:.2%}  vs random={random_wr:.2%}")
 
             if rollout_num % cfg.log_every == 0:
                 rew = np.mean(self.episode_rewards) if self.episode_rewards else 0
@@ -317,7 +389,6 @@ class PPOTrainer:
         print(f"Training plot         → {plot_path}")
         print(f"{'='*60}\n")
 
-
     def _collect_rollout(self) -> List[Rollout]:
         """
         Collect experience for a SINGLE learning player per env via self-play.
@@ -341,6 +412,14 @@ class PPOTrainer:
         learning_player = [random.randrange(4) for _ in range(cfg.n_envs)]
         pending_reward = [0.0] * cfg.n_envs  # reward awaiting attribution to last learning move
 
+        # Snapshot the hidden state each env is starting this window with, so
+        # the update step can replay from the exact same starting point.
+        if cfg.use_lstm:
+            for env_idx in range(cfg.n_envs):
+                rollouts[env_idx].hidden_start = (
+                    None if self.env_done[env_idx] else clone_lstm_state(self.lstm_states[env_idx])
+                )
+
         self.net.eval()
         with torch.no_grad():
             for _ in range(cfg.n_steps):
@@ -355,6 +434,7 @@ class PPOTrainer:
                         learning_player[env_idx] = random.randrange(4)
                         if cfg.use_lstm:
                             self.lstm_states[env_idx] = None
+                            self.opponent_lstm_states[env_idx] = None
 
                     learner = learning_player[env_idx]
                     current_player = env.state.current_player
@@ -387,11 +467,16 @@ class PPOTrainer:
                         rollouts[env_idx].dones.append(False)
                         rollouts[env_idx].legal_action_ids.append(legal_action_ids)
                     else:
-                        if cfg.opponent_mode == "random":
+                        if cfg.opponent_mode == "heuristic":
+                            action = self.heuristic_agent.act(env.observe(current_player), legal_actions)
+                        elif cfg.opponent_mode == "random":
                             action = random.choice(legal_actions)
                         else:
                             obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
-                            logits = self.opponent_net(obs_t)
+                            opp_state = self.opponent_lstm_states[env_idx] if cfg.use_lstm else None
+                            logits, _, new_opp_state = self.opponent_net(obs_t, opp_state)
+                            if cfg.use_lstm:
+                                self.opponent_lstm_states[env_idx] = new_opp_state
                             action_pos, _, _ = select_legal_action(logits[0], legal_action_ids)
                             action = legal_actions[action_pos]
 
@@ -431,15 +516,11 @@ class PPOTrainer:
         self.net.train()
         return rollouts
 
-
     def _ppo_update(self, rollouts: List[Rollout]) -> Dict[str, float]:
         cfg = self.cfg
-        all_obs: List[np.ndarray] = []
-        all_actions: List[int] = []
-        all_old_lps: List[float] = []
-        all_advs: List[float] = []
-        all_rets: List[float] = []
-        all_legal_ids: List[List[int]] = []
+
+        env_records: List[Dict] = []
+        all_advs_flat: List[float] = []
 
         for env_idx, rl in enumerate(rollouts):
             if not rl.rewards:
@@ -456,29 +537,104 @@ class PPOTrainer:
             rewards = np.array(rl.rewards, dtype=np.float32)
             values = np.array(rl.values, dtype=np.float32)
             dones = np.array(rl.dones, dtype=np.float32)
-
             advs, rets = compute_gae(rewards, values, dones, last_val, cfg.gamma, cfg.gae_lambda)
 
-            all_obs.extend(rl.obs)
-            all_actions.extend(rl.actions)
-            all_old_lps.extend(rl.log_probs)
-            all_advs.extend(advs.tolist())
-            all_rets.extend(rets.tolist())
-            all_legal_ids.extend(rl.legal_action_ids)
+            env_records.append({
+                "obs": torch.tensor(np.stack(rl.obs), dtype=torch.float32, device=self.device),
+                "actions": torch.tensor(rl.actions, dtype=torch.long, device=self.device),
+                "old_log_probs": torch.tensor(rl.log_probs, dtype=torch.float32, device=self.device),
+                "dones": torch.tensor(dones, dtype=torch.float32, device=self.device),
+                "advs": advs,  # raw numpy; normalized below once global stats are known
+                "rets": torch.tensor(rets, dtype=torch.float32, device=self.device),
+                "legal_ids": rl.legal_action_ids,
+                "hidden_start": lstm_state_to_device(rl.hidden_start, self.device) if cfg.use_lstm else None,
+            })
+            all_advs_flat.extend(advs.tolist())
 
-        if not all_obs:
+        if not env_records:
             return {"loss_pi": 0.0, "loss_vf": 0.0, "entropy": 0.0}
 
-        obs_tensor = batch_obs_to_tensor(all_obs, self.device)
-        actions_tensor = torch.tensor(all_actions, dtype=torch.long, device=self.device)
-        old_lps_tensor = torch.tensor(all_old_lps, dtype=torch.float32, device=self.device)
-        advs_tensor = torch.tensor(all_advs, dtype=torch.float32, device=self.device)
-        rets_tensor = torch.tensor(all_rets, dtype=torch.float32, device=self.device)
+        adv_mean = float(np.mean(all_advs_flat))
+        adv_std = float(np.std(all_advs_flat) + 1e-8)
+        for rec in env_records:
+            rec["advs"] = torch.tensor((rec["advs"] - adv_mean) / adv_std, dtype=torch.float32, device=self.device)
 
-        advs_tensor = (advs_tensor - advs_tensor.mean()) / (advs_tensor.std() + 1e-8)
+        if not cfg.use_lstm:
+            return self._ppo_update_feedforward(env_records)
+        return self._ppo_update_recurrent(env_records)
+
+    def _ppo_update_recurrent(self, env_records: List[Dict]) -> Dict[str, float]:
+        """
+        PPO update that preserves per-environment temporal order. Minibatches
+        are groups of ENVIRONMENTS (not individual timesteps), since each
+        environment's sequence must be replayed through the LSTM in order,
+        starting from its own stored initial hidden state.
+        """
+        cfg = self.cfg
+        stats = collections.defaultdict(list)
+        envs_per_mb = max(1, min(cfg.envs_per_minibatch, len(env_records)))
+
+        for _ in range(cfg.n_epochs):
+            order = list(range(len(env_records)))
+            random.shuffle(order)
+
+            for start in range(0, len(order), envs_per_mb):
+                mb_idxs = order[start : start + envs_per_mb]
+
+                pi_losses, vf_losses, entropies = [], [], []
+                for idx in mb_idxs:
+                    rec = env_records[idx]
+                    logits_seq, values_seq = run_recurrent_forward(
+                        self.net, rec["obs"], rec["dones"], rec["hidden_start"]
+                    )
+
+                    log_probs, ent = [], []
+                    for t, legal_ids in enumerate(rec["legal_ids"]):
+                        legal_logits = logits_seq[t, legal_ids]
+                        dist = torch.distributions.Categorical(logits=legal_logits)
+                        log_probs.append(dist.log_prob(rec["actions"][t]))
+                        ent.append(dist.entropy())
+                    log_probs_t = torch.stack(log_probs)
+                    entropy_t = torch.stack(ent)
+
+                    ratio = torch.exp(log_probs_t - rec["old_log_probs"])
+                    surr1 = ratio * rec["advs"]
+                    surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * rec["advs"]
+
+                    pi_losses.append(-torch.min(surr1, surr2).mean())
+                    vf_losses.append(F.mse_loss(values_seq, rec["rets"]))
+                    entropies.append(entropy_t.mean())
+
+                loss_pi = torch.stack(pi_losses).mean()
+                loss_vf = torch.stack(vf_losses).mean()
+                entropy = torch.stack(entropies).mean()
+                loss = loss_pi + cfg.vf_coef * loss_vf - cfg.ent_coef * entropy
+
+                self.opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.net.parameters(), cfg.max_grad_norm)
+                self.opt.step()
+
+                stats["loss_pi"].append(loss_pi.item())
+                stats["loss_vf"].append(loss_vf.item())
+                stats["entropy"].append(entropy.item())
+
+        return {k: float(np.mean(v)) for k, v in stats.items()}
+
+    def _ppo_update_feedforward(self, env_records: List[Dict]) -> Dict[str, float]:
+        """Original flat/shuffled PPO update, valid when there's no recurrence to preserve."""
+        cfg = self.cfg
+        obs_tensor = torch.cat([r["obs"] for r in env_records], dim=0)
+        actions_tensor = torch.cat([r["actions"] for r in env_records], dim=0)
+        old_lps_tensor = torch.cat([r["old_log_probs"] for r in env_records], dim=0)
+        advs_tensor = torch.cat([r["advs"] for r in env_records], dim=0)
+        rets_tensor = torch.cat([r["rets"] for r in env_records], dim=0)
+        all_legal_ids: List[List[int]] = []
+        for r in env_records:
+            all_legal_ids.extend(r["legal_ids"])
 
         stats = collections.defaultdict(list)
-        N = len(all_obs)
+        N = obs_tensor.shape[0]
 
         for _ in range(cfg.n_epochs):
             idxs = torch.randperm(N, device=self.device)
@@ -493,13 +649,11 @@ class PPOTrainer:
 
                 logits, values, _ = self.net(mb_obs)
 
-                log_probs = []
-                entropies = []
+                log_probs, entropies = [], []
                 for row, legal_ids in enumerate(mb_legal_ids):
                     legal_logits = logits[row, legal_ids]
                     dist = torch.distributions.Categorical(logits=legal_logits)
-                    choice = mb_actions[row]
-                    log_probs.append(dist.log_prob(choice))
+                    log_probs.append(dist.log_prob(mb_actions[row]))
                     entropies.append(dist.entropy())
 
                 log_probs_t = torch.stack(log_probs)
@@ -547,20 +701,21 @@ class PPOTrainer:
             return self.save_dir / "training_metrics_empty.png"
 
         steps = np.array(self.training_history["step"], dtype=np.float32)
+        eval_steps = np.array(self.training_history.get("eval_step", []), dtype=np.float32)
 
-        fig, axes = plt.subplots(3, 2, figsize=(14, 12), sharex=True)
-        axes = axes.reshape(3, 2)
+        fig, axes = plt.subplots(4, 2, figsize=(14, 16), sharex=True)
+        axes = axes.reshape(4, 2)
 
-        plots = [
+        rollout_plots = [
             (0, 0, "loss_pi", "Policy Loss"),
             (0, 1, "loss_vf", "Value Loss"),
             (1, 0, "entropy", "Entropy"),
-            (1, 1, "win_rate", "Win Rate"),
+            (1, 1, "win_rate", "Win Rate (self-play)"),
             (2, 0, "episode_reward", "Episode Reward"),
             (2, 1, "episode_length", "Episode Length"),
         ]
 
-        for row, col, key, title in plots:
+        for row, col, key, title in rollout_plots:
             ax = axes[row, col]
             values = np.array(self.training_history.get(key, []), dtype=np.float32)
             if len(values) > 0:
@@ -574,10 +729,29 @@ class PPOTrainer:
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=8)
 
-        axes[2, 0].set_xlabel("Training step")
-        axes[2, 1].set_xlabel("Training step")
+        # Held-out eval curves: sparser cadence, own x-axis (eval_step), plotted
+        # with markers since there are far fewer points than the rollout metrics.
+        eval_plots = [
+            (3, 0, "win_rate_vs_heuristic", "Win Rate vs Heuristic Bot", "#2ca02c"),
+            (3, 1, "win_rate_vs_random", "Win Rate vs Random Bot", "#d62728"),
+        ]
+        for row, col, key, title, color in eval_plots:
+            ax = axes[row, col]
+            values = np.array(self.training_history.get(key, []), dtype=np.float32)
+            if len(values) > 0 and len(eval_steps) > 0:
+                n = min(len(values), len(eval_steps))
+                ax.plot(eval_steps[:n], values[:n], marker="o", color=color, linewidth=1.8, label=title)
+                ax.axhline(0.5, color="gray", linestyle="--", linewidth=1.0, alpha=0.6, label="50% baseline")
+                ax.set_ylim(-0.05, 1.05)
+            ax.set_title(title)
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=8)
+
+        axes[3, 0].set_xlabel("Training step")
+        axes[3, 1].set_xlabel("Training step")
         axes[1, 0].set_ylabel("Metric value")
         axes[2, 0].set_ylabel("Metric value")
+        axes[3, 0].set_ylabel("Win rate")
 
         fig.suptitle(
             f"Cuarenta PPO Training Metrics (steps={int(self.global_step)})",
@@ -599,20 +773,20 @@ class PPOTrainer:
     def _save_policy_snapshot(self) -> Path:
         path = self.save_dir / f"policy_{self.global_step}.pt"
 
+        model_state = clone_state_dict_to_cpu(self.net.state_dict())
         state = {
             "step": self.global_step,
-            "policy_state": clone_state_dict_to_cpu(self.net.policy.state_dict()),
-            "value_state": clone_state_dict_to_cpu(self.net.value_head.state_dict()),
-            "lstm_state": clone_state_dict_to_cpu(self.net.lstm.state_dict()) if self.cfg.use_lstm else None,
+            "model_state": model_state,
             "optimizer_state": self.opt.state_dict(),
             "obs_size": self.obs_size,
             "action_size": self.action_size,
             "use_lstm": self.cfg.use_lstm,
+            "lstm_hidden": self.cfg.lstm_hidden,
         }
         torch.save(state, path)
         print(f"[PPO] Checkpoint → {path}")
 
-        self.ckpt_pool.append(clone_state_dict_to_cpu(self.net.policy.state_dict()))
+        self.ckpt_pool.append(model_state)
         self.ckpt_step.append(self.global_step)
 
         if len(self.ckpt_pool) > self.cfg.pool_size:
@@ -637,23 +811,30 @@ class PPOTrainer:
 
         self.opponent_net.load_state_dict(sd)
         self.opponent_net.eval()
+        if cfg.use_lstm:
+            # New weights make any in-flight hidden state meaningless.
+            self.opponent_lstm_states = [None] * cfg.n_envs
 
     def load_policy(self, path: str):
         state = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "policy_state" not in state:
+        if "model_state" in state:
+            self.net.load_state_dict(state["model_state"])
+            if "optimizer_state" in state:
+                self.opt.load_state_dict(state["optimizer_state"])
+        elif "policy_state" in state:
+            # Legacy / pretrained checkpoint (e.g. DAgger): feedforward trunk only.
+            self.net.policy.load_state_dict(state["policy_state"])
+        else:
             raise KeyError(f"Unsupported checkpoint format: {path}")
-        self.net.policy.load_state_dict(state["policy_state"])
-        if "value_state" in state:
-            self.net.value_head.load_state_dict(state["value_state"])
-        if "lstm_state" in state and state["lstm_state"] is not None and self.cfg.use_lstm:
-            self.net.lstm.load_state_dict(state["lstm_state"])
-        if "optimizer_state" in state:
-            self.opt.load_state_dict(state["optimizer_state"])
+
         self.global_step = int(state.get("step", 0))
 
-        self.opponent_net.load_state_dict(self.net.policy.state_dict())
+        self.opponent_net.load_state_dict(self.net.state_dict())
         self.opponent_net.eval()
+        if self.cfg.use_lstm:
+            self.lstm_states = [None] * self.cfg.n_envs
+            self.opponent_lstm_states = [None] * self.cfg.n_envs
         print(f"[PPO] Loaded policy from {path} (step={self.global_step})")
 
 
@@ -673,10 +854,11 @@ if __name__ == "__main__":
         "--opponent-mode",
         type=str,
         default="selfplay",
-        choices=["selfplay", "random"],
+        choices=["heuristic", "selfplay", "random"],
     )
     parser.add_argument("--use-lstm", type=bool, default=True)
     parser.add_argument("--lstm-hidden", type=int, default=128)
+    parser.add_argument("--envs-per-minibatch", type=int, default=4)
     parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
@@ -690,6 +872,7 @@ if __name__ == "__main__":
         opponent_mode=args.opponent_mode,
         use_lstm=args.use_lstm,
         lstm_hidden=args.lstm_hidden,
+        envs_per_minibatch=args.envs_per_minibatch,
     )
 
     trainer = PPOTrainer(cfg, device=args.device)

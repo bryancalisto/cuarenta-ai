@@ -1,4 +1,5 @@
 from __future__ import annotations
+from networks import FlatActorCritic 
 
 import random
 from typing import List
@@ -39,6 +40,34 @@ class RandomAgent:
         return self.rng.choice(legal)
 
 
+class HeuristicAgent:
+    """
+    Simple rule-based agent:
+      1. If a caída is available → take it.
+      2. If a limpia is available → take it.
+      3. If any capture → take the one capturing the most cards.
+      4. Otherwise place the lowest-value card.
+    """
+
+    def act(self, obs, legal: List[Action]) -> Action:
+        captures = [a for a in legal if a.capture]
+        if captures:
+            lp_vec = obs["last_placed"]
+            lp_idx = int(lp_vec.argmax()) if lp_vec.sum() > 0 else -1
+
+            if lp_idx != -1:
+                for a in captures:
+                    if len(a.capture) == 1 and next(iter(a.capture)).index == lp_idx:
+                        return a  # caída
+
+            # Prefer the largest capture (proxy for limpia / best value)
+            best_cap = max(captures, key=lambda a: len(a.capture))
+            return best_cap
+
+        places = [a for a in legal if a.capture is None]
+        return min(places, key=lambda a: a.card.value)
+
+
 class FlatNetAgent:
     """Wraps a flat PolicyNetwork checkpoint for evaluation."""
 
@@ -76,3 +105,63 @@ def load_agent_from_checkpoint(
     net.load_state_dict(policy_state)
     net.eval()
     return FlatNetAgent(net, device, deterministic=deterministic)
+
+
+class RecurrentNetAgent:
+    """
+    Wraps a FlatActorCritic checkpoint (feedforward or recurrent) for
+    evaluation / play. Maintains its own persistent LSTM hidden state across
+    turns within a single game, mirroring how the opponent net is used
+    during training rollouts.
+    """
+    def __init__(self, net: "FlatActorCritic", device: torch.device, deterministic: bool = True):
+        self.net = net
+        self.device = device
+        self.deterministic = deterministic
+        self.lstm_state = None
+        self.net.eval()
+
+    def reset(self):
+        """Call this at the start of every new game/hand."""
+        self.lstm_state = None
+
+    @torch.no_grad()
+    def act(self, obs, legal: List[Action]) -> Action:
+        obs_t = torch.tensor(flatten_obs(obs), dtype=torch.float32, device=self.device).unsqueeze(0)
+        logits, _, new_state = self.net(obs_t, self.lstm_state if self.net.use_lstm else None)
+        if self.net.use_lstm:
+            self.lstm_state = new_state
+
+        legal_indices = [encode_legal_action(a, legal) for a in legal]
+        legal_logits = logits[0, legal_indices]
+        if self.deterministic:
+            choice = int(torch.argmax(legal_logits).item())
+        else:
+            dist = torch.distributions.Categorical(logits=legal_logits)
+            choice = int(dist.sample().item())
+        return legal[choice]
+
+
+def load_agent_from_checkpoint(
+    path: str,
+    device: torch.device,
+    deterministic: bool = True,
+) -> RecurrentNetAgent:
+    state = torch.load(path, map_location=device, weights_only=False)
+    obs_size = int(state["obs_size"])
+    action_size = int(state["action_size"])
+    use_lstm = bool(state.get("use_lstm", False))
+    lstm_hidden = int(state.get("lstm_hidden", 128))
+
+    net = FlatActorCritic(obs_size, action_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden).to(device)
+
+    if "model_state" in state:
+        net.load_state_dict(state["model_state"])
+    elif "policy_state" in state:
+        # Legacy DAgger-style checkpoint: feedforward trunk only, no LSTM/value weights.
+        net.policy.load_state_dict(state["policy_state"])
+    else:
+        raise KeyError(f"Unsupported checkpoint format: {path}")
+
+    net.eval()
+    return RecurrentNetAgent(net, device, deterministic=deterministic)
