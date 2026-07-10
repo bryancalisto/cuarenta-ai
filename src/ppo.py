@@ -151,19 +151,26 @@ def run_recurrent_forward(
 class Rollout:
     """Stores one rollout's worth of data for a single learning seat, in order."""
 
-    obs: List[np.ndarray] = field(default_factory=list)
-    actions: List[int] = field(default_factory=list)  # index within the legal action list
+    # Full per-turn trajectory (every seat's turn) — needed so the LSTM can be
+    # replayed through the whole match, not just the learner's own decisions.
+    full_obs: List[np.ndarray] = field(default_factory=list)
+    full_dones: List[bool] = field(default_factory=list)
+    learn_positions: List[int] = field(default_factory=list)  # index into full_obs for each learning transition
+
+    # Per-learning-transition data, aligned with learn_positions.
+    actions: List[int] = field(default_factory=list)
     log_probs: List[float] = field(default_factory=list)
     rewards: List[float] = field(default_factory=list)
     values: List[float] = field(default_factory=list)
     dones: List[bool] = field(default_factory=list)
     legal_action_ids: List[List[int]] = field(default_factory=list)
-    # LSTM hidden state as it existed immediately before this rollout's first
-    # transition. None if the env was mid-reset at collection start.
+
     hidden_start: Optional[LSTMState] = None
 
     def clear(self):
-        self.obs.clear()
+        self.full_obs.clear()
+        self.full_dones.clear()
+        self.learn_positions.clear()
         self.actions.clear()
         self.log_probs.clear()
         self.rewards.clear()
@@ -380,14 +387,20 @@ class PPOTrainer:
             while not done:
                 player = env.state.current_player
                 legal = env.legal_actions()
+                obs_t = torch.tensor(flatten_obs(obs), dtype=torch.float32, device=self.device).unsqueeze(0)
+
+                if self.cfg.use_lstm:
+                    logits, _, lstm_state = self.net(obs_t, lstm_state)
+                elif player == learner:
+                    logits, _, _ = self.net(obs_t)
+
                 if player == learner:
-                    obs_t = torch.tensor(flatten_obs(obs), dtype=torch.float32, device=self.device).unsqueeze(0)
-                    logits, _, lstm_state = self.net(obs_t, lstm_state if self.cfg.use_lstm else None)
                     legal_ids = [encoder.action_to_idx(a) for a in legal]
                     action_pos, _, _ = select_legal_action(logits[0], legal_ids, deterministic=True)
                     action = legal[action_pos]
                 else:
                     action = opponent_agent.act(env.observe(player), legal)
+
                 obs, _, done, info = env.step(action)
 
             if info.get("winner") == TEAMS[learner]:
@@ -515,43 +528,53 @@ class PPOTrainer:
                     obs_flat = self.env_obs[env_idx]
                     legal_actions = env.legal_actions()
                     legal_action_ids = [self.action_encoders[env_idx].action_to_idx(a) for a in legal_actions]
+                    rl = rollouts[env_idx]
+
+                    obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+                    if cfg.use_lstm:
+                        # Advance the learner's hidden state on EVERY turn, not just
+                        # its own, so it accumulates memory of the whole match —
+                        # including opponents' moves — not only its own decisions.
+                        logits, value, lstm_state = self.net(obs_t, self.lstm_states[env_idx])
+                        self.lstm_states[env_idx] = lstm_state
+                    elif is_learning:
+                        logits, value, _ = self.net(obs_t)
+                    else:
+                        logits, value = None, None
+
+                    rl.full_obs.append(obs_flat.copy())
+                    rl.full_dones.append(False)  # patched to True below if this turn ends the episode
 
                     if is_learning:
                         # Flush reward accrued since the previous learning move
                         # (its own outcome + intervening opponents) onto it.
-                        if rollouts[env_idx].rewards:
-                            rollouts[env_idx].rewards[-1] += pending_reward[env_idx]
+                        if rl.rewards:
+                            rl.rewards[-1] += pending_reward[env_idx]
                         pending_reward[env_idx] = 0.0
 
-                        obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
-                        if cfg.use_lstm:
-                            logits, value, lstm_state = self.net(obs_t, self.lstm_states[env_idx])
-                            self.lstm_states[env_idx] = lstm_state
-                        else:
-                            logits, value, _ = self.net(obs_t)
                         action_pos, log_prob, _ = select_legal_action(logits[0], legal_action_ids)
                         action = legal_actions[action_pos]
 
-                        rollouts[env_idx].obs.append(obs_flat.copy())
-                        rollouts[env_idx].actions.append(action_pos)
-                        rollouts[env_idx].log_probs.append(log_prob.item())
-                        rollouts[env_idx].rewards.append(0.0)  # filled by accumulation
-                        rollouts[env_idx].values.append(value.item())
-                        rollouts[env_idx].dones.append(False)
-                        rollouts[env_idx].legal_action_ids.append(legal_action_ids)
+                        rl.learn_positions.append(len(rl.full_obs) - 1)
+                        rl.actions.append(action_pos)
+                        rl.log_probs.append(log_prob.item())
+                        rl.rewards.append(0.0)  # filled by accumulation
+                        rl.values.append(value.item())
+                        rl.dones.append(False)
+                        rl.legal_action_ids.append(legal_action_ids)
                     else:
                         if cfg.opponent_mode == "heuristic":
                             action = self.heuristic_agent.act(env.observe(current_player), legal_actions)
                         elif cfg.opponent_mode == "random":
                             action = random.choice(legal_actions)
                         else:
-                            obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
                             opp_net = self.opponent_nets[env_idx]
                             opp_state = self.opponent_lstm_states[env_idx] if cfg.use_lstm else None
-                            logits, _, new_opp_state = opp_net(obs_t, opp_state)
+                            opp_logits, _, new_opp_state = opp_net(obs_t, opp_state)
                             if cfg.use_lstm:
                                 self.opponent_lstm_states[env_idx] = new_opp_state
-                            action_pos, _, _ = select_legal_action(logits[0], legal_action_ids)
+                            action_pos, _, _ = select_legal_action(opp_logits[0], legal_action_ids)
                             action = legal_actions[action_pos]
 
                     next_obs, reward, done, info = env.step(action)
@@ -564,10 +587,11 @@ class PPOTrainer:
 
                     self.env_obs[env_idx] = flatten_obs(next_obs)
                     if done:
+                        rl.full_dones[-1] = True
                         # Attribute the terminal outcome to the last learning move.
-                        if rollouts[env_idx].rewards:
-                            rollouts[env_idx].rewards[-1] += pending_reward[env_idx]
-                            rollouts[env_idx].dones[-1] = True
+                        if rl.rewards:
+                            rl.rewards[-1] += pending_reward[env_idx]
+                            rl.dones[-1] = True
                         pending_reward[env_idx] = 0.0
 
                         self.env_done[env_idx] = True
@@ -615,7 +639,7 @@ class PPOTrainer:
                 continue
 
             if self.env_done[env_idx]:
-                last_val = 0.0  # terminal: no bootstrap, real space
+                last_val = 0.0
             else:
                 with torch.no_grad():
                     obs_t = torch.tensor(self.env_obs[env_idx], dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -627,16 +651,30 @@ class PPOTrainer:
             dones = np.array(rl.dones, dtype=np.float32)
             advs, rets = compute_gae(rewards, values, dones, last_val, cfg.gamma, cfg.gae_lambda)
 
-            env_records.append({
-                "obs": torch.tensor(np.stack(rl.obs), dtype=torch.float32, device=self.device),
+            if cfg.use_lstm:
+                record = {
+                    "obs": torch.tensor(np.stack(rl.full_obs), dtype=torch.float32, device=self.device),
+                    "seq_dones": torch.tensor(rl.full_dones, dtype=torch.float32, device=self.device),
+                    "learn_positions": torch.tensor(rl.learn_positions, dtype=torch.long, device=self.device),
+                    "hidden_start": lstm_state_to_device(rl.hidden_start, self.device),
+                }
+            else:
+                record = {
+                    "obs": torch.tensor(
+                        np.stack([rl.full_obs[i] for i in rl.learn_positions]),
+                        dtype=torch.float32, device=self.device,
+                    ),
+                }
+
+            record.update({
                 "actions": torch.tensor(rl.actions, dtype=torch.long, device=self.device),
                 "old_log_probs": torch.tensor(rl.log_probs, dtype=torch.float32, device=self.device),
-                "dones": torch.tensor(dones, dtype=torch.float32, device=self.device),
-                "advs": advs,  # raw numpy; normalized below once global stats are known
-                "rets": rets,  # raw numpy (real space); normalized below via ret_rms
+                "advs": advs,
+                "rets": rets,
                 "legal_ids": rl.legal_action_ids,
-                "hidden_start": lstm_state_to_device(rl.hidden_start, self.device) if cfg.use_lstm else None,
             })
+
+            env_records.append(record)
             all_advs_flat.extend(advs.tolist())
             all_rets_flat.extend(rets.tolist())
 
@@ -680,12 +718,15 @@ class PPOTrainer:
                 for idx in mb_idxs:
                     rec = env_records[idx]
                     logits_seq, values_seq = run_recurrent_forward(
-                        self.net, rec["obs"], rec["dones"], rec["hidden_start"]
+                        self.net, rec["obs"], rec["seq_dones"], rec["hidden_start"]
                     )
+                    lp = rec["learn_positions"]
+                    logits_learn = logits_seq[lp]   # (n_learn, action_size)
+                    values_learn = values_seq[lp]   # (n_learn,)
 
                     log_probs, ent = [], []
                     for t, legal_ids in enumerate(rec["legal_ids"]):
-                        legal_logits = logits_seq[t, legal_ids]
+                        legal_logits = logits_learn[t, legal_ids]
                         dist = torch.distributions.Categorical(logits=legal_logits)
                         log_probs.append(dist.log_prob(rec["actions"][t]))
                         ent.append(dist.entropy())
@@ -697,7 +738,7 @@ class PPOTrainer:
                     surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * rec["advs"]
 
                     pi_losses.append(-torch.min(surr1, surr2).mean())
-                    vf_losses.append(F.mse_loss(values_seq, rec["rets"]))
+                    vf_losses.append(F.mse_loss(values_learn, rec["rets"]))
                     entropies.append(entropy_t.mean())
 
                 loss_pi = torch.stack(pi_losses).mean()
