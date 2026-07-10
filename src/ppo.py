@@ -10,7 +10,7 @@ from agents import HeuristicAgent, RandomAgent
 
 import matplotlib
 
-from networks import PolicyNetwork, FlatActorCritic
+from networks import FlatActorCritic
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,13 +41,15 @@ class PPOConfig:
     vf_coef: float = 0.5
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
-    gamma: float = 0.989
+    gamma: float = 0.999
     gae_lambda: float = 0.95
     # optimiser
     lr: float = 3e-4
     # model
     use_lstm: bool = True
     lstm_hidden: int = 128
+    trunk_hidden: int = 256
+    value_hidden: int = 128
     # checkpointing
     checkpoint_every: int = 100_000
     save_dir: str = "data/policies"
@@ -290,6 +292,10 @@ class PPOTrainer:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         print(f"[PPO] Using device: {self.device}")
         print(f"[PPO] LSTM enabled: {cfg.use_lstm}")
+        print(f"[PPO] Trunk hidden: {cfg.trunk_hidden}")
+        if cfg.use_lstm:
+            print(f"[PPO] LSTM hidden: {cfg.lstm_hidden}")
+        print(f"[PPO] Trunk hidden: {cfg.value_hidden}")
 
         # Environments
         self.envs = [
@@ -307,7 +313,11 @@ class PPOTrainer:
         self.obs_size = int(flatten_obs(sample_obs).shape[0])
         self.action_size = int(self.action_encoders[0].max_action_idx)
 
-        self.net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
+        self.net = FlatActorCritic(
+            self.obs_size, self.action_size,
+            use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden,
+            trunk_hidden=cfg.trunk_hidden, value_hidden=cfg.value_hidden,
+        ).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
         # Running stats of returns; value head trains in this normalized space.
@@ -316,7 +326,11 @@ class PPOTrainer:
         # Opponent shares the SAME architecture as the learner (including the
         # LSTM), so checkpoints in the pool can be loaded into it directly.
         self.opponent_nets: List[FlatActorCritic] = [
-            FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
+            FlatActorCritic(
+                self.obs_size, self.action_size,
+                use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden,
+                trunk_hidden=cfg.trunk_hidden, value_hidden=cfg.value_hidden,
+            ).to(self.device)
             for _ in range(cfg.n_envs)
         ]
         for net in self.opponent_nets:
@@ -882,6 +896,8 @@ class PPOTrainer:
             "action_size": self.action_size,
             "use_lstm": self.cfg.use_lstm,
             "lstm_hidden": self.cfg.lstm_hidden,
+            "trunk_hidden": self.cfg.trunk_hidden,
+            "value_hidden": self.cfg.value_hidden,
             "ret_rms": self.ret_rms.state_dict(),
         }
         torch.save(state, path)
@@ -976,6 +992,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-lstm", type=str2bool, nargs='?', const=True, default=False, help="Use LSTM in the architecture")
     parser.add_argument("--lstm-hidden", type=int, default=128)
+    parser.add_argument("--trunk-hidden", type=int, default=256)
+    parser.add_argument("--value-hidden", type=int, default=128)
     parser.add_argument("--envs-per-minibatch", type=int, default=4)
     parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
@@ -990,6 +1008,8 @@ if __name__ == "__main__":
         opponent_mode=args.opponent_mode,
         use_lstm=args.use_lstm,
         lstm_hidden=args.lstm_hidden,
+        trunk_hidden=args.trunk_hidden,
+        value_hidden=args.value_hidden,
         envs_per_minibatch=args.envs_per_minibatch,
     )
 

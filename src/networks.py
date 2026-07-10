@@ -29,24 +29,33 @@ LSTMState = Tuple[torch.Tensor, torch.Tensor]
 
 
 class FlatActorCritic(nn.Module):
-    def __init__(self, obs_size: int, action_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
+    def __init__(
+        self,
+        obs_size: int,
+        action_size: int,
+        use_lstm: bool = False,
+        lstm_hidden: int = 128,
+        trunk_hidden: int = 256,
+        value_hidden: int = 128,
+    ):
         super().__init__()
-        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size)
+        self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size, hidden_size=trunk_hidden)
         self.use_lstm = use_lstm
         self.lstm_hidden = lstm_hidden
+        self.trunk_hidden = trunk_hidden
 
+        # LSTM consumes the trunk's output, so its input width tracks trunk_hidden.
         if use_lstm:
-            # print(f'LSTM Hidden size: {lstm_hidden}')
-            self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
+            self.lstm = nn.LSTM(input_size=trunk_hidden, hidden_size=lstm_hidden, batch_first=True)
             self.fc3 = nn.Linear(lstm_hidden, action_size)
             feature_size = lstm_hidden
         else:
-            feature_size = 256
+            feature_size = trunk_hidden
 
         self.value_head = nn.Sequential(
-            nn.Linear(feature_size, 128),
+            nn.Linear(feature_size, value_hidden),
             nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Linear(value_hidden, 1),
         )
 
     def forward(self, obs: torch.Tensor, lstm_state: Optional[LSTMState] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[LSTMState]]:
