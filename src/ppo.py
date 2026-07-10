@@ -218,6 +218,54 @@ def select_legal_action(
     return legal_index, log_prob, entropy
 
 
+class RunningMeanStd:
+    """
+    Running mean/variance of a scalar stream via Welford's parallel algorithm.
+
+    Used to track the scale of the value function's regression target (returns).
+    Raw Cuarenta point rewards span a wide, drifting range (captures, caídas,
+    end-of-hand bonuses), so the value head is trained in a normalized space
+    that stays ~unit-scale regardless of how the reward magnitude shifts as play
+    quality improves. GAE and bootstrapping happen in real reward space, so
+    network value outputs are unnormalized on the way in and targets normalized
+    on the way out.
+    """
+
+    def __init__(self, eps: float = 1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = eps  # small non-zero prior so the first update is stable
+
+    def update(self, x: np.ndarray):
+        if x.size == 0:
+            return
+        batch_mean = float(np.mean(x))
+        batch_var = float(np.var(x))
+        batch_count = int(x.size)
+
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta * delta * self.count * batch_count / tot
+        self.mean = new_mean
+        self.var = m2 / tot
+        self.count = tot
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(self.var)) + 1e-8
+
+    def state_dict(self) -> Dict[str, float]:
+        return {"mean": self.mean, "var": self.var, "count": self.count}
+
+    def load_state_dict(self, sd: Dict[str, float]):
+        self.mean = float(sd["mean"])
+        self.var = float(sd["var"])
+        self.count = float(sd["count"])
+
+
 class PPOTrainer:
     """
     Trains a Cuarenta policy with PPO and self-play.
@@ -262,20 +310,29 @@ class PPOTrainer:
         self.net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
 
+        # Running stats of returns; value head trains in this normalized space.
+        self.ret_rms = RunningMeanStd()
+
         # Opponent shares the SAME architecture as the learner (including the
         # LSTM), so checkpoints in the pool can be loaded into it directly.
-        self.opponent_net = FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
-        self.opponent_net.load_state_dict(self.net.state_dict())
-        self.opponent_net.eval()
+        self.opponent_nets: List[FlatActorCritic] = [
+            FlatActorCritic(self.obs_size, self.action_size, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden).to(self.device)
+            for _ in range(cfg.n_envs)
+        ]
+        for net in self.opponent_nets:
+            net.load_state_dict(self.net.state_dict())
+            net.eval()
+        self.env_opponent_is_latest: List[bool] = [True] * cfg.n_envs
 
         self.ckpt_pool: List[Dict[str, torch.Tensor]] = []
         self.ckpt_step: List[int] = []
-        self.opponent_is_latest = True
 
         self.global_step = 0
         self.episode_rewards = collections.deque(maxlen=100)
         self.episode_lengths = collections.deque(maxlen=100)
         self.elo_score = collections.deque(maxlen=500)  # 1 = win, 0 = loss
+        self.winrate_vs_latest_deque = collections.deque(maxlen=200)
+        self.winrate_vs_pool_deque = collections.deque(maxlen=200)
         self.team_0_wins = 0
         self.team_1_wins = 0
         self.total_games = 0
@@ -435,6 +492,8 @@ class PPOTrainer:
                         if cfg.use_lstm:
                             self.lstm_states[env_idx] = None
                             self.opponent_lstm_states[env_idx] = None
+                        if cfg.opponent_mode == "selfplay":
+                            self._sample_opponent_for_env(env_idx)
 
                     learner = learning_player[env_idx]
                     current_player = env.state.current_player
@@ -473,8 +532,9 @@ class PPOTrainer:
                             action = random.choice(legal_actions)
                         else:
                             obs_t = torch.tensor(obs_flat, dtype=torch.float32, device=self.device).unsqueeze(0)
+                            opp_net = self.opponent_nets[env_idx]
                             opp_state = self.opponent_lstm_states[env_idx] if cfg.use_lstm else None
-                            logits, _, new_opp_state = self.opponent_net(obs_t, opp_state)
+                            logits, _, new_opp_state = opp_net(obs_t, opp_state)
                             if cfg.use_lstm:
                                 self.opponent_lstm_states[env_idx] = new_opp_state
                             action_pos, _, _ = select_legal_action(logits[0], legal_action_ids)
@@ -483,9 +543,9 @@ class PPOTrainer:
                     next_obs, reward, done, info = env.step(action)
 
                     # Re-express reward from the learning seat's team perspective.
-                    signed = reward if TEAMS[current_player] == TEAMS[learner] else -reward
-                    pending_reward[env_idx] += signed
-                    ep_reward[env_idx] += signed
+                    rew = reward if TEAMS[current_player] == TEAMS[learner] else 0
+                    pending_reward[env_idx] += rew
+                    ep_reward[env_idx] += rew
                     ep_len[env_idx] += 1
 
                     self.env_obs[env_idx] = flatten_obs(next_obs)
@@ -505,13 +565,21 @@ class PPOTrainer:
                                 self.team_0_wins += 1
                             else:
                                 self.team_1_wins += 1
-                            if self.opponent_is_latest:
+                            if self.env_opponent_is_latest[env_idx]:
                                 self.games_vs_latest += 1
                                 if info["winner"] == 0:
                                     self.team_0_wins_vs_latest += 1
                                 else:
                                     self.team_1_wins_vs_latest += 1
                             self.elo_score.append(1.0 if info["winner"] == TEAMS[learner] else 0.0)
+
+                            # split win rate by opponent staleness
+                            won = 1.0 if info["winner"] == TEAMS[learner] else 0.0
+                            if self.env_opponent_is_latest[env_idx]:
+                                self.winrate_vs_latest_deque.append(won)
+                            else:
+                                self.winrate_vs_pool_deque.append(won)
+
 
         self.net.train()
         return rollouts
@@ -521,21 +589,27 @@ class PPOTrainer:
 
         env_records: List[Dict] = []
         all_advs_flat: List[float] = []
+        all_rets_flat: List[float] = []
+
+        # Stats from prior updates: the network's stored value predictions are in
+        # normalized space, so unnormalize them back to real reward space before
+        # GAE/bootstrapping. (Identity on the first update: mean=0, std≈1.)
+        ret_mean, ret_std = self.ret_rms.mean, self.ret_rms.std
 
         for env_idx, rl in enumerate(rollouts):
             if not rl.rewards:
                 continue
 
             if self.env_done[env_idx]:
-                last_val = 0.0
+                last_val = 0.0  # terminal: no bootstrap, real space
             else:
                 with torch.no_grad():
                     obs_t = torch.tensor(self.env_obs[env_idx], dtype=torch.float32, device=self.device).unsqueeze(0)
                     lstm_state = self.lstm_states[env_idx] if cfg.use_lstm else None
-                    last_val = float(self.net.get_value(obs_t, lstm_state).item())
+                    last_val = float(self.net.get_value(obs_t, lstm_state).item()) * ret_std + ret_mean
 
             rewards = np.array(rl.rewards, dtype=np.float32)
-            values = np.array(rl.values, dtype=np.float32)
+            values = np.array(rl.values, dtype=np.float32) * ret_std + ret_mean
             dones = np.array(rl.dones, dtype=np.float32)
             advs, rets = compute_gae(rewards, values, dones, last_val, cfg.gamma, cfg.gae_lambda)
 
@@ -545,19 +619,26 @@ class PPOTrainer:
                 "old_log_probs": torch.tensor(rl.log_probs, dtype=torch.float32, device=self.device),
                 "dones": torch.tensor(dones, dtype=torch.float32, device=self.device),
                 "advs": advs,  # raw numpy; normalized below once global stats are known
-                "rets": torch.tensor(rets, dtype=torch.float32, device=self.device),
+                "rets": rets,  # raw numpy (real space); normalized below via ret_rms
                 "legal_ids": rl.legal_action_ids,
                 "hidden_start": lstm_state_to_device(rl.hidden_start, self.device) if cfg.use_lstm else None,
             })
             all_advs_flat.extend(advs.tolist())
+            all_rets_flat.extend(rets.tolist())
 
         if not env_records:
             return {"loss_pi": 0.0, "loss_vf": 0.0, "entropy": 0.0}
 
         adv_mean = float(np.mean(all_advs_flat))
         adv_std = float(np.std(all_advs_flat) + 1e-8)
+
+        # Fold this rollout's returns into the running stats, then normalize the
+        # value targets with the refreshed stats so MSE regresses in unit scale.
+        self.ret_rms.update(np.array(all_rets_flat, dtype=np.float32))
+        ret_mean, ret_std = self.ret_rms.mean, self.ret_rms.std
         for rec in env_records:
             rec["advs"] = torch.tensor((rec["advs"] - adv_mean) / adv_std, dtype=torch.float32, device=self.device)
+            rec["rets"] = torch.tensor((rec["rets"] - ret_mean) / ret_std, dtype=torch.float32, device=self.device)
 
         if not cfg.use_lstm:
             return self._ppo_update_feedforward(env_records)
@@ -687,6 +768,12 @@ class PPOTrainer:
         self.training_history["loss_vf"].append(float(stats.get("loss_vf", 0.0)))
         self.training_history["entropy"].append(float(stats.get("entropy", 0.0)))
         self.training_history["win_rate"].append(float(np.mean(self.elo_score)) if self.elo_score else float("nan"))
+        self.training_history["win_rate_vs_latest_opp"].append(
+            float(np.mean(self.winrate_vs_latest_deque)) if self.winrate_vs_latest_deque else float("nan")
+        )
+        self.training_history["win_rate_vs_pool_opp"].append(
+            float(np.mean(self.winrate_vs_pool_deque)) if self.winrate_vs_pool_deque else float("nan")
+        )
         self.training_history["episode_reward"].append(float(np.mean(self.episode_rewards)) if self.episode_rewards else 0.0)
         self.training_history["episode_length"].append(float(np.mean(self.episode_lengths)) if self.episode_lengths else 0.0)
         self.training_history["team_0_wins"].append(float(self.team_0_wins))
@@ -728,6 +815,19 @@ class PPOTrainer:
             ax.set_title(title)
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=8)
+        
+        # overlay opponent-staleness split on the self-play win-rate panel
+        ax_wr = axes[1, 1]
+        latest_vals = np.array(self.training_history.get("win_rate_vs_latest_opp", []), dtype=np.float32)
+        pool_vals = np.array(self.training_history.get("win_rate_vs_pool_opp", []), dtype=np.float32)
+        if len(latest_vals) > 0:
+            ax_wr.plot(steps[:len(latest_vals)], latest_vals, color="#2ca02c", linewidth=1.5,
+                    label="vs latest ckpt", alpha=0.85)
+        if len(pool_vals) > 0:
+            ax_wr.plot(steps[:len(pool_vals)], pool_vals, color="#9467bd", linewidth=1.5,
+                    label="vs older pool ckpt", alpha=0.85)
+        ax_wr.axhline(0.5, color="gray", linestyle="--", linewidth=1.0, alpha=0.5)
+        ax_wr.legend(loc="best", fontsize=8)
 
         # Held-out eval curves: sparser cadence, own x-axis (eval_step), plotted
         # with markers since there are far fewer points than the rollout metrics.
@@ -782,6 +882,7 @@ class PPOTrainer:
             "action_size": self.action_size,
             "use_lstm": self.cfg.use_lstm,
             "lstm_hidden": self.cfg.lstm_hidden,
+            "ret_rms": self.ret_rms.state_dict(),
         }
         torch.save(state, path)
         print(f"[PPO] Checkpoint → {path}")
@@ -793,27 +894,30 @@ class PPOTrainer:
             self.ckpt_pool.pop(0)
             self.ckpt_step.pop(0)
 
-        self._refresh_opponent()
         return path
 
-    def _refresh_opponent(self):
-        """Sample from the checkpoint pool and load into the opponent network."""
+    
+    def _sample_opponent_for_env(self, env_idx: int):
+        """Assign this env a (possibly new) opponent snapshot for its next episode.
+        Called at episode reset, not at checkpoint time, so each env can be facing
+        a different, independently-refreshed opponent every ~100-250 steps instead
+        of all envs sharing one frozen snapshot for an entire 100k-step window."""
         cfg = self.cfg
         if not self.ckpt_pool:
-            return
+            return  # still using initial (self) weights, nothing to sample yet
 
         if random.random() < cfg.opponent_latest:
             sd = self.ckpt_pool[-1]
-            self.opponent_is_latest = True
+            self.env_opponent_is_latest[env_idx] = True
         else:
             sd = random.choice(self.ckpt_pool)
-            self.opponent_is_latest = False
+            self.env_opponent_is_latest[env_idx] = False
 
-        self.opponent_net.load_state_dict(sd)
-        self.opponent_net.eval()
+        self.opponent_nets[env_idx].load_state_dict(sd)
+        self.opponent_nets[env_idx].eval()
         if cfg.use_lstm:
-            # New weights make any in-flight hidden state meaningless.
-            self.opponent_lstm_states = [None] * cfg.n_envs
+            self.opponent_lstm_states[env_idx] = None
+
 
     def load_policy(self, path: str):
         state = torch.load(path, map_location=self.device, weights_only=False)
@@ -828,10 +932,14 @@ class PPOTrainer:
         else:
             raise KeyError(f"Unsupported checkpoint format: {path}")
 
+        if "ret_rms" in state:
+            self.ret_rms.load_state_dict(state["ret_rms"])
+
         self.global_step = int(state.get("step", 0))
 
-        self.opponent_net.load_state_dict(self.net.state_dict())
-        self.opponent_net.eval()
+        for net in self.opponent_nets:
+            net.load_state_dict(self.net.state_dict())
+            net.eval()
         if self.cfg.use_lstm:
             self.lstm_states = [None] * self.cfg.n_envs
             self.opponent_lstm_states = [None] * self.cfg.n_envs
@@ -841,8 +949,18 @@ class PPOTrainer:
 if __name__ == "__main__":
     import argparse
 
+    def str2bool(v):
+        if isinstance(v, bool):
+            return v
+        if v.lower() == 'true':
+            return True
+        elif v.lower() == 'false':
+            return False
+        else:
+            raise argparse.ArgumentTypeError('true or false expected.')
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=5_000_000)
+    parser.add_argument("--steps", type=int, default=2_000_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -856,7 +974,7 @@ if __name__ == "__main__":
         default="selfplay",
         choices=["heuristic", "selfplay", "random"],
     )
-    parser.add_argument("--use-lstm", type=bool, default=True)
+    parser.add_argument("--use-lstm", type=str2bool, nargs='?', const=True, default=False, help="Use LSTM in the architecture")
     parser.add_argument("--lstm-hidden", type=int, default=128)
     parser.add_argument("--envs-per-minibatch", type=int, default=4)
     parser.add_argument("--device", type=str, default='mps')

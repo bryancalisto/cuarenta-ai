@@ -189,13 +189,8 @@ class CuarentaEnv:
                     team_carton[team] = carton_points
                     s.scores[team] = min(s.scores[team] + carton_points, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS)
 
-                # Reward current player for their team's carton, net of the
-                # opponent's carton (round-end is the only step where both
-                # teams score at once, so the opponent gain must register here)
                 current_team = TEAMS[player]
-                opp_team = 1 - current_team
                 info["carton_points"] = team_carton[current_team]
-                reward += team_carton[current_team] - team_carton[opp_team]
 
                 self._new_round()
 

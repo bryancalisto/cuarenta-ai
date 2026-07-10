@@ -36,6 +36,7 @@ class FlatActorCritic(nn.Module):
         self.lstm_hidden = lstm_hidden
 
         if use_lstm:
+            # print(f'LSTM Hidden size: {lstm_hidden}')
             self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
             self.fc3 = nn.Linear(lstm_hidden, action_size)
             feature_size = lstm_hidden
