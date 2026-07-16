@@ -360,7 +360,7 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 		return fmt.Errorf("ai turn has no legal actions")
 	}
 	obs := game.FlattenObservation(session.env.Observe(currentSeat))
-	action, _, err := g.inferService.PredictAction(obs, legal)
+	action, _, err := g.inferService.PredictAction(gameId, obs, legal)
 	if err != nil {
 		log.Printf("AI inference failed for game %s: %v; falling back to first legal action", base.Id, err)
 		action = legal[0]
@@ -371,6 +371,7 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	if done {
 		base.DurationSeconds = g.getGameDurationSeconds(base)
 		log.Println("Game has ended in AI turn")
+		g.inferService.ClearGameState(gameId)
 	}
 
 	session.stepCount++

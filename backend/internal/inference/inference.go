@@ -11,18 +11,25 @@ import (
 )
 
 var (
-	once         sync.Once
-	initErr      error
-	sessionMu    sync.Mutex
-	onnxSession  *ort.AdvancedSession
-	InputTensor  *ort.Tensor[float32]
-	OutputTensor *ort.Tensor[float32]
-	inputName    string
-	outputName   string
+	once           sync.Once
+	initErr        error
+	sessionMu      sync.Mutex
+	onnxSession    *ort.AdvancedSession
+	InputTensor    *ort.Tensor[float32]
+	OutputTensor   *ort.Tensor[float32]
+	inputNames     []string
+	outputNames    []string
+	inputTensors   []*ort.Tensor[float32]
+	outputTensors  []*ort.Tensor[float32]
+	isLSTM         bool
+	lstmHiddenSize int
+	lstmStateMu    sync.Mutex
+	lstmStates     map[string][2][]float32 // game_id -> [h, c]
 )
 
 type InferenceService struct{}
 
+// detects and handles both stateless (1-1) and stateful (LSTM, 3-3) models automatically
 func NewInferenceService() *InferenceService {
 	return &InferenceService{}
 }
@@ -49,49 +56,97 @@ func (i *InferenceService) StartEngine() error {
 			initErr = fmt.Errorf("inspect onnx model: %w", err)
 			return
 		}
-		if len(inputs) != 1 || len(outputs) != 1 {
-			initErr = fmt.Errorf("expected exactly 1 input and 1 output, got %d inputs and %d outputs", len(inputs), len(outputs))
-			return
-		}
-		if inputs[0].OrtValueType != ort.ONNXTypeTensor || outputs[0].OrtValueType != ort.ONNXTypeTensor {
-			initErr = fmt.Errorf("expected tensor input/output")
-			return
-		}
-		if inputs[0].DataType != ort.TensorElementDataTypeFloat || outputs[0].DataType != ort.TensorElementDataTypeFloat {
-			initErr = fmt.Errorf("expected float32 input/output tensors")
+
+		// detect LSTM model: 3 inputs (obs, lstm_h, lstm_c) and 3 outputs (logits, new_h, new_c)
+		if len(inputs) == 3 && len(outputs) == 3 {
+			isLSTM = true
+			log.Println("Detected LSTM model")
+		} else if len(inputs) != 1 || len(outputs) != 1 {
+			initErr = fmt.Errorf("expected either (1 input, 1 output) or (3 inputs, 3 outputs), got %d inputs and %d outputs", len(inputs), len(outputs))
 			return
 		}
 
-		inputName = inputs[0].Name
-		outputName = outputs[0].Name
-
-		inputShape := normalizeShape(inputs[0].Dimensions)
-		outputShape := normalizeShape(outputs[0].Dimensions)
-
-		inputData := make([]float32, inputShape.FlattenedSize())
-		outputData := make([]float32, outputShape.FlattenedSize())
-
-		InputTensor, err = ort.NewTensor(inputShape, inputData)
-		if err != nil {
-			initErr = fmt.Errorf("create input tensor: %w", err)
-			return
+		// validate all inputs/outputs are float32 tensors
+		for _, inp := range inputs {
+			if inp.OrtValueType != ort.ONNXTypeTensor || inp.DataType != ort.TensorElementDataTypeFloat {
+				initErr = fmt.Errorf("expected float32 tensor inputs")
+				return
+			}
+		}
+		for _, out := range outputs {
+			if out.OrtValueType != ort.ONNXTypeTensor || out.DataType != ort.TensorElementDataTypeFloat {
+				initErr = fmt.Errorf("expected float32 tensor outputs")
+				return
+			}
 		}
 
-		OutputTensor, err = ort.NewEmptyTensor[float32](outputShape)
-		if err != nil {
-			initErr = fmt.Errorf("create output tensor: %w", err)
-			return
+		// build input/output names in order
+		inputNames = make([]string, len(inputs))
+		for i, inp := range inputs {
+			inputNames[i] = inp.Name
+		}
+		outputNames = make([]string, len(outputs))
+		for i, out := range outputs {
+			outputNames[i] = out.Name
 		}
 
-		// Ensure the output buffer is zeroed and has the expected size.
-		copy(OutputTensor.GetData(), outputData)
+		// for LSTM, extract hidden size from lstm_h shape (should be [1, lstm_hidden])
+		if isLSTM {
+			for _, inp := range inputs {
+				if inp.Name == "lstm_h" {
+					dims := normalizeShape(inp.Dimensions)
+					if len(dims) >= 2 {
+						lstmHiddenSize = int(dims[1])
+					}
+					break
+				}
+			}
+			lstmStates = make(map[string][2][]float32)
+		}
+
+		// create tensors for all inputs
+		inputVals := make([]ort.Value, len(inputs))
+		inputTensors = make([]*ort.Tensor[float32], len(inputs))
+		for i, inp := range inputs {
+			shape := normalizeShape(inp.Dimensions)
+			data := make([]float32, shape.FlattenedSize())
+			tensor, err := ort.NewTensor(shape, data)
+			if err != nil {
+				initErr = fmt.Errorf("create input tensor %d: %w", i, err)
+				return
+			}
+			inputTensors[i] = tensor
+			inputVals[i] = tensor
+		}
+
+		// Create output tensors
+		outputVals := make([]ort.Value, len(outputs))
+		outputTensors = make([]*ort.Tensor[float32], len(outputs))
+		for i, out := range outputs {
+			shape := normalizeShape(out.Dimensions)
+			tensor, err := ort.NewEmptyTensor[float32](shape)
+			if err != nil {
+				initErr = fmt.Errorf("create output tensor %d: %w", i, err)
+				return
+			}
+			outputTensors[i] = tensor
+			outputVals[i] = tensor
+		}
+
+		// For backward compatibility (with non-lstm models), point InputTensor/OutputTensor to first tensors
+		if len(inputTensors) > 0 {
+			InputTensor = inputTensors[0]
+		}
+		if len(outputTensors) > 0 {
+			OutputTensor = outputTensors[0]
+		}
 
 		onnxSession, err = ort.NewAdvancedSession(
 			modelPath,
-			[]string{inputName},
-			[]string{outputName},
-			[]ort.Value{InputTensor},
-			[]ort.Value{OutputTensor},
+			inputNames,
+			outputNames,
+			inputVals,
+			outputVals,
 			nil,
 		)
 		if err != nil {
@@ -129,6 +184,10 @@ func (i *InferenceService) ShutdownEngine() error {
 		}
 		OutputTensor = nil
 	}
+
+	lstmStateMu.Lock()
+	lstmStates = make(map[string][2][]float32)
+	lstmStateMu.Unlock()
 
 	if err := ort.DestroyEnvironment(); err != nil && firstErr == nil {
 		firstErr = err
@@ -180,8 +239,16 @@ func (i *InferenceService) Infer(input []float32) ([]float32, error) {
 	return out, nil
 }
 
-func (i *InferenceService) PredictAction(input []float32, legal []game.Action) (game.Action, int, error) {
-	logits, err := i.Infer(input)
+func (i *InferenceService) PredictAction(gameID string, input []float32, legal []game.Action) (game.Action, int, error) {
+	var logits []float32
+	var err error
+
+	if isLSTM {
+		logits, err = i.inferWithLSTM(gameID, input)
+	} else {
+		logits, err = i.Infer(input)
+	}
+
 	if err != nil {
 		return game.Action{}, 0, err
 	}
@@ -208,4 +275,66 @@ func (i *InferenceService) PredictAction(input []float32, legal []game.Action) (
 	}
 
 	return legal[bestIdx], bestIdx, nil
+}
+
+func (i *InferenceService) inferWithLSTM(gameID string, input []float32) ([]float32, error) {
+	if err := i.StartEngine(); err != nil {
+		return nil, err
+	}
+
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+
+	if onnxSession == nil || len(inputTensors) < 3 || len(outputTensors) < 3 {
+		return nil, fmt.Errorf("onnx engine not initialized or not LSTM model")
+	}
+
+	if len(input) != len(inputTensors[0].GetData()) {
+		return nil, fmt.Errorf("expected input length %d, got %d", len(inputTensors[0].GetData()), len(input))
+	}
+
+	// Get or initialize LSTM state
+	lstmStateMu.Lock()
+	state, exists := lstmStates[gameID]
+	if !exists {
+		state = [2][]float32{
+			make([]float32, lstmHiddenSize),
+			make([]float32, lstmHiddenSize),
+		}
+		lstmStates[gameID] = state
+	}
+	lstmStateMu.Unlock()
+
+	// copy inputs: observation, lstm_h, lstm_c
+	copy(inputTensors[0].GetData(), input)
+	copy(inputTensors[1].GetData(), state[0])
+	copy(inputTensors[2].GetData(), state[1])
+
+	// Run inference
+	if err := onnxSession.Run(); err != nil {
+		return nil, err
+	}
+
+	// extract logits
+	logits := make([]float32, len(outputTensors[0].GetData()))
+	copy(logits, outputTensors[0].GetData())
+
+	// extract and store new state
+	newH := make([]float32, len(outputTensors[1].GetData()))
+	newC := make([]float32, len(outputTensors[2].GetData()))
+	copy(newH, outputTensors[1].GetData())
+	copy(newC, outputTensors[2].GetData())
+
+	lstmStateMu.Lock()
+	lstmStates[gameID] = [2][]float32{newH, newC}
+	lstmStateMu.Unlock()
+
+	return logits, nil
+}
+
+// ClearGameState removes LSTM state for a completed game
+func (i *InferenceService) ClearGameState(gameID string) {
+	lstmStateMu.Lock()
+	delete(lstmStates, gameID)
+	lstmStateMu.Unlock()
 }

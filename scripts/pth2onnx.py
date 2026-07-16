@@ -10,7 +10,7 @@ from src.networks import PolicyNetwork
 class PolicyNetworkOnly(nn.Module):
     """Wrapper that only outputs action logits (for ONNX inference)."""
 
-    def __init__(self, obs_size: int, action_size: int, hidden_size: int):
+    def __init__(self, obs_size: int, action_size: int, hidden_size: int = 256):
         super().__init__()
         self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size, hidden_size=hidden_size)
 
@@ -25,22 +25,27 @@ class FlatActorCriticPolicyOnly(nn.Module):
         super().__init__()
         self.policy = PolicyNetwork(obs_size=obs_size, action_size=action_size, hidden_size=hidden_size)
         self.use_lstm = use_lstm
+        self.lstm_hidden = lstm_hidden
 
         if use_lstm:
-            self.lstm = nn.LSTM(input_size=256, hidden_size=lstm_hidden, batch_first=True)
+            self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=lstm_hidden, batch_first=True)
             self.fc3 = nn.Linear(lstm_hidden, action_size)
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+    def forward(self, obs: torch.Tensor, h: torch.Tensor = None, c: torch.Tensor = None) -> torch.Tensor:
         hidden = self.policy.relu(self.policy.fc1(obs))
         hidden = self.policy.relu(self.policy.fc2(hidden))
 
         if self.use_lstm:
             hidden = hidden.unsqueeze(1)
-            hidden, _ = self.lstm(hidden, None)
+            if h is None or c is None:
+                hidden, (new_h, new_c) = self.lstm(hidden, None)
+            else:
+                hidden, (new_h, new_c) = self.lstm(hidden, (h, c))
             hidden = hidden[:, -1, :]
-            return self.fc3(hidden)
+            logits = self.fc3(hidden)
+            return logits, new_h, new_c
         else:
-            return self.policy.fc3(hidden)
+            return self.policy.fc3(hidden), None, None
 
 
 def save_onnx(pt_path: Path) -> Path:
@@ -54,64 +59,62 @@ def save_onnx(pt_path: Path) -> Path:
     checkpoint = torch.load(pt_path, map_location='cpu', weights_only=False)
 
     # Detect checkpoint format
-    if 'policy_state' in checkpoint and 'value_state' in checkpoint:
-        # PPO FlatActorCritic checkpoint (may include LSTM)
+    if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+        # New PPO FlatActorCritic checkpoint format
         obs_size = checkpoint.get('obs_size', 121)
         action_size = checkpoint.get('action_size', 200)
-        hidden_size = checkpoint.get('hidden_size', 256)
+        trunk_hidden = checkpoint.get('trunk_hidden', 256)
         use_lstm = checkpoint.get('use_lstm', False)
-        lstm_hidden = 128
+        lstm_hidden = checkpoint.get('lstm_hidden', 128)
 
-        model = FlatActorCriticPolicyOnly(obs_size, action_size, hidden_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
-        model.policy.load_state_dict(checkpoint['policy_state'])
-
-        if use_lstm and 'lstm_state' in checkpoint and checkpoint['lstm_state'] is not None:
-            model.lstm.load_state_dict(checkpoint['lstm_state'])
-
+        model = FlatActorCriticPolicyOnly(obs_size, action_size, hidden_size=trunk_hidden, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
+        model.load_state_dict(checkpoint['model_state'], strict=False)
         model.eval()
 
         dummy_input = torch.randn(1, obs_size)
-
         output_path = pt_path.parent / onnx_filename
-        torch.onnx.export(
-            model,
-            dummy_input,
-            str(output_path),
-            export_params=True,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=['observation'],
-            output_names=['action_logits'],
-            dynamic_axes={
-                'observation': {0: 'batch_size'},
-                'action_logits': {0: 'batch_size'},
-            }
-        )
+
+        if use_lstm:
+            # Export with LSTM state tensors: h and c tensors
+            # Shape: (num_layers, batch, lstm_hidden) = (1, 1, lstm_hidden)
+            dummy_h = torch.zeros(1, 1, lstm_hidden)
+            dummy_c = torch.zeros(1, 1, lstm_hidden)
+
+            torch.onnx.export(
+                model,
+                (dummy_input, dummy_h, dummy_c),
+                str(output_path),
+                export_params=True,
+                opset_version=17,
+                do_constant_folding=True,
+                input_names=['observation', 'lstm_h', 'lstm_c'],
+                output_names=['action_logits', 'new_lstm_h', 'new_lstm_c'],
+                dynamic_axes={
+                    'observation': {0: 'batch_size'},
+                    'lstm_h': {0: 'batch_size'},
+                    'lstm_c': {0: 'batch_size'},
+                    'action_logits': {0: 'batch_size'},
+                    'new_lstm_h': {0: 'batch_size'},
+                    'new_lstm_c': {0: 'batch_size'},
+                }
+            )
+        else:
+            torch.onnx.export(
+                model,
+                dummy_input,
+                str(output_path),
+                export_params=True,
+                opset_version=17,
+                do_constant_folding=True,
+                input_names=['observation'],
+                output_names=['action_logits'],
+                dynamic_axes={
+                    'observation': {0: 'batch_size'},
+                    'action_logits': {0: 'batch_size'},
+                }
+            )
+
         print(f"[ONNX] Exported {'LSTM ' if use_lstm else ''}policy → {output_path}")
-        return output_path
-    elif isinstance(checkpoint, dict) and any('fc' in k for k in checkpoint.keys()):
-        # Raw PolicyNetwork checkpoint (imitation learning)
-        model = PolicyNetworkOnly(obs_size=121, action_size=200)
-        model.policy.load_state_dict(checkpoint)
-        model.eval()
-
-        dummy_input = torch.randn(1, 121)
-        output_path = pt_path.parent / onnx_filename
-        torch.onnx.export(
-            model,
-            dummy_input,
-            str(output_path),
-            export_params=True,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=['observation'],
-            output_names=['action_logits'],
-            dynamic_axes={
-                'observation': {0: 'batch_size'},
-                'action_logits': {0: 'batch_size'},
-            }
-        )
-        print(f"[ONNX] Exported policy network → {output_path}")
         return output_path
     else:
         raise ValueError(f"Unknown checkpoint format. Keys: {list(checkpoint.keys())}")
