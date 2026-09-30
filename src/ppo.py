@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from agents import HeuristicAgent, RandomAgent
+from utils import OpponentMode
 
 import matplotlib
 
-from networks import FlatActorCritic
+from networks import ActorCriticNetwork
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -57,7 +58,7 @@ class PPOConfig:
     # self-play
     pool_size: int = 20
     opponent_latest: float = 0.8
-    opponent_mode: str = "selfplay"  # "heuristic" | "selfplay" | "random"
+    opponent_mode: str = OpponentMode.SELFPLAY
     # Logging / training length
     log_every: int = 1
     total_steps: int = 5_000_000
@@ -103,7 +104,7 @@ def masked_legal_logits(
 
 
 def run_recurrent_forward(
-    net: FlatActorCritic,
+    net: ActorCriticNetwork,
     obs_seq: torch.Tensor,      # (T, obs_size), time-ordered for ONE environment
     dones: torch.Tensor,        # (T,) float32, 1.0 marks the last step of an episode
     init_state: Optional[LSTMState],
@@ -111,7 +112,7 @@ def run_recurrent_forward(
     """
     Replay a full, time-ordered sequence of transitions from a single
     environment through the recurrent actor-critic, returning logits and
-    values for EVERY timestep (unlike FlatActorCritic.forward, which only
+    values for EVERY timestep (unlike ActorCriticNetwork.forward, which only
     returns the last step).
 
     The hidden state is carried across steps exactly as it was during
@@ -320,7 +321,7 @@ class PPOTrainer:
         self.obs_size = int(flatten_obs(sample_obs).shape[0])
         self.action_size = int(self.action_encoders[0].max_action_idx)
 
-        self.net = FlatActorCritic(
+        self.net = ActorCriticNetwork(
             self.obs_size, self.action_size,
             use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden,
             trunk_hidden=cfg.trunk_hidden, value_hidden=cfg.value_hidden,
@@ -332,8 +333,8 @@ class PPOTrainer:
 
         # Opponent shares the SAME architecture as the learner (including the
         # LSTM), so checkpoints in the pool can be loaded into it directly.
-        self.opponent_nets: List[FlatActorCritic] = [
-            FlatActorCritic(
+        self.opponent_nets: List[ActorCriticNetwork] = [
+            ActorCriticNetwork(
                 self.obs_size, self.action_size,
                 use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden,
                 trunk_hidden=cfg.trunk_hidden, value_hidden=cfg.value_hidden,
@@ -519,7 +520,7 @@ class PPOTrainer:
                         if cfg.use_lstm:
                             self.lstm_states[env_idx] = None
                             self.opponent_lstm_states[env_idx] = None
-                        if cfg.opponent_mode == "selfplay":
+                        if cfg.opponent_mode == OpponentMode.SELFPLAY:
                             self._sample_opponent_for_env(env_idx)
 
                     learner = learning_player[env_idx]
@@ -564,9 +565,9 @@ class PPOTrainer:
                         rl.dones.append(False)
                         rl.legal_action_ids.append(legal_action_ids)
                     else:
-                        if cfg.opponent_mode == "heuristic":
+                        if cfg.opponent_mode == OpponentMode.HEURISTIC:
                             action = self.heuristic_agent.act(env.observe(current_player), legal_actions)
-                        elif cfg.opponent_mode == "random":
+                        elif cfg.opponent_mode == OpponentMode.RANDOM:
                             action = random.choice(legal_actions)
                         else:
                             opp_net = self.opponent_nets[env_idx]

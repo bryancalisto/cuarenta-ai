@@ -5,8 +5,6 @@ import torch
 
 
 class PolicyNetwork(nn.Module):
-    """Neural network policy for action selection."""
-
     def __init__(self, obs_size: int = 121, action_size: int = 200, hidden_size: int = 256):
         """
         obs_size: total observation vector size
@@ -28,7 +26,7 @@ class PolicyNetwork(nn.Module):
 LSTMState = Tuple[torch.Tensor, torch.Tensor]
 
 
-class FlatActorCritic(nn.Module):
+class ActorCriticNetwork(nn.Module):
     def __init__(
         self,
         obs_size: int,

@@ -14,10 +14,6 @@
 		onReturnToLobby: () => void;
 	}>();
 
-	$effect(() => {
-		$inspect(game);
-	});
-
 	const suits = ['♦️', '♥️', '♠️', '♣️'];
 	const ranks = ['A', '2', '3', '4', '5', '6', '7', 'J', 'Q', 'K'];
 
@@ -59,6 +55,32 @@
 
 	let isSelectingCapture = $state(false);
 	let displayedTable: number[] = $state([]);
+
+	let showNewRoundIndicator = $derived(game.newRoundStart);
+	$effect(() => {
+		if (game.newRoundStart) {
+			showNewRoundIndicator = true;
+			const timer = setTimeout(() => {
+				showNewRoundIndicator = false;
+			}, 2000);
+			return () => clearTimeout(timer);
+		} else {
+			showNewRoundIndicator = false;
+		}
+	});
+
+	let showGameEndDialog = $derived(game.done);
+	// Show game-end dialog after 2 seconds to allow the last move animation to finish
+	$effect(() => {
+		if (game.done) {
+			const timer = setTimeout(() => {
+				showGameEndDialog = true;
+			}, 2000);
+			return () => clearTimeout(timer);
+		} else {
+			showGameEndDialog = false;
+		}
+	});
 
 	// Reset capture selection when a new capture prompt appears
 	$effect(() => {
@@ -153,7 +175,7 @@
 </script>
 
 <div class="game-board">
-	{#if game.newRoundStart}
+	{#if showNewRoundIndicator}
 		<div class="round-indicator">🎴 New Round Started!</div>
 	{/if}
 
@@ -208,7 +230,7 @@
 		{/if}
 	</div>
 
-	{#if game.done}
+	{#if showGameEndDialog}
 		<GameResultsDialog {game} {onReturnToLobby} />
 	{/if}
 

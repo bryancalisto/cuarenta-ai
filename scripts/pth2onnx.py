@@ -18,7 +18,7 @@ class PolicyNetworkOnly(nn.Module):
         return self.policy(obs)
 
 
-class FlatActorCriticPolicyOnly(nn.Module):
+class ActorCriticPolicyOnly(nn.Module):
     """Actor-critic wrapper that only outputs action logits."""
 
     def __init__(self, obs_size: int, action_size: int, hidden_size: int, use_lstm: bool = False, lstm_hidden: int = 128):
@@ -60,14 +60,14 @@ def save_onnx(pt_path: Path) -> Path:
 
     # Detect checkpoint format
     if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
-        # New PPO FlatActorCritic checkpoint format
+        # New PPO ActorCriticNetwork checkpoint format
         obs_size = checkpoint.get('obs_size', 121)
         action_size = checkpoint.get('action_size', 200)
         trunk_hidden = checkpoint.get('trunk_hidden', 256)
         use_lstm = checkpoint.get('use_lstm', False)
         lstm_hidden = checkpoint.get('lstm_hidden', 128)
 
-        model = FlatActorCriticPolicyOnly(obs_size, action_size, hidden_size=trunk_hidden, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
+        model = ActorCriticPolicyOnly(obs_size, action_size, hidden_size=trunk_hidden, use_lstm=use_lstm, lstm_hidden=lstm_hidden)
         model.load_state_dict(checkpoint['model_state'], strict=False)
         model.eval()
 

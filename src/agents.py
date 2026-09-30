@@ -1,5 +1,5 @@
 from __future__ import annotations
-from networks import FlatActorCritic 
+from networks import ActorCriticNetwork 
 
 import random
 from typing import List
@@ -32,7 +32,7 @@ def encode_legal_action(action: Action, legal: List[Action]) -> int:
 
 
 class RandomAgent:
-    """Plays a uniformly random legal action."""
+    """Plays a uniformly random legal action"""
     def __init__(self, seed: int = 0):
         self.rng = random.Random(seed)
 
@@ -43,10 +43,10 @@ class RandomAgent:
 class HeuristicAgent:
     """
     Simple rule-based agent:
-      1. If a caída is available → take it.
-      2. If a limpia is available → take it.
-      3. If any capture → take the one capturing the most cards.
-      4. Otherwise place the lowest-value card.
+      1. If a caída is available -> take it.
+      2. If a limpia is available -> take it.
+      3. If any capture -> take the one capturing the most cards.
+      4. Otherwise place a random card.
     """
 
     def act(self, obs, legal: List[Action]) -> Action:
@@ -65,11 +65,11 @@ class HeuristicAgent:
             return best_cap
 
         places = [a for a in legal if a.capture is None]
-        return min(places, key=lambda a: a.card.value)
+        return random.choice(places)
 
 
-class FlatNetAgent:
-    """Wraps a flat PolicyNetwork checkpoint for evaluation."""
+class PolicyNetAgent:
+    """Wraps a PolicyNetwork checkpoint for evaluation."""
 
     def __init__(self, net: PolicyNetwork, device: torch.device, deterministic: bool = True):
         self.net = net
@@ -104,17 +104,17 @@ def load_agent_from_checkpoint(
     net = PolicyNetwork(obs_size=obs_size, action_size=action_size).to(device)
     net.load_state_dict(policy_state)
     net.eval()
-    return FlatNetAgent(net, device, deterministic=deterministic)
+    return PolicyNetAgent(net, device, deterministic=deterministic)
 
 
 class RecurrentNetAgent:
     """
-    Wraps a FlatActorCritic checkpoint (feedforward or recurrent) for
+    Wraps a ActorCriticNetwork checkpoint (feedforward or recurrent) for
     evaluation / play. Maintains its own persistent LSTM hidden state across
     turns within a single game, mirroring how the opponent net is used
     during training rollouts.
     """
-    def __init__(self, net: "FlatActorCritic", device: torch.device, deterministic: bool = True):
+    def __init__(self, net: ActorCriticNetwork, device: torch.device, deterministic: bool = True):
         self.net = net
         self.device = device
         self.deterministic = deterministic
@@ -153,7 +153,7 @@ def load_agent_from_checkpoint(
     use_lstm = bool(state.get("use_lstm", False))
     lstm_hidden = int(state.get("lstm_hidden", 128))
 
-    net = FlatActorCritic(obs_size, action_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden).to(device)
+    net = ActorCriticNetwork(obs_size, action_size, use_lstm=use_lstm, lstm_hidden=lstm_hidden).to(device)
 
     if "model_state" in state:
         net.load_state_dict(state["model_state"])

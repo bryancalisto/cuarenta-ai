@@ -302,3 +302,29 @@ class TestValidCaptures:
         result = valid_captures(played, table)
 
         assert frozenset([card_2, card_3, card_5, card_6, card_7]) in result
+
+
+    def test_miscellaneous_1(self):
+        """Table contains 7,J,Q,3,5,6,4. The player throws a 7. The player has no option to capture all cards"""
+        played = Card(Rank.SIETE, Suit.BRILLOS)
+        card_7 = Card(Rank.SIETE, Suit.CORAZONES_ROJOS)
+        card_j = Card(Rank.JACK, Suit.CORAZONES_ROJOS)
+        card_q = Card(Rank.QUEEN, Suit.CORAZONES_NEGROS)
+        card_3 = Card(Rank.TRES, Suit.TREBOLES)
+        card_5 = Card(Rank.CINCO, Suit.BRILLOS)
+        card_6 = Card(Rank.SEIS, Suit.CORAZONES_NEGROS)
+        card_4 = Card(Rank.CUATRO, Suit.TREBOLES)
+        table = [card_7, card_j, card_q, card_3, card_5, card_6, card_4]
+
+        result = valid_captures(played, table)
+        print(f"Valid captures for 7 on table {table}: {result}")
+
+        # valid
+        assert len(result) == 4
+        assert frozenset([card_7]) in result
+        assert frozenset([card_3, card_4]) in result
+        assert frozenset([card_7, card_j, card_q]) in result
+        assert frozenset([card_3, card_4, card_7, card_j, card_q]) in result
+
+        # invalid
+        assert frozenset([card_7, card_j, card_q, card_3, card_5, card_6, card_4]) not in result

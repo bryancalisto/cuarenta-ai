@@ -17,6 +17,7 @@ def obs_to_tensors(obs_list: List[Dict], device: torch.device) -> Dict[str, torc
         for k in keys
     }
 
+
 def sort_cards_by_rank(table: List[Card]) -> List[Card]:
     return sorted(table, key=lambda c: c.rank.value)
 
@@ -24,3 +25,9 @@ def sort_cards_by_rank(table: List[Card]) -> List[Card]:
 class PointsReasons(StrEnum):
     CAIDA='caida'
     LIMPIA='limpia'
+
+
+class OpponentMode(StrEnum):
+    HEURISTIC="heuristic"
+    SELFPLAY="selfplay"
+    RANDOM="random"

@@ -24,3 +24,6 @@ train_ppo_with_lstm_5:
 
 train_ppo_with_lstm_6:
 	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/lstm_6
+
+train_ppo_with_lstm_7:
+	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy none --device cpu --save-dir output/policies/lstm_7
