@@ -69,7 +69,7 @@ class Card:
         return int(self.suit) * 10 + rank_pos
 
     def __str__(self) -> str:
-        return f"{RANK_DISPLAY[self.rank]}{SUIT_DISPLAY[self.suit]}"
+        return f"{RANK_DISPLAY[self.rank]}_{SUIT_DISPLAY[self.suit]}"
 
     def __repr__(self) -> str:
         return str(self)

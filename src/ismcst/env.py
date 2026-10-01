@@ -19,7 +19,7 @@ TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
 TEAM_PLAYERS = {0: [0, 2], 1: [1, 3]}
 
 
-@dataclass
+@dataclass(frozen=True)
 class Action:
     card: Card
     capture: Optional[FrozenSet[Card]]  # None = place without capturing
@@ -165,7 +165,7 @@ class CuarentaEnv(gym.Env):
             "my_team_captures":   spaces.Box(low=0, high=1, shape=(40,), dtype=np.float32),
             "opp_team_captures":  spaces.Box(low=0, high=1, shape=(40,), dtype=np.float32),
             "current_player":     spaces.Box(low=0, high=3, shape=(1,), dtype=np.float32),
-            "plays_this_deal":     spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32),
+            "plays_this_deal":     spaces.Box(low=0, high=HAND_SIZE, shape=(4,), dtype=np.float32),
             "last_placed":        spaces.Box(low=0, high=1, shape=(40,), dtype=np.float32),
             "deck_remaining":     spaces.Box(low=0, high=100, shape=(1,), dtype=np.float32),
             "action_features":    spaces.Box(0, 1, (self.MAX_ACTIONS, self.ACTION_FEAT_DIM), np.float32),
@@ -211,6 +211,12 @@ class CuarentaEnv(gym.Env):
     def reset(self, seed=None, options=None) -> Tuple[Dict, Dict]:
         """Start a new game. Returns (observation, info)."""
         super().reset(seed=seed)
+
+        # Derive a fresh, seed-reproducible Python RNG for shuffling.
+        # np_random is fully determined by the reset seed, so this is deterministic.
+        seed_int = int(self.np_random.integers(0, 2**31 - 1))
+        self.random = random.Random(seed_int)
+
         self._legal_cache = None
         deck = shuffled_deck(self.random)
         hands, deck = self._deal(deck)
@@ -358,6 +364,7 @@ class CuarentaEnv(gym.Env):
 
                 self._new_round()
 
+        self._legal_cache = None
         return self.observe(s.current_player), reward, False, truncated, info
 
 
@@ -446,23 +453,30 @@ class CuarentaEnv(gym.Env):
     def _redeal(self):
         """Deal next HAND_SIZE cards to each player from remaining deck."""
         s = self.state
-        for p in range(NUM_PLAYERS):
-            s.hands[p] = s.deck[:HAND_SIZE]
-            s.deck = s.deck[HAND_SIZE:]
+        new_hands = {p: s.deck[p * HAND_SIZE:(p + 1) * HAND_SIZE] for p in range(NUM_PLAYERS)}
+        new_deck = s.deck[NUM_PLAYERS * HAND_SIZE:]
+        self._install_hands(new_hands, new_deck)
+        
+    
+    def _install_hands(self, hands: Dict[int, List[Card]], deck: List[Card]) -> None:
+        """Set hands+deck and reset the per-deal play counter. Single source of truth."""
+        s = self.state
+        s.hands = hands
+        s.deck = deck
+        s.plays_this_deal = [0, 0, 0, 0]
 
     def _new_round(self):
         """Shuffle a new deck and deal fresh hands (scores persist)."""
         s = self.state
         new_deck = shuffled_deck(self.random)
-        s.hands, s.deck = self._deal(new_deck)
+        hands, deck = self._deal(new_deck)
+        self._install_hands(hands, deck)
         s.cards_captured = [[], []]
         s.table = []
         s.last_placed = None
 
         # next player starts in new round
         s.current_player = (s.current_player + 1) % NUM_PLAYERS
-
-        s.plays_this_deal = [0, 0, 0, 0]
 
     def render(self) -> str:
         """Human-readable game state string."""
@@ -471,26 +485,18 @@ class CuarentaEnv(gym.Env):
             "=" * 50,
             f"  CUARENTA  |  Team 0 (P0,P2): {s.scores[0]}  vs  Team 1 (P1,P3): {s.scores[1]}",
             f"  Current player: {s.current_player}  |  Deck remaining: {len(s.deck)}",
-            f"  Table: {' '.join(str(c) for c in s.table) or '(empty)'}",
+            f"  Table: {' | '.join(str(c) for c in s.table) or '(empty)'}",
             f"  Last placed: {s.last_placed}",
         ]
         for p in range(NUM_PLAYERS):
             marker = " ◄" if p == s.current_player else ""
-            lines.append(f"  P{p} (team {TEAMS[p]}): {' '.join(str(c) for c in sorted(s.hands[p]))}{marker}")
+            lines.append(f"  P{p} (team {TEAMS[p]}): {' | '.join(str(c) for c in sorted(s.hands[p]))} | {marker}")
         lines.append("=" * 50)
         string = "\n".join(lines)
         print(string)
         return string
 
 
-# Some validations. Using this while developing this env
-from gymnasium.utils.env_checker import check_env
-
-try:
-    check_env(CuarentaEnv())
-    print("Environment passes all checks!")
-except Exception as e:
-    print(f"Environment has issues: {e}")
 
 # Register the environment with Gymnasium
 gym.register(
@@ -498,3 +504,13 @@ gym.register(
     entry_point=CuarentaEnv,
     max_episode_steps=512,  # Prevent infinite episodes
 )
+
+debug = False
+if debug:
+    # Some validations. Using this while developing this env
+    from gymnasium.utils.env_checker import check_env
+    try:
+        check_env(gym.make("gymnasium_env/Cuarenta-v0").unwrapped)
+        print("Environment check: 👍")
+    except Exception as e:
+        print(f"Environment has issues: {e}")
