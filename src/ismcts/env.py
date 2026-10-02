@@ -169,7 +169,7 @@ class CuarentaEnv(gym.Env):
             "last_placed":        spaces.Box(low=0, high=1, shape=(40,), dtype=np.float32),
             "deck_remaining":     spaces.Box(low=0, high=100, shape=(1,), dtype=np.float32),
             "action_features":    spaces.Box(0, 1, (self.MAX_ACTIONS, self.ACTION_FEAT_DIM), np.float32),
-            "action_mask":        spaces.Box(low=0, high=1, shape=(self.action_space.n,), dtype=np.float32),
+            "action_mask":        spaces.Box(low=0, high=1, shape=(self.action_space.n,), dtype=np.bool),
         })
     
     def _action_features(self, action: Action) -> np.ndarray:
@@ -201,10 +201,10 @@ class CuarentaEnv(gym.Env):
     def action_mask(self) -> np.ndarray:
         if self.state is None:
             # no state yet — report all slots legal so sample() doesn't crash
-            return np.ones(self.MAX_ACTIONS, dtype=np.float32)
+            return np.ones(self.MAX_ACTIONS, dtype=np.bool)
 
         legal = self.legal_actions()
-        mask = np.zeros(self.MAX_ACTIONS, dtype=np.float32)
+        mask = np.zeros(self.MAX_ACTIONS, dtype=np.bool)
         mask[:len(legal)] = True
         return mask
 

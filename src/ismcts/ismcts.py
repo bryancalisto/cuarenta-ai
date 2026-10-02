@@ -135,12 +135,13 @@ class ISMCTS:
         # print(f"[search] legal has {len(legal)} actions, current_player={self.env.state.current_player}")
         root = Node(player=root_player)
 
+        determinizer = Determinizer(self.env, root_player)
         for _ in range(self.n_iter):
             # 1. Sample a determinization consistent with root's info set
-            det = Determinizer(self.env, root_player).sample(self.rng)
+            sampled = determinizer.sample(self.rng)
 
             # 2. Run one simulation
-            self._simulate(root, det, root_team)
+            self._simulate(root, sampled, root_team)
 
         # Return visits over root actions (in the same order as legal_actions)
         visits: Dict[int, int] = {}

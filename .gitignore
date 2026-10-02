@@ -169,3 +169,10 @@ todo
 policy_*.pt
 policy_*.onnx*
 !output/policies/lstm_6/policy_1003520.pt
+
+# others
+wandb
+src/tictactoe/**
+prof.out
+tic_tac_toe*
+checkpoints*

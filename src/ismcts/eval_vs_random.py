@@ -1,5 +1,6 @@
-# eval_ismcts_vs_random.py
 import random
+import time
+from datetime import timedelta
 from env import CuarentaEnv
 from ismcts import ISMCTS
 from rules import legal_actions_from_state
@@ -44,6 +45,7 @@ def worker_task(g):
 
 if __name__ == "__main__":
     # ISMCTS controls team 0 (players 0 and 2)
+    start_time = time.perf_counter()
     wins = {0: 0, 1: 0}
     N = 100
 
@@ -58,3 +60,13 @@ if __name__ == "__main__":
             wins[winner] += 1
 
     print(f"ISMCTS (team 0) wins: {wins[0]}/{N} = {wins[0]/N:.1%}")
+    end_time = time.perf_counter()
+    execution_time_seconds = end_time - start_time
+    readable_time = timedelta(seconds=execution_time_seconds)
+    print(f"Execution time: {readable_time}")
+
+    """
+    ISMCTS (team 0) wins: 95/100 = 95.0%
+    Execution time: 0:03:47.865486
+    """
+    

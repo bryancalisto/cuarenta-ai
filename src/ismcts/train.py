@@ -1,0 +1,326 @@
+"""
+Training loop for the Cuarenta net.
+
+Simple supervised learning on self-play data (Expert Iteration style):
+
+  for iteration in range(N_ITERS):
+      1. Generate self-play games with the current net.
+      2. Train the net to match (a) the visit distribution and (b) the outcome.
+      3. Evaluate vs a reference opponent (random / previous net).
+      4. Save checkpoint, log to W&B.
+
+This is not PPO. It's cross-entropy for policy + MSE for value. Once this
+loop is converging, we can consider switching to PPO.
+"""
+
+from __future__ import annotations
+
+import os
+import random
+import time
+from datetime import timedelta
+from typing import List
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+import wandb
+import dotenv
+
+from env import CuarentaEnv
+from network import CuarentaNet
+from selfplay import play_one_game, Decision
+from dataset import CuarentaDataset
+
+dotenv.load_dotenv() # to load wandb token
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+N_ITERATIONS = 20              # outer loop iterations
+# GAMES_PER_ITER = 40            # self-play games per iteration (bump if you can afford it)
+GAMES_PER_ITER = 8            # self-play games per iteration (bump if you can afford it)
+# N_SEARCH_ITER = 100            # ISMCTS sims per decision during self-play
+# N_SEARCH_ITER = 50            # ISMCTS sims per decision during self-play
+N_SEARCH_ITER = 100            # ISMCTS sims per decision during self-play
+MAX_ROLLOUT_LEN = 200           # short rollout for speed; bump to 200 for stronger teacher
+EPOCHS_PER_ITER = 8            # training epochs per iteration
+BATCH_SIZE = 64
+LR = 1e-3
+T_MAX = 32
+CKPT_DIR = "checkpoints"
+
+# device
+if torch.backends.mps.is_available():
+    DEVICE = "mps"
+elif torch.cuda.is_available():
+    DEVICE = "cuda"
+else:
+    DEVICE = "cpu"
+print(f"Using device: {DEVICE}")
+
+
+os.makedirs(CKPT_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Data collection
+# ---------------------------------------------------------------------------
+
+def collect_games(net: CuarentaNet, n_games: int, base_seed: int) -> List[Decision]:
+    all_decisions: List[Decision] = []
+    for i in tqdm(range(n_games), desc="self-play games", leave=False):
+        decisions = play_one_game(
+            net,
+            n_iter=N_SEARCH_ITER,
+            max_rollout_len=MAX_ROLLOUT_LEN,
+            seed=base_seed + i,
+            temperature=1.0,
+            max_history_len=T_MAX,
+            device=DEVICE,
+        )
+        all_decisions.extend(decisions)
+    return all_decisions
+
+
+# ---------------------------------------------------------------------------
+# Training step
+# ---------------------------------------------------------------------------
+
+def train_one_epoch(net, loader, opt, device):
+    net.train()
+    total_loss = 0.0
+    total_p = 0.0
+    total_v = 0.0
+    n_batches = 0
+
+    for (obs, act, am, feats, mask, pi_target, v_target) in loader:
+        obs = obs.to(device)
+        act = act.to(device)
+        am = am.to(device)
+        feats = feats.to(device)
+        mask = mask.to(device)
+        pi_target = pi_target.to(device)
+        v_target = v_target.to(device)
+
+        logits, value, _ = net(obs, act, am, feats, mask)
+
+        # Policy loss: cross-entropy between softmax(logits) and pi_target.
+        # We use log_softmax so we can ignore -1e9 masked slots cleanly.
+        logp = torch.log_softmax(logits, dim=-1)
+        # Safety: clamp pi_target to avoid log(0). Add tiny epsilon so masked
+        # slots with pi=0 contribute 0.
+        policy_loss = -(pi_target * logp).sum(dim=-1).mean()
+
+        # Value loss: MSE against outcome (±1).
+        value_loss = ((value - v_target) ** 2).mean()
+
+        loss = policy_loss + value_loss
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+        opt.step()
+
+        total_loss += loss.item()
+        total_p += policy_loss.item()
+        total_v += value_loss.item()
+        n_batches += 1
+
+    return total_loss / n_batches, total_p / n_batches, total_v / n_batches
+
+
+# ---------------------------------------------------------------------------
+# Evaluation (vs random and vs rollout)
+# ---------------------------------------------------------------------------
+
+def eval_vs_random(net: CuarentaNet, n_games: int = 50, seed_base: int = 10000) -> float:
+    """
+    Play n_games where the net plays seats {0, 2} and random plays {1, 3}.
+    Returns winrate for the net's team.
+    """
+    from env import TEAMS
+    from rules import legal_actions_from_state
+    from history import HistoryTracker
+    from network_ismcts_1 import NetworkISMCTS
+    from history import flatten_obs
+
+    net.eval()
+    wins = 0
+
+    for g in range(n_games):
+        env = CuarentaEnv(seed=seed_base + g)
+        env.reset(seed=seed_base + g)
+        tracker = HistoryTracker(env)
+        searcher = NetworkISMCTS(
+            env, net, tracker,
+            n_iter=50,               # fewer sims for eval
+            max_rollout_len=MAX_ROLLOUT_LEN,
+            rng=random.Random(seed_base + g),
+            dirichlet_eps=0.0,       # no noise at eval
+            device=DEVICE,
+        )
+
+        while not env.state.done:
+            p = env.state.current_player
+            obs = env.observe(p)
+
+            if p in (0, 2):
+                visits = searcher.search(root_player=p)
+                if sum(visits.values()) == 0:
+                    legal = env.legal_actions()
+                    a = random.randrange(len(legal))
+                else:
+                    a = max(visits, key=visits.get)
+            else:
+                legal = env.legal_actions()
+                a = random.randrange(len(legal))
+
+            tracker.record(p, obs, a)
+            _, _, done, _, info = env.step(a)
+
+        if info["winner"] == 0:
+            wins += 1
+
+    return wins / n_games
+
+def _eval_worker(args):
+    """Play one eval game: net (team 0) vs rollout-ISMCTS (team 1)."""
+    seed, state_dict, n_iter = args
+    import torch
+    torch.set_num_threads(1)
+
+    from env import CuarentaEnv
+    from network import CuarentaNet
+    from history import HistoryTracker
+    from network_ismcts_1 import NetworkISMCTS
+    from ismcts import ISMCTS as RolloutISMCTS
+    import random as _random
+
+    env = CuarentaEnv(seed=seed)
+    env.reset(seed=seed)
+
+    net_local = CuarentaNet()
+    net_local.load_state_dict(state_dict)
+    net_local.eval()
+
+    tracker = HistoryTracker(env)
+    net_searcher = NetworkISMCTS(
+        env, net_local, tracker,
+        n_iter=n_iter, max_rollout_len=200,
+        rng=_random.Random(seed * 2 + 1), dirichlet_eps=0.0,
+        device="cpu",                   # workers use CPU
+    )
+    rollout_searcher = RolloutISMCTS(
+        env, n_iter=n_iter, rollout_policy="greedy",
+        rng=_random.Random(seed * 2 + 2),
+    )
+
+    while not env.state.done:
+        p = env.state.current_player
+        obs = env.observe(p)
+        if p in (0, 2):
+            visits = net_searcher.search()
+        else:
+            visits = rollout_searcher.search()
+        legal = env.legal_actions()
+        if sum(visits.values()) == 0:
+            a = _random.randrange(len(legal))
+        else:
+            a = max(visits, key=visits.get)
+        tracker.record(p, obs, a)
+        _, _, _, _, info = env.step(a)
+
+    return info["winner"]
+
+
+def eval_vs_rollout(net, n_games=30, seed_base=20000, n_iter=100):
+    """Net (team 0) vs rollout-ISMCTS (team 1). Returns winrate for team 0."""
+    from multiprocessing import Pool
+    state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+    args = [(seed_base + i, state_dict, n_iter) for i in range(n_games)]
+    with Pool() as pool:
+        results = pool.map(_eval_worker, args)
+    wins = sum(1 for w in results if w == 0)
+    return wins / n_games
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    wandb.init(
+        project="cuarenta-ai",
+        config={
+            "n_iterations": N_ITERATIONS,
+            "games_per_iter": GAMES_PER_ITER,
+            "n_search_iter": N_SEARCH_ITER,
+            "max_rollout_len": MAX_ROLLOUT_LEN,
+            "epochs_per_iter": EPOCHS_PER_ITER,
+            "batch_size": BATCH_SIZE,
+            "lr": LR,
+            "t_max": T_MAX,
+        },
+    )
+
+    net = CuarentaNet().to(DEVICE)
+    opt = torch.optim.Adam(net.parameters(), lr=LR)
+
+    best_winrate = -1.0
+    start = time.perf_counter()
+
+    for iteration in range(N_ITERATIONS):
+        print(f"\n=== Iteration {iteration} ===")
+
+        # 1. Self-play
+        t0 = time.perf_counter()
+        decisions = collect_games(net, GAMES_PER_ITER, base_seed=iteration * 1000)
+        t_collect = time.perf_counter() - t0
+        print(f"  collected {len(decisions)} decisions in {timedelta(seconds=t_collect)}")
+
+        # 2. Train
+        ds = CuarentaDataset(decisions, t_max=T_MAX)
+        loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+
+        for epoch in range(EPOCHS_PER_ITER):
+            loss, pl, vl = train_one_epoch(net, loader, opt, DEVICE)
+            wandb.log({
+                "iter": iteration,
+                "epoch": epoch,
+                "loss": loss,
+                "policy_loss": pl,
+                "value_loss": vl,
+            })
+            print(f"  epoch {epoch}: loss={loss:.4f} policy={pl:.4f} value={vl:.4f}")
+
+        # 3. Eval
+        if iteration % 2 == 0:
+            wr_rollout = eval_vs_rollout(net, n_games=30, seed_base=20000 + iteration * 100)
+            wandb.log({"iter": iteration, "winrate_vs_rollout": wr_rollout})
+            print(f"  eval vs rollout-ISMCTS: {wr_rollout:.2%}")
+            if wr_rollout > best_winrate:
+                best_winrate = wr_rollout
+                torch.save(net.state_dict(), os.path.join(CKPT_DIR, "best.pt"))
+        # else:
+        #     wr = eval_vs_random(net, n_games=20, seed_base=9000 + iteration * 100)
+        #     wandb.log({"iter": iteration, "winrate_vs_random": wr})
+        #     print(f"  eval vs random: {wr:.2%}")
+        #     if wr > best_winrate:
+        #         best_winrate = wr
+        #         torch.save(net.state_dict(), os.path.join(CKPT_DIR, "best.pt"))
+
+        # 4. Save
+        ckpt_path = os.path.join(CKPT_DIR, f"cuarenta_iter{iteration:03d}.pt")
+        torch.save(net.state_dict(), ckpt_path)
+        print(f"  saved {ckpt_path}")
+
+
+    print(f"\nTotal time: {timedelta(seconds=time.perf_counter() - start)}")
+    wandb.finish()
+
+
+if __name__ == "__main__":
+    main()
