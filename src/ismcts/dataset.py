@@ -10,8 +10,32 @@ LEFT padding (zeros at the beginning, real history at the end) keeps the last
 step — the pending current decision — at index T_max-1, which is where the
 network reads its state embedding from.
 
-HISTORY DROPOUT (augmentation)
-------------------------------
+This dataset now serves BOTH kinds of data the training loop mixes together:
+
+  * self-play decisions (`Decision.selfplay == True`): the policy target is the
+    search's visit distribution, and `target_temperature` softens it.
+  * imitation decisions (`Decision.selfplay == False`, from the heuristic agent):
+    the target is the teacher's one-hot action and is left alone; these samples
+    mainly exist to keep the VALUE head calibrated on non-self-play games. They get
+    `imitation_policy_weight` (0 by default = value-only) in the policy loss.
+
+Two knobs explained:
+
+TARGET TEMPERATURE (`target_temperature`, tau)
+----------------------------------------------
+    pi_target ∝ (visits / sum(visits)) ** (1 / tau)
+`tau = 1` keeps the raw visit distribution. `tau > 1` flattens it, which matters
+because a 400-simulation search produces a fairly peaked distribution (measured
+mean top-action probability ~0.70). If that peakiness partly reflects noise rather
+than knowledge, training the policy to reproduce it teaches overconfidence: the
+policy loss falls on that sample while held-out accuracy gets worse. Flattening
+caps how much a single sample can push the policy toward one action.
+
+(Do not confuse `target_temperature` — what the net LEARNS from — with
+selfplay.temperature/temperature_cutoff — which action gets PLAYED.)
+
+HISTORY DROPOUT
+---------------
 The network is used in two regimes:
 
   * at the search ROOT, with the player's real history (up to max_history_len
@@ -21,10 +45,8 @@ The network is used in two regimes:
 
 Training only on full histories would leave the second regime out of
 distribution, so with probability `history_dropout` we randomly truncate the
-window to a prefix of random length (length 1 == "pending step only", the exact
-interior-node regime). This is domain randomization for the history length: the
-net learns to answer from the current observation alone, and gets better when
-history is available. It also discourages the net from memorizing whole games.
+window to a random length (length 1 == "pending step only", the exact
+interior-node regime). This is domain randomization for the history length.
 """
 
 from __future__ import annotations
@@ -41,10 +63,13 @@ from network import N_ACTIONS, ACTION_FEAT_DIM
 
 class CuarentaDataset(Dataset):
     def __init__(self, decisions, *, t_max: int = 32, history_dropout: float = 0.0,
+                 target_temperature: float = 1.0, imitation_policy_weight: float = 1.0,
                  rng: Optional[np.random.Generator] = None):
         self.decisions = decisions
         self.t_max = t_max
         self.history_dropout = float(history_dropout)
+        self.target_temperature = float(target_temperature)
+        self.imitation_policy_weight = float(imitation_policy_weight)
         self.rng = rng or np.random.default_rng(0)
 
     def __len__(self) -> int:
@@ -74,12 +99,19 @@ class CuarentaDataset(Dataset):
         act[pad:] = d.act_seq[T - keep:]
         am[pad:] = d.act_mask[T - keep:]
 
-        # Policy target: normalize the search's visit counts into a distribution
-        # over the MAX_ACTIONS slots. Slot semantics are per-state here, which is
-        # fine: the policy head scores the *features* of each slot.
+        # --- policy target ---
         visits = d.visits.astype(np.float32)
         s = visits.sum()
         pi = visits / s if s > 0 else np.zeros_like(visits)
+
+        if d.selfplay and self.target_temperature != 1.0 and s > 0:
+            # Flatten (tau > 1) or sharpen (tau < 1) the search's distribution.
+            pi = np.power(pi, 1.0 / self.target_temperature, dtype=np.float32)
+            pi = pi / max(float(pi.sum()), 1e-9)
+
+        # Policy-loss weight for this sample. Imitation samples are here for the
+        # value head; by default (weight 0) they do not touch the policy at all.
+        pol_weight = 1.0 if d.selfplay else self.imitation_policy_weight
 
         return (
             torch.from_numpy(obs),                 # [T, OBS_FLAT_DIM]
@@ -90,4 +122,5 @@ class CuarentaDataset(Dataset):
             torch.from_numpy(pi),                  # [MAX_ACTIONS]
             torch.tensor(d.outcome, dtype=torch.float32),
             torch.tensor(length, dtype=torch.int64),
+            torch.tensor(pol_weight, dtype=torch.float32),
         )

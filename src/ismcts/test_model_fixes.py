@@ -191,21 +191,22 @@ def test_dataset_lengths_and_dropout():
                         mask=mask, visits=vis, team=0, player=0)
 
     ds = CuarentaDataset([make_decision(12), make_decision(40)], t_max=32, history_dropout=0.0)
-    obs, act, am, feats, mask, pi, v, length = ds[0]
+    obs, act, am, feats, mask, pi, v, length, pw = ds[0]
     assert obs.shape == (32, OBS_FLAT_DIM)
     assert int(length) == 12
+    assert float(pw) == 1.0, "self-play samples get full policy weight"
     pad = 32 - 12
     assert torch.all(obs[:pad] == 0), "padding should be zeros"
     assert not am[-1], "the last step is the pending step"
     assert am[pad:-1].all(), "all completed steps carry an action"
 
-    obs, act, am, _, _, _, _, length = ds[1]
+    obs, act, am, _, _, _, _, length, _pw = ds[1]
     assert int(length) == 32, "clipped to t_max"
 
-    # dropout: lengths must be 1..T and never 0
+    # dropout: lengths must be 1..T and never 0 (the length field is second-to-last)
     ds_drop = CuarentaDataset([make_decision(20) for _ in range(200)],
                               t_max=32, history_dropout=0.9)
-    lengths = [int(ds_drop[i][-1]) for i in range(200)]
+    lengths = [int(ds_drop[i][-2]) for i in range(200)]
     assert min(lengths) >= 1 and max(lengths) <= 20, (min(lengths), max(lengths))
     assert min(lengths) == 1, "dropout should sometimes leave the pending step alone"
     print(f"test_dataset_lengths_and_dropout: OK (lengths {min(lengths)}..{max(lengths)})")

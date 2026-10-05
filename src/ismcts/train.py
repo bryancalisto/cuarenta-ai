@@ -3,45 +3,61 @@ Training loop for the Cuarenta net (expert iteration / AlphaZero style).
 
   for iteration in range(N_ITERATIONS):
       1. Generate self-play games with the current net (search = this net itself).
-      2. Train the net to match (a) the search's visit distribution and (b) the outcome.
-      3. Evaluate against fixed references (heuristic agent, rollout-ISMCTS).
-      4. Save a checkpoint, and save `best.pt` whenever evaluation improves.
+      2. Mix in a few imitation games from the heuristic teacher (value calibration).
+      3. Train the net to match (a) the search's visit distribution and (b) outcomes.
+      4. Evaluate: vs the reference checkpoint (gating), vs the heuristic, and two
+         health metrics that predict failure BEFORE the win rate moves.
+      5. Save a checkpoint, and update `best.pt` when the reference match is won.
 
-This is not PPO. The policy loss is cross-entropy against the visit distribution and
-the value loss is MSE against the game outcome.
+This is not PPO. The policy loss is cross-entropy against the visit distribution
+(flattened a little, see dataset.target_temperature) and the value loss is MSE
+against the game outcome.
 
-Before trusting a run, check that the SEARCH IS STRONGER THAN THE RAW POLICY. In
-AlphaZero the search is the teacher: the net improves by imitating a search that is
-better than the net's own policy head. If the search is *worse* (or equally good),
-each iteration teaches the net noise and its win rate falls — which is exactly what
-happened with the old settings: leaf values came from rollouts capped at 80 plies on
-games of 130+ plies, so most leaves were valued 0.0, the visit distribution was
-decided by expansion order, and 50 iterations took the net from 73% to ~40% against
-the heuristic agent. The knobs that matter here:
+WHY THERE ARE FOUR NUMBERS ON THE EVAL LINE
+-------------------------------------------
+Measured on this project, self-play silently destroyed a good net three times while
+the win rate vs the heuristic drifted down. Post-mortem, two metrics would have said
+"stop" immediately, so they are now printed every evaluation:
 
-  * LEAF_VALUE_MODE / MAX_ROLLOUT_LEN — see network_ismcts_1.py. Default "net".
-  * N_SEARCH_ITER — number of simulations per decision. More sims = better teacher,
-    and with net leaf values a sim is ~50x cheaper than an 80-ply rollout.
-  * TEMPERATURE_CUTOFF — after this many plies the self-play agent plays greedily.
+  * `ref`      — win rate vs the REFERENCE checkpoint (the best net so far), both
+                 sides searching. This is the AlphaZero gating criterion and the
+                 primary signal: it is a same-distribution, same-opponent comparison
+                 (identical search, identical weights except for training), so it
+                 moves for the right reason.
+  * `heuristic`— win rate vs the fixed HeuristicAgent. Kept because it is the
+                 project's external reference, but it is NOT the training target:
+                 self-play legitimately moves the net away from the heuristic's
+                 distribution, so this number can fall while the net gets stronger.
+  * `edge`     — win rate of the net WITH search against the SAME net's raw policy
+                 (argmax of the prior, no search). This is the "teacher edge": the
+                 whole point of expert iteration. Measured: 75% for a fresh
+                 bootstrap, collapsing to 57% after self-play had wrecked the value
+                 head — by which time the self-play targets are mostly
+                 self-distillation, so training has nothing to teach.
+  * `v_mse`    — held-out value MSE on a FIXED set of heuristic games (seeds
+                 PROBE_SEEDS, never used for training). 1.0 means "worse than always
+                 predicting 0". It went 0.573 -> 0.769 on the run that degraded, and
+                 because the search VALUES LEAVES WITH THIS HEAD, that drift was the
+                 direct cause: the win rate fell 69% -> 43% while the raw policy's
+                 strength stayed flat at 41.7%.
 
-Evaluation notes:
+Under the hood:
   * SELF-PLAY and EVAL use the same search settings (same n_iter, same leaf value),
-    so the number you log describes the agent you are actually training. The old code
-    trained with max_rollout_len=80 but evaluated with 200.
-  * 30 games gives a standard error of roughly ±9%, so single evaluations swing a lot.
-    Use more games if you plan to compare close checkpoints, and always compare against
-    the *initial* checkpoint evaluated with the same settings (see `--init-checkpoint`).
+    so the numbers describe the agent you are actually training.
+  * Value anchor: see train_one_epoch. It keeps the value head near the starting
+    checkpoint's calibration, because the search depends on it.
 """
 
 from __future__ import annotations
 
 import os
 import argparse
-from pathlib import Path
+import copy
 import random
 import time
 from datetime import timedelta
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -49,11 +65,12 @@ from tqdm import tqdm
 import wandb
 import dotenv
 
-from env import CuarentaEnv
+from env import CuarentaEnv, TEAMS
 from network import CuarentaNet
-from selfplay import play_one_game, Decision
+from selfplay import play_one_game, Decision, GameResult
 from dataset import CuarentaDataset
 from network_ismcts_1 import NetworkISMCTS
+from bootstrap import play_one_heuristic_game
 
 dotenv.load_dotenv() # to load wandb token
 
@@ -62,24 +79,34 @@ dotenv.load_dotenv() # to load wandb token
 # ---------------------------------------------------------------------------
 
 N_ITERATIONS = 30             # outer loop iterations
-GAMES_PER_ITER = 12           # self-play games per iteration (more = better)
-N_SEARCH_ITER = 200           # ISMCTS sims per decision (self-play AND eval)
+GAMES_PER_ITER = 40           # self-play games per iteration (more = better;
+                              # 20 games produced only ~2.6k decisions and 20 outcome
+                              # labels, which the value head could only memorise)
+IMITATION_GAMES_PER_ITER = 5  # heuristic games mixed in for value calibration
+IMITATION_POLICY_WEIGHT = 0.0 # 0 = use them for the VALUE loss only
+N_SEARCH_ITER = 400           # ISMCTS sims per decision (self-play AND eval)
+DIRICHLET_EPS = 0.10          # root exploration noise (it lands in the target too)
 TEMPERATURE_CUTOFF = 24       # plies with tau=1 before switching to greedy play
-EPOCHS_PER_ITER = 4           # training epochs per iteration (see the value warning)
+TARGET_TEMPERATURE = 1.5      # soften the search's visit distribution (1.0 = raw)
+EPOCHS_PER_ITER = 4           # training epochs per iteration
 BATCH_SIZE = 64
 LR = 1e-3
 T_MAX = 32
 HISTORY_DROPOUT = 0.3         # see dataset.py: makes history-free evals in-distribution
 REPLAY_ITERS = 5              # keep this many iterations of data in the buffer
-EVAL_GAMES = 60               # games per evaluation (30 => ~±9% stderr)
-EVAL_EVERY = 2                # evaluate vs heuristic every N iterations
+EVAL_GAMES = 60               # games per match (60 => ~±6% standard error)
+EVAL_RAW_GAMES = 40           # games for the teacher-edge probe
+EVAL_EVERY = 2                # run evaluations every N iterations
+ACCEPT_THRESHOLD = 0.55       # beat the reference by this much to be accepted
 LEAF_VALUE_MODE = "net"       # "net" (default) | "rollout"
 MAX_ROLLOUT_LEN = 512         # only used by leaf_value_mode="rollout"
-VALUE_ANCHOR_WEIGHT = 0.5     # keep the value head near the starting checkpoint's
-                              # (measured: without it, 2 short iterations pushed the
-                              # held-out value MSE from 0.82 to 1.21 and the win rate
-                              # from 55% to 37%, because the search trusts that head)
+VALUE_ANCHOR_WEIGHT = 2.0     # keep the value head near the starting checkpoint's
+                              # calibration (0 = off, 5+ = effectively frozen)
+                              # Measured: at 0.5 the anchor loss still grew 0.03 -> 0.31
+                              # over a run and the value MSE drifted 0.573 -> 0.769.
 CKPT_DIR = "checkpoints"
+# Fixed, never-trained-on seeds for the value/policy probe.
+PROBE_SEEDS = list(range(900_000, 900_020))
 
 
 def _pick_device(requested: str = "auto") -> str:
@@ -103,33 +130,129 @@ def _pick_device(requested: str = "auto") -> str:
     return "cpu"
 
 
+# Chosen at import time, overridden by --device in main(). Deliberately NOT printed
+# here: worker processes re-import this module and would each print the same line.
 DEVICE = _pick_device()
-print(f"Using device: {DEVICE}")
-
-os.makedirs(CKPT_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
 # Data collection
 # ---------------------------------------------------------------------------
 
-def collect_games(net: CuarentaNet, n_games: int, base_seed: int) -> list[Decision]:
+def collect_games(net: CuarentaNet, n_games: int, base_seed: int):
+    """
+    Self-play games with the current net at all four seats.
+
+    Returns (decisions, metrics) where `metrics` averages the per-game returns,
+    scores, plies and reward components (caídas/limpias) over the batch of games —
+    i.e. how well the agent is actually doing, in reward terms, this iteration.
+    """
     all_decisions: list[Decision] = []
+    game_results: list[GameResult] = []
     for i in tqdm(range(n_games), desc="self-play games", leave=False):
-        decisions = play_one_game(
+        decisions, result = play_one_game(
             net,
             n_iter=N_SEARCH_ITER,
             max_history_len=T_MAX,
             seed=base_seed + i,
             temperature=1.0,
             temperature_cutoff=TEMPERATURE_CUTOFF,
-            dirichlet_eps=0.25,
+            dirichlet_eps=DIRICHLET_EPS,
             leaf_value_mode=LEAF_VALUE_MODE,
             max_rollout_len=MAX_ROLLOUT_LEN,
             device=DEVICE,
         )
         all_decisions.extend(decisions)
-    return all_decisions
+        game_results.append(result)
+    return all_decisions, mean_game_metrics(game_results, prefix="selfplay")
+
+
+def _imitation_worker(seed: int) -> list[Decision]:
+    import torch
+    torch.set_num_threads(1)
+    return play_one_heuristic_game(seed)
+
+
+def collect_imitation_games(n_games: int, base_seed: int) -> list[Decision]:
+    """
+    A few heuristic-vs-heuristic games per iteration, marked as NOT self-play.
+
+    Why: self-play makes the value head an estimator of "who wins when both sides
+    play like me". That estimator is exactly what the search relies on, so as soon as
+    it drifts away from the value it had against other opponent types, the search's
+    decisions get worse on those opponents. Mixing in teacher games keeps the head
+    calibrated on the wider distribution — measured on the 20-iteration run that
+    degraded: value MSE on heuristic games rose 0.573 -> 0.769 while the win rate
+    fell 69% -> 43%.
+
+    These samples are given policy weight 0 by default (IMITATION_POLICY_WEIGHT), so
+    they do NOT drag the policy back toward the teacher; only the value loss uses them.
+    """
+    from multiprocessing import Pool
+    seeds = [base_seed + i for i in range(n_games)]
+    with Pool() as pool:
+        games = list(tqdm(pool.imap(_imitation_worker, seeds), total=n_games,
+                          desc="imitation games", leave=False))
+    decisions = [d for g in games for d in g]
+    for d in decisions:
+        d.selfplay = False
+    return decisions
+
+
+def mean_game_metrics(results: list[GameResult], prefix: str) -> dict:
+    """
+    Average a batch of GameResults into flat scalars for logging.
+
+    This is where the "how is the agent actually doing" curves come from:
+    returns (summed env rewards), scores, game length, and the reward components
+    (caídas/limpias), plus the search's own mean value estimate so you can compare
+    what the net believed with what actually happened.
+    """
+    if not results:
+        return {}
+    per_game = [r.as_metrics(prefix) for r in results]
+    keys = per_game[0].keys()
+    out = {k: float(np.mean([m[k] for m in per_game])) for k in keys}
+    out[f"{prefix}/win_rate_team0"] = (
+        sum(1 for r in results if r.winner == 0) / len(results)
+    )
+    out[f"{prefix}/n_games"] = float(len(results))
+    return out
+
+
+def buffer_stats(decisions: list[Decision]) -> dict:
+    """
+    Cheap diagnostics over the replay buffer: how sharp are the targets, how sharp is
+    the policy, and do the two heads of the trainer want different things?
+    """
+    t_ent, p_ent, t_max, p_max, n_legal, n_sp = [], [], [], [], [], 0
+    for d in decisions:
+        v = d.visits.astype(np.float64)
+        s = v.sum()
+        if s <= 0:
+            continue
+        p = v / s
+        nz = p[p > 0]
+        t_ent.append(-(nz * np.log(nz)).sum())
+        t_max.append(nz.max())
+        n_legal.append(int(d.mask.sum()))
+        if d.selfplay:
+            n_sp += 1
+        if d.priors is not None and len(d.priors) > 0:
+            q = np.asarray(d.priors, dtype=np.float64)
+            q = q / max(q.sum(), 1e-9)
+            qnz = q[q > 0]
+            p_ent.append(-(qnz * np.log(qnz)).sum())
+            p_max.append(qnz.max())
+    return {
+        "n": len(decisions),
+        "selfplay_frac": n_sp / max(len(decisions), 1),
+        "target_entropy": float(np.mean(t_ent)) if t_ent else 0.0,
+        "target_top_prob": float(np.mean(t_max)) if t_max else 0.0,
+        "prior_entropy": float(np.mean(p_ent)) if p_ent else 0.0,
+        "prior_top_prob": float(np.mean(p_max)) if p_max else 0.0,
+        "legal_actions": float(np.mean(n_legal)) if n_legal else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +278,19 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
     still letting the head adapt:
 
         anchor_weight = 0.0  -> train the value head freely (AlphaZero-style)
-        anchor_weight = 0.5  -> soft anchor (default when starting from a checkpoint)
-        anchor_weight high   -> effectively freeze the value head
+        anchor_weight = 2.0  -> strong anchor (default)
+        anchor_weight 5+     -> effectively freeze the value head at the bootstrap
 
-    (A stronger fix, for later: more self-play games per iteration. With only a few
-    hundred decisions in the buffer, every consistent target is memorisable.)
+    The per-sample policy weights come from the dataset: samples with weight 0
+    (imitation games mixed in for value calibration) do not move the policy.
     """
     net.train()
-    total_loss = total_p = total_v = total_a = 0.0
+    total_loss = total_p = total_v = total_a = total_ent = 0.0
     n_batches = 0
 
     use_anchor = anchor_net is not None and anchor_weight > 0
 
-    for (obs, act, am, feats, mask, pi_target, v_target, length) in loader:
+    for (obs, act, am, feats, mask, pi_target, v_target, length, pol_weight) in loader:
         obs = obs.to(device)
         act = act.to(device)
         am = am.to(device)
@@ -176,14 +299,16 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
         pi_target = pi_target.to(device)
         v_target = v_target.to(device)
         length = length.to(device)
+        pol_weight = pol_weight.to(device)
 
         logits, value = net(obs, act, am, feats, mask, lengths=length)
 
-        # Policy loss: cross-entropy between softmax(logits) and the search's
-        # visit distribution. We use log_softmax so the -1e9 masked slots contribute
-        # exactly 0 (their target probability is 0).
+        # Policy loss: weighted cross-entropy between softmax(logits) and the
+        # search's (possibly flattened) visit distribution.
         logp = torch.log_softmax(logits, dim=-1)
-        policy_loss = -(pi_target * logp).sum(dim=-1).mean()
+        ce = -(pi_target * logp).sum(dim=-1)
+        w = pol_weight.clamp(min=0.0)
+        policy_loss = (ce * w).sum() / w.sum().clamp(min=1e-6)
 
         # Value loss: MSE against the ±1 game outcome, from the acting team's POV.
         value_loss = ((value - v_target) ** 2).mean()
@@ -204,6 +329,18 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
 
+        with torch.no_grad():
+            # Target entropy is the floor of the cross-entropy: the part above it is
+            # what the net actually fails to fit, so `excess_ce` is the honest
+            # measure of "is the policy learning anything from these targets?".
+            #
+            # It must be weighted the SAME way as `policy_loss` (samples with policy
+            # weight 0 — the imitation games added for value calibration — contribute
+            # to neither), otherwise the two numbers are not comparable and
+            # excess_ce is biased by however much imitation data is in the batch.
+            ent = -(pi_target * torch.log(pi_target + 1e-9)).sum(dim=-1)
+            total_ent += ((ent * w).sum() / w.sum().clamp(min=1e-6)).item()
+
         total_loss += loss.item()
         total_p += policy_loss.item()
         total_v += value_loss.item()
@@ -211,7 +348,7 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
         n_batches += 1
 
     n = max(n_batches, 1)
-    return total_loss / n, total_p / n, total_v / n, total_a / n
+    return (total_loss / n, total_p / n, total_v / n, total_a / n, total_ent / n)
 
 
 # ---------------------------------------------------------------------------
@@ -219,18 +356,15 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
 # ---------------------------------------------------------------------------
 #
 # Every evaluator plays a game in a worker process and returns the winning team.
-# Team 0 is always the net under test, so `wins == games where winner == 0`.
+# Team 0 is always the net under test, so `win rate == fraction of games where the
+# winner was team 0`.
+#
+# Configuration is passed explicitly instead of being read from module globals:
+# evaluation runs in worker PROCESSES, and a spawned worker only sees the module
+# defaults, not the CLI overrides.
 
 def _make_search(env, net, tracker, seed, *, n_iter, leaf_value_mode, max_rollout_len):
-    """
-    The exact search used for self-play, minus exploration noise.
-
-    The configuration is passed in explicitly instead of being read from module
-    globals: evaluation runs in worker PROCESSES, and a spawned worker only sees the
-    module defaults, not the CLI overrides. Searching with different settings than
-    the ones being trained is precisely how the old code ended up training with
-    max_rollout_len=80 and evaluating with 200.
-    """
+    """The exact search used for self-play, minus exploration noise."""
     return NetworkISMCTS(
         env, net, tracker,
         n_iter=n_iter,
@@ -258,8 +392,90 @@ def _pick_visit_action(searcher, p, legal):
     return max(visits, key=visits.get)
 
 
+def _play_match(env, actor, trackers):
+    """
+    Play one game to the end and return its scored summary (a dict).
+
+    `actor(player, obs, legal)` returns the action SLOT to play; `trackers` is the
+    list of HistoryTrackers that must observe every decision (one per searcher — each
+    search keeps its own view of the game).
+
+    The summary carries everything worth logging about a match: winner, final scores,
+    length, and per-team RETURNS (= summed env rewards) with their components.
+    """
+    from utils import PointsReasons, has_reason
+
+    returns = [0.0, 0.0]
+    caidas = [0, 0]
+    limpias = [0, 0]
+    plies = 0
+
+    while not env.state.done:
+        p = env.state.current_player
+        obs = env.observe(p)
+        legal = env.legal_actions()
+        a = actor(p, obs, legal)
+        for tr in trackers:
+            tr.record(p, obs, a)
+        _obs, reward, _done, _trunc, info = env.step(a)
+
+        t = TEAMS[p]
+        returns[t] += float(reward)
+        reasons = info.get("reasons") or []
+        if has_reason(reasons, PointsReasons.CAIDA):
+            caidas[t] += 1
+        elif has_reason(reasons, PointsReasons.LIMPIA):
+            limpias[t] += 1
+        plies += 1
+
+    return {
+        "winner": env.state.winner,
+        "score0": int(env.state.scores[0]),
+        "score1": int(env.state.scores[1]),
+        "plies": plies,
+        "return0": returns[0],
+        "return1": returns[1],
+        "caidas0": caidas[0],
+        "caidas1": caidas[1],
+        "limpias0": limpias[0],
+        "limpias1": limpias[1],
+    }
+
+
+def _eval_reference_worker(args):
+    """
+    One game: current net (team 0) vs REFERENCE checkpoint (team 1), BOTH searching.
+
+    This is the AlphaZero gating match: same search, same rules, only the weights
+    differ, so beating the reference means the training actually improved the agent
+    (as opposed to merely moving away from a fixed opponent).
+    """
+    seed, cur_sd, ref_sd, cfg = args
+    import torch as _torch
+    _torch.set_num_threads(1)
+
+    from env import CuarentaEnv, TEAMS
+    from history import HistoryTracker
+
+    env = CuarentaEnv(seed=seed)
+    env.reset(seed=seed)
+    cur = _load_net(cur_sd)
+    ref = _load_net(ref_sd)
+    tracker_cur = HistoryTracker(env)
+    tracker_ref = HistoryTracker(env)
+    searcher_cur = _make_search(env, cur, tracker_cur, seed, **cfg)
+    searcher_ref = _make_search(env, ref, tracker_ref, seed, **cfg)
+
+    def actor(p, obs, legal):
+        if TEAMS[p] == 0:
+            return _pick_visit_action(searcher_cur, p, legal)
+        return _pick_visit_action(searcher_ref, p, legal)
+
+    return _play_match(env, actor, [tracker_cur, tracker_ref])
+
+
 def _eval_heuristic_worker(args):
-    """One game: net (team 0) vs HeuristicAgent (team 1). Returns winning team."""
+    """One game: net (team 0) vs HeuristicAgent (team 1)."""
     seed, state_dict, cfg = args
     import torch as _torch
     _torch.set_num_threads(1)
@@ -275,56 +491,23 @@ def _eval_heuristic_worker(args):
     searcher = _make_search(env, net, tracker, seed, **cfg)
     heuristic = HeuristicAgent(seed=seed * 2 + 2)
 
-    while not env.state.done:
-        p = env.state.current_player
-        obs = env.observe(p)
-        legal = env.legal_actions()
-
+    def actor(p, obs, legal):
         if TEAMS[p] == 0:
-            a = _pick_visit_action(searcher, p, legal)
-        else:
-            a = legal.index(heuristic.act(env, p))
+            return _pick_visit_action(searcher, p, legal)
+        return legal.index(heuristic.act(env, p))
 
-        tracker.record(p, obs, a)
-        env.step(a)
-
-    return env.state.winner
+    return _play_match(env, actor, [tracker])
 
 
-def _eval_rollout_worker(args):
-    """One game: net (team 0) vs rollout-ISMCTS (team 1). Returns winning team."""
-    seed, state_dict, cfg = args
-    import torch as _torch
-    _torch.set_num_threads(1)
+def _eval_raw_worker(args):
+    """
+    One game: net WITH search (team 0) vs the SAME net's raw policy (team 1).
 
-    from env import CuarentaEnv, TEAMS
-    from history import HistoryTracker
-    from ismcts import ISMCTS as RolloutISMCTS
-
-    env = CuarentaEnv(seed=seed)
-    env.reset(seed=seed)
-    net = _load_net(state_dict)
-    tracker = HistoryTracker(env)
-    net_searcher = _make_search(env, net, tracker, seed, **cfg)
-    rollout_searcher = RolloutISMCTS(
-        env, n_iter=cfg["n_iter"], rollout_policy="greedy",
-        rng=random.Random(seed * 2 + 2),
-    )
-
-    while not env.state.done:
-        p = env.state.current_player
-        obs = env.observe(p)
-        legal = env.legal_actions()
-        searcher = net_searcher if TEAMS[p] == 0 else rollout_searcher
-        a = _pick_visit_action(searcher, p, legal)
-        tracker.record(p, obs, a)
-        env.step(a)
-
-    return env.state.winner
-
-
-def _eval_random_worker(args):
-    """One game: net (team 0) vs uniform-random (team 1). Returns winning team."""
+    The raw side plays argmax of its own prior (`_eval_root`, no search), so this
+    measures the teacher edge — how much the search actually adds over the policy it
+    is supposed to be teaching. If this drifts toward 50%, the self-play targets are
+    self-distillation and the net cannot improve from them.
+    """
     seed, state_dict, cfg = args
     import torch as _torch
     _torch.set_num_threads(1)
@@ -338,28 +521,168 @@ def _eval_random_worker(args):
     tracker = HistoryTracker(env)
     searcher = _make_search(env, net, tracker, seed, **cfg)
 
-    while not env.state.done:
-        p = env.state.current_player
-        obs = env.observe(p)
-        legal = env.legal_actions()
+    def actor(p, obs, legal):
         if TEAMS[p] == 0:
-            a = _pick_visit_action(searcher, p, legal)
-        else:
-            a = random.randrange(len(legal))
-        tracker.record(p, obs, a)
-        env.step(a)
+            return _pick_visit_action(searcher, p, legal)
+        priors, _v = searcher._eval_root(p, legal)
+        return int(np.argmax(priors))
 
-    return env.state.winner
+    return _play_match(env, actor, [tracker])
 
 
-def _pooled_eval(worker, net, n_games: int, seed_base: int, desc: str, cfg: dict) -> float:
-    """Run `n_games` head-to-head games in parallel; return the net's win rate."""
+def _probe_worker(args):
+    """
+    Metrics on ONE fixed heuristic game (never used for training): policy top-1
+    agreement with the teacher, value MSE/sign accuracy, and mean |value|.
+
+    Runs the net directly (no search, no self-play), so it is a cheap, deterministic
+    probe of the two heads that is comparable across iterations. `value_mse` should
+    stay at or below ~1.0; `mean_abs_value` flags overconfidence (a calibrated
+    estimate of a mostly-undecided game should not sit near ±1).
+    """
+    seed, state_dict, cfg = args
+    import torch as _torch
+    _torch.set_num_threads(1)
+
+    from torch.utils.data import DataLoader
+    from dataset import CuarentaDataset
+
+    decisions = play_one_heuristic_game(seed)
+    net = _load_net(state_dict)
+    loader = DataLoader(CuarentaDataset(decisions, t_max=T_MAX, history_dropout=0.0),
+                        batch_size=256)
+    correct = v_se = v_sign = abs_v = 0.0
+    n = 0
+    with _torch.no_grad():
+        for obs, act, am, feats, mask, pi, v, length, _pw in loader:
+            logits, value = net(obs, act, am, feats, mask, lengths=length)
+            correct += (logits.argmax(-1) == pi.argmax(-1)).sum().item()
+            v_se += ((value - v).to(_torch.float64) ** 2).sum().item()
+            v_sign += ((value > 0) == (v > 0)).sum().item()
+            abs_v += value.abs().to(_torch.float64).sum().item()
+            n += v.shape[0]
+    return {"correct": correct, "v_se": v_se, "v_sign": v_sign, "abs_v": abs_v, "n": n}
+
+
+def _pooled(worker, args, desc):
+    """Run worker(args) for every args entry in parallel. Returns the result list."""
     from multiprocessing import Pool
-    state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
-    args = [(seed_base + i, state_dict, cfg) for i in range(n_games)]
     with Pool() as pool:
-        results = list(tqdm(pool.imap(worker, args), total=n_games, desc=desc, leave=False))
-    return sum(1 for w in results if w == 0) / max(n_games, 1)
+        return list(tqdm(pool.imap(worker, args), total=len(args), desc=desc,
+                         leave=False))
+
+
+def _sd(net):
+    """CPU copy of a net's weights, safe to hand to worker processes."""
+    return {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+
+
+def match_metrics(results: list[dict], prefix: str) -> dict:
+    """
+    Average a batch of match summaries into flat scalars.
+
+    Team 0 is always the net under test, so the naming is from its point of view:
+    `_for` = the net's team, `_against` = the opponent. Logged for every matchup, so
+    you can watch the RETURNS (summed env rewards), the actual game SCORES, the game
+    length and the caída/limpia counts — not just who won.
+    """
+    if not results:
+        return {}
+    n = len(results)
+
+    def m(key):
+        return float(np.mean([r[key] for r in results]))
+
+    # Keys are unprefixed here (the gating code and the printout use them directly);
+    # run_evaluation adds the "eval/" prefix when logging to wandb.
+    return {
+        prefix: sum(1 for r in results if r["winner"] == 0) / n,
+        f"{prefix}_score_for": m("score0"),
+        f"{prefix}_score_against": m("score1"),
+        f"{prefix}_plies": m("plies"),
+        f"{prefix}_return_for": m("return0"),
+        f"{prefix}_return_against": m("return1"),
+        f"{prefix}_caidas_for": m("caidas0"),
+        f"{prefix}_caidas_against": m("caidas1"),
+        f"{prefix}_limpias_for": m("limpias0"),
+        f"{prefix}_limpias_against": m("limpias1"),
+    }
+
+
+def run_evaluation(net, reference_state, args, cfg, iteration):
+    """All the evaluations for one iteration. Returns a dict of flat metrics."""
+    cur = _sd(net)
+    metrics = {}
+
+    # 1. Gating match vs the reference checkpoint (primary criterion)
+    results = _pooled(
+        _eval_reference_worker,
+        [(50000 + i, cur, reference_state, cfg) for i in range(args.eval_games)],
+        "eval vs reference",
+    )
+    metrics.update(match_metrics(results, "vs_reference"))
+
+    # 2. External reference: the heuristic agent
+    results = _pooled(
+        _eval_heuristic_worker,
+        [(50000 + i, cur, cfg) for i in range(args.eval_games)],
+        "eval vs heuristic",
+    )
+    metrics.update(match_metrics(results, "vs_heuristic"))
+
+    # 3. Health: teacher edge (search vs this net's own raw policy)
+    results = _pooled(
+        _eval_raw_worker,
+        [(70000 + i, cur, cfg) for i in range(args.eval_raw_games)],
+        "eval teacher edge",
+    )
+    metrics.update(match_metrics(results, "teacher_edge"))
+
+    # 4. Health: held-out head metrics on fixed, never-trained-on games
+    probe_results = _pooled(
+        _probe_worker,
+        [(s, cur, cfg) for s in PROBE_SEEDS],
+        "eval head probe",
+    )
+    n = sum(r["n"] for r in probe_results)
+    metrics["probe_policy_acc"] = sum(r["correct"] for r in probe_results) / max(n, 1)
+    metrics["probe_value_mse"] = sum(r["v_se"] for r in probe_results) / max(n, 1)
+    metrics["probe_value_sign"] = sum(r["v_sign"] for r in probe_results) / max(n, 1)
+    metrics["probe_mean_abs_value"] = sum(r["abs_v"] for r in probe_results) / max(n, 1)
+
+    print(f"  eval: vs_reference={metrics['vs_reference']:.1%}  "
+          f"vs_heuristic={metrics['vs_heuristic']:.1%}  "
+          f"teacher_edge={metrics['teacher_edge']:.1%}")
+    print(f"        scores: vs_ref {metrics['vs_reference_score_for']:.1f}-"
+          f"{metrics['vs_reference_score_against']:.1f}  "
+          f"vs_heur {metrics['vs_heuristic_score_for']:.1f}-"
+          f"{metrics['vs_heuristic_score_against']:.1f}  "
+          f"returns: vs_heur {metrics['vs_heuristic_return_for']:.1f}-"
+          f"{metrics['vs_heuristic_return_against']:.1f}  "
+          f"caídas {metrics['vs_heuristic_caidas_for']:.2f}-"
+          f"{metrics['vs_heuristic_caidas_against']:.2f}  "
+          f"plies {metrics['vs_heuristic_plies']:.0f}")
+    print(f"        probe: policy_acc={metrics['probe_policy_acc']:.3f}  "
+          f"value_mse={metrics['probe_value_mse']:.3f}  "
+          f"value_sign={metrics['probe_value_sign']:.3f}  "
+          f"mean|v|={metrics['probe_mean_abs_value']:.3f}")
+
+    if metrics["probe_value_mse"] > 1.0:
+        print("        WARNING: held-out value MSE > 1.0 — the value head is worse "
+              "than always predicting 0, and the search uses it to value leaves. "
+              "Raise --value-anchor-weight, cut --epochs-per-iter, or add games.")
+    if metrics["teacher_edge"] < 0.55:
+        print("        WARNING: the search barely beats this net's own raw policy — "
+              "the self-play targets are close to self-distillation, so expect the "
+              "policy to stop improving.")
+    if metrics["probe_value_mse"] > 0 and metrics["probe_mean_abs_value"] > 0.7:
+        print("        NOTE: mean |value| is high — the value head is confident. "
+              "Compare it with the actual win rates; overconfidence shows up as a "
+              "probe value MSE that creeps toward 1.0.")
+
+    if not args.no_wandb:
+        wandb.log(dict({f"eval/{k}": v for k, v in metrics.items()}, iter=iteration))
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +691,7 @@ def _pooled_eval(worker, net, n_games: int, seed_base: int, desc: str, cfg: dict
 
 def main():
     # `global` must come before any use of these names in this function.
-    global N_SEARCH_ITER, LEAF_VALUE_MODE
+    global N_SEARCH_ITER, LEAF_VALUE_MODE, DIRICHLET_EPS, TARGET_TEMPERATURE, DEVICE
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--init-checkpoint", type=str, default=None,
@@ -377,16 +700,33 @@ def main():
                              "incompatible and will fail to load.")
     parser.add_argument("--iterations", type=int, default=N_ITERATIONS)
     parser.add_argument("--games-per-iter", type=int, default=GAMES_PER_ITER)
+    parser.add_argument("--imitation-games", type=int, default=IMITATION_GAMES_PER_ITER,
+                        help="Heuristic games per iteration, mixed in for value "
+                             "calibration (0 disables)")
+    parser.add_argument("--imitation-policy-weight", type=float,
+                        default=IMITATION_POLICY_WEIGHT,
+                        help="Policy-loss weight of imitation samples "
+                             "(0 = value loss only, 1 = also imitate the teacher)")
     parser.add_argument("--n-search-iter", type=int, default=N_SEARCH_ITER)
+    parser.add_argument("--dirichlet-eps", type=float, default=DIRICHLET_EPS)
+    parser.add_argument("--target-temperature", type=float, default=TARGET_TEMPERATURE,
+                        help="Flatten the search's visit distribution before training "
+                             "on it (1.0 = raw)")
     parser.add_argument("--epochs-per-iter", type=int, default=EPOCHS_PER_ITER)
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--leaf-value-mode", type=str, default=LEAF_VALUE_MODE,
                         choices=["net", "rollout"])
     parser.add_argument("--eval-games", type=int, default=EVAL_GAMES)
+    parser.add_argument("--eval-raw-games", type=int, default=EVAL_RAW_GAMES)
+    parser.add_argument("--eval-every", type=int, default=EVAL_EVERY)
+    parser.add_argument("--accept-threshold", type=float, default=ACCEPT_THRESHOLD,
+                        help="Win rate vs the reference required to accept a new net")
     parser.add_argument("--value-anchor-weight", type=float, default=VALUE_ANCHOR_WEIGHT,
                         help="Keep the value head close to the starting checkpoint's "
-                             "value output (0 = off, 1.0+ = almost frozen). Protects "
+                             "value output (0 = off, 5+ = almost frozen). Protects "
                              "the leaf values the search depends on.")
+    parser.add_argument("--ckpt-dir", type=str, default=CKPT_DIR,
+                        help="Where to write checkpoints (relative to the CWD)")
     parser.add_argument("--device", type=str, default="auto",
                         choices=["auto", "cpu", "cuda", "mps"],
                         help="auto = cuda if available else cpu (MPS is slower here)")
@@ -397,11 +737,16 @@ def main():
 
     # Self-play reads these globals; the evaluators get them explicitly via `cfg`
     # (worker processes would otherwise only see the module defaults).
-    global DEVICE
-    DEVICE = _pick_device(args.device)
-    print(f"Self-play device: {DEVICE} (eval workers always use CPU)")
     N_SEARCH_ITER = args.n_search_iter
     LEAF_VALUE_MODE = args.leaf_value_mode
+    DIRICHLET_EPS = args.dirichlet_eps
+    TARGET_TEMPERATURE = args.target_temperature
+    DEVICE = _pick_device(args.device)
+    ckpt_dir = args.ckpt_dir
+    os.makedirs(ckpt_dir, exist_ok=True)
+    print(f"Self-play device: {DEVICE} (eval workers always use CPU)")
+    print(f"Checkpoints -> {os.path.abspath(ckpt_dir)}")
+
     search_cfg = {
         "n_iter": N_SEARCH_ITER,
         "leaf_value_mode": LEAF_VALUE_MODE,
@@ -414,7 +759,11 @@ def main():
             config={
                 "n_iterations": args.iterations,
                 "games_per_iter": args.games_per_iter,
+                "imitation_games": args.imitation_games,
+                "imitation_policy_weight": args.imitation_policy_weight,
                 "n_search_iter": N_SEARCH_ITER,
+                "dirichlet_eps": DIRICHLET_EPS,
+                "target_temperature": TARGET_TEMPERATURE,
                 "leaf_value_mode": LEAF_VALUE_MODE,
                 "max_rollout_len": MAX_ROLLOUT_LEN,
                 "temperature_cutoff": TEMPERATURE_CUTOFF,
@@ -424,10 +773,19 @@ def main():
                 "t_max": T_MAX,
                 "history_dropout": HISTORY_DROPOUT,
                 "eval_games": args.eval_games,
-                "init_checkpoint": args.init_checkpoint,
+                "eval_raw_games": args.eval_raw_games,
+                "accept_threshold": args.accept_threshold,
                 "value_anchor_weight": args.value_anchor_weight,
+                "init_checkpoint": args.init_checkpoint,
+                "device": DEVICE,
             },
         )
+        # Make the iteration number the x-axis for every metric group, so the wandb
+        # charts read "value of X at iteration N" instead of "log call number N".
+        # Every log() call below therefore includes an "iter" key.
+        wandb.define_metric("iter")
+        for group in ("train", "buffer", "selfplay", "eval", "time"):
+            wandb.define_metric(f"{group}/*", step_metric="iter")
 
     net = CuarentaNet().to(DEVICE)
 
@@ -447,8 +805,7 @@ def main():
     anchor_weight = args.value_anchor_weight
     if anchor_weight > 0:
         if args.init_checkpoint:
-            import copy as _copy
-            anchor_net = _copy.deepcopy(net).eval()
+            anchor_net = copy.deepcopy(net).eval()
             for p in anchor_net.parameters():
                 p.requires_grad_(False)
             print(f"Value anchor: ON (weight={anchor_weight}) vs {args.init_checkpoint}")
@@ -456,46 +813,103 @@ def main():
             anchor_weight = 0.0
             print("Value anchor requested but no --init-checkpoint: disabling it")
 
+    # ---- The reference we gate on ----
+    # AlphaZero compares each new net against the best net so far. We keep those
+    # weights in memory so the comparison is always "did training actually improve the
+    # agent that would ship?".
+    reference_state = _sd(net)
+    best_heuristic = -1.0
+    best_path = os.path.join(ckpt_dir, "best.pt")
+    best_heur_path = os.path.join(ckpt_dir, "best_heuristic.pt")
+
+    # Never silently clobber a "best" file from an earlier run: stash it once as
+    # `*_prev.pt`. (A checkpoint is the only copy of a trained net, and it is easy to
+    # start a second run in the same directory by accident.)
+    for path in (best_path, best_heur_path):
+        if os.path.exists(path):
+            prev = path.replace(".pt", "_prev.pt")
+            if not os.path.exists(prev):
+                os.replace(path, prev)
+                print(f"Kept the earlier {os.path.basename(path)} as "
+                      f"{os.path.basename(prev)}")
+            else:
+                # A backup from an even earlier run already exists; drop the stale file.
+                os.remove(path)
+                print(f"Replaced the stale {os.path.basename(path)} "
+                      f"(backup kept as {os.path.basename(prev)})")
+
+    if args.init_checkpoint:
+        # The reference IS the starting net until something beats it, so make sure it
+        # exists on disk before training can touch the weights.
+        torch.save(net.state_dict(), best_path)
+        print(f"Saved starting weights as {best_path} (the reference until beaten)")
+
     # Mild weight decay: with only a few hundred self-play games in the buffer, the
     # value head can memorise outcomes (see the warning in the epoch loop below).
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    # Write out the starting weights as `best.pt` before touching them, so a baseline
-    # checkpoint always exists on disk even if self-play never beats it. Never
-    # overwrite an existing `best.pt` from an earlier run (that file may be the only
-    # copy of a good net).
-    best_path = os.path.join(CKPT_DIR, "best.pt")
-    if args.init_checkpoint and not os.path.exists(best_path):
-        torch.save(net.state_dict(), best_path)
-        print(f"Saved starting weights as {best_path}")
-    elif args.init_checkpoint:
-        print(f"Keeping the existing {best_path} (delete it to start a fresh "
-              f"'best' trace; the win rates of two runs are not comparable)")
-
     # ---- Baseline evaluation ----
-    # Do this BEFORE any self-play so the run has a reference point measured with
-    # the exact same search settings. Without it you cannot tell whether self-play
-    # helped or hurt.
-    best_winrate = -1.0
+    # Do this BEFORE any self-play so the run has a reference point measured with the
+    # exact same search settings. Without it you cannot tell whether self-play helped
+    # or hurt.
+    #
+    # This baseline match is the net against ITSELF (`reference_state` is a copy), so
+    # it doubles as a MIRROR CALIBRATION: whatever team 0 wins here is the
+    # first-mover/seat asymmetry of the setup, not skill. Gating must beat that
+    # number, not a naive 50%, or a net that only looks good because it moves first
+    # would be accepted as progress.
+    mirror_baseline = None
+    accept_needed = args.accept_threshold
     if not args.no_eval:
-        baseline = _pooled_eval(_eval_heuristic_worker, net, args.eval_games,
-                                seed_base=50000, desc="baseline eval", cfg=search_cfg)
-        best_winrate = baseline
-        print(f"\n=== Baseline (before self-play) vs heuristic: {baseline:.1%} ===")
-        if not args.no_wandb:
-            wandb.log({"iter": -1, "winrate_vs_heuristic": baseline})
+        print("\n=== Baseline evaluation (before any self-play) ===")
+        metrics = run_evaluation(net, reference_state, args, search_cfg, iteration=-1)
+        mirror_baseline = metrics["vs_reference"]
+        best_heuristic = metrics["vs_heuristic"]
+        accept_needed = max(args.accept_threshold, mirror_baseline + 0.05)
+        print(f"  mirror baseline (net vs itself) = {mirror_baseline:.1%}; "
+              f"a new net must reach {accept_needed:.1%} vs the reference to be "
+              f"accepted")
 
     start = time.perf_counter()
     decisions_buffer: list[Decision] = []
 
     for iteration in range(args.iterations):
         print(f"\n=== Iteration {iteration} ===")
+        t_iter = time.perf_counter()
 
         # 1. Self-play with the current net
         t0 = time.perf_counter()
-        decisions = collect_games(net, args.games_per_iter, base_seed=iteration * 1000)
+        decisions, sp_metrics = collect_games(net, args.games_per_iter,
+                                              base_seed=iteration * 1000)
         t_collect = time.perf_counter() - t0
-        print(f"  collected {len(decisions)} decisions in {timedelta(seconds=t_collect)}")
+        print(f"  collected {len(decisions)} self-play decisions "
+              f"in {timedelta(seconds=t_collect)}")
+        # How the agent is doing in REWARD terms this iteration: episode returns,
+        # final scores, game length and caída/limpia counts.
+        print(f"  self-play: win_rate_t0={sp_metrics['selfplay/win_rate_team0']:.2f}  "
+              f"scores={sp_metrics['selfplay/score_team0']:.1f}-"
+              f"{sp_metrics['selfplay/score_team1']:.1f}  "
+              f"returns={sp_metrics['selfplay/return_team0']:.1f}-"
+              f"{sp_metrics['selfplay/return_team1']:.1f}  "
+              f"caídas={sp_metrics['selfplay/caidas_team0']:.2f}+"
+              f"{sp_metrics['selfplay/caidas_team1']:.2f}  "
+              f"limpias={sp_metrics['selfplay/limpias_team0']:.2f}+"
+              f"{sp_metrics['selfplay/limpias_team1']:.2f}  "
+              f"plies={sp_metrics['selfplay/plies']:.0f}  "
+              f"root|v|={sp_metrics['selfplay/mean_root_value_team0']:+.2f}/"
+              f"{sp_metrics['selfplay/mean_root_value_team1']:+.2f}")
+        if not args.no_wandb:
+            wandb.log(dict(sp_metrics, iter=iteration))
+
+        # 2. A few teacher games, to keep the value head calibrated off-distribution.
+        t0 = time.perf_counter()
+        if args.imitation_games > 0:
+            imitation = collect_imitation_games(args.imitation_games,
+                                                base_seed=500_000 + iteration * 1000)
+            print(f"  collected {len(imitation)} imitation decisions "
+                  f"(policy weight {args.imitation_policy_weight})")
+            decisions = decisions + imitation
+        t_imitation = time.perf_counter() - t0
 
         # Replay buffer: keep the most recent REPLAY_ITERS iterations of data.
         decisions_buffer.extend(decisions)
@@ -503,58 +917,96 @@ def main():
         if len(decisions_buffer) > max_buffer:
             decisions_buffer = decisions_buffer[-max_buffer:]
 
-        # 2. Train on the whole buffer
-        ds = CuarentaDataset(decisions_buffer, t_max=T_MAX, history_dropout=HISTORY_DROPOUT)
+        stats = buffer_stats(decisions_buffer)
+        print(f"  buffer: n={stats['n']} selfplay_frac={stats['selfplay_frac']:.2f} "
+              f"target_ent={stats['target_entropy']:.3f} "
+              f"target_top={stats['target_top_prob']:.3f} "
+              f"prior_ent={stats['prior_entropy']:.3f} "
+              f"legal={stats['legal_actions']:.1f}")
+        if not args.no_wandb:
+            wandb.log(dict({f"buffer/{k}": v for k, v in stats.items()}, iter=iteration))
+
+        # 3. Train on the whole buffer
+        t0 = time.perf_counter()
+        ds = CuarentaDataset(
+            decisions_buffer, t_max=T_MAX, history_dropout=HISTORY_DROPOUT,
+            target_temperature=TARGET_TEMPERATURE,
+            imitation_policy_weight=args.imitation_policy_weight,
+        )
         loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
 
         for epoch in range(args.epochs_per_iter):
-            loss, pl, vl, al = train_one_epoch(
+            loss, pl, vl, al, tent = train_one_epoch(
                 net, loader, opt, DEVICE,
                 anchor_net=anchor_net, anchor_weight=anchor_weight,
             )
-            if not args.no_wandb:
-                wandb.log({"iter": iteration, "epoch": epoch,
-                           "loss": loss, "policy_loss": pl, "value_loss": vl,
-                           "value_anchor_loss": al})
+            excess = pl - tent
             print(f"  epoch {epoch}: loss={loss:.4f} policy={pl:.4f} value={vl:.4f}"
-                  + (f" anchor={al:.4f}" if anchor_weight > 0 else ""))
+                  + (f" anchor={al:.4f}" if anchor_weight > 0 else "")
+                  + f" | target_ent={tent:.3f} excess_ce={excess:.3f}")
+            if not args.no_wandb:
+                wandb.log({"train/loss": loss, "train/policy_loss": pl,
+                           "train/value_loss": vl, "train/anchor_loss": al,
+                           "train/target_entropy": tent,
+                           "train/excess_ce": excess, "iter": iteration})
+        t_train = time.perf_counter() - t0
 
         # Watch the value loss: every decision of a game shares one ±1 label, so a
         # small buffer can be MEMORISED, and a value loss near 0 on the training
-        # buffer does NOT mean the value head is good on fresh games. Since the
-        # search now values leaves with this head (leaf_value_mode="net"), a
-        # memorised value head quietly poisons the search — that was one of the
-        # failure modes of the old pipeline (train value loss 0.036 while held-out
-        # MSE was 1.49). If you see this warning, use fewer epochs per iteration,
-        # more self-play games, or raise weight decay.
+        # buffer does NOT mean the value head is good on fresh games. Since the search
+        # values leaves with this head, a memorised value head quietly poisons the
+        # search. The probe in run_evaluation is the trustworthy version of this check.
         if vl < 0.05:
             print(f"  WARNING: value loss {vl:.4f} is suspiciously low — the value "
-                  f"head may be memorising this buffer's games")
+                  f"head may be memorising this buffer's games (check probe_value_mse)")
 
-        # 3. Save
-        ckpt_path = os.path.join(CKPT_DIR, f"cuarenta_iter{iteration:03d}.pt")
+        # 4. Save
+        ckpt_path = os.path.join(ckpt_dir, f"cuarenta_iter{iteration:03d}.pt")
         torch.save(net.state_dict(), ckpt_path)
         print(f"  saved {ckpt_path}")
 
-        # 4. Evaluate vs the heuristic (the reference opponent for this project)
-        if (iteration + 1) % EVAL_EVERY == 0:
-            wr_h = _pooled_eval(_eval_heuristic_worker, net, args.eval_games,
-                                seed_base=50000, desc="eval vs heuristic", cfg=search_cfg)
-            print(f"  eval vs heuristic: {wr_h:.2%}")
-            if not args.no_wandb:
-                wandb.log({"iter": iteration, "winrate_vs_heuristic": wr_h})
+        # 5. Evaluate
+        if (iteration + 1) % args.eval_every == 0:
+            metrics = run_evaluation(net, reference_state, args, search_cfg, iteration)
 
-            # Keep the best checkpoint, not just the last one. A single evaluation
-            # has a large standard error, so also require a small margin before
-            # overwriting the best.
-            if wr_h > best_winrate:
-                best_winrate = wr_h
-                best_path = os.path.join(CKPT_DIR, "best.pt")
+            # Gating on the REFERENCE match (AlphaZero style). The bar is the mirror
+            # calibration plus a margin, because a single 60-game match has a standard
+            # error of ~6%: demanding +5% over the mirror makes accidental acceptance
+            # unlikely while still moving fast enough to see progress.
+            if metrics["vs_reference"] >= accept_needed:
+                reference_state = _sd(net)
                 torch.save(net.state_dict(), best_path)
-                print(f"  new best ({wr_h:.2%}) -> {best_path}")
+                print(f"  ACCEPTED: beats the reference {metrics['vs_reference']:.1%} "
+                      f"(bar {accept_needed:.1%}) -> {best_path} (new reference)")
+            else:
+                print(f"  not accepted: vs_reference={metrics['vs_reference']:.1%} "
+                      f"< bar {accept_needed:.1%} (reference unchanged)")
+
+            # Also keep the best-vs-heuristic net: it is what you would deploy today,
+            # even though it is not the training criterion.
+            if metrics["vs_heuristic"] > best_heuristic:
+                best_heuristic = metrics["vs_heuristic"]
+                torch.save(net.state_dict(), best_heur_path)
+                print(f"  new best vs heuristic ({best_heuristic:.1%}) -> "
+                      f"{best_heur_path}")
+
+        # 6. Timing: how long each phase took, so you can see where a run's hours go.
+        t_iter = time.perf_counter() - t_iter
+        timing = {
+            "time/iteration_s": t_iter,
+            "time/selfplay_s": t_collect,
+            "time/imitation_s": t_imitation,
+            "time/train_s": t_train,
+        }
+        print(f"  time: iter={t_iter:.0f}s "
+              f"(selfplay {t_collect:.0f}s, imitation {t_imitation:.0f}s, "
+              f"train {t_train:.0f}s)")
+        if not args.no_wandb:
+            wandb.log(dict(timing, iter=iteration))
 
     print(f"\nTotal time: {timedelta(seconds=time.perf_counter() - start)}")
-    print(f"Best winrate vs heuristic: {best_winrate:.2%}")
+    if best_heuristic >= 0:
+        print(f"Best winrate vs heuristic: {best_heuristic:.2%}")
     if not args.no_wandb:
         wandb.finish()
 

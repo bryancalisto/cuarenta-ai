@@ -200,8 +200,9 @@ class NetworkISMCTS:
 
         # ---- diagnostics, useful when learning/debugging ----
         self.stats = {"sims": 0, "evals": 0, "rollouts": 0, "truncated_rollouts": 0}
-        self.last_root_priors: Optional[np.ndarray] = None   # after noise
-        self.last_root_value: float = 0.0                    # root team's POV
+        self.last_root_priors: Optional[np.ndarray] = None        # CLEAN net prior
+        self.last_root_priors_noisy: Optional[np.ndarray] = None  # after Dirichlet
+        self.last_root_value: float = 0.0                         # root team's POV
 
     # ------------------------------------------------------------------
     # Public API
@@ -236,10 +237,14 @@ class NetworkISMCTS:
         # Dirichlet noise for exploration. During self-play this is what makes the
         # collected data cover more than the current favourite move; set eps=0 at
         # evaluation time so the search is deterministic given the sim count.
+        #
+        # We keep the CLEAN prior for diagnostics (how far did the search move away
+        # from what the net believed?) and the noisy one for the actual search.
+        self.last_root_priors = root_priors
         if self.dirichlet_eps > 0 and len(legal) > 1:
             noise = np.random.dirichlet([self.dirichlet_alpha] * len(legal))
             root_priors = (1 - self.dirichlet_eps) * root_priors + self.dirichlet_eps * noise
-        self.last_root_priors = root_priors
+        self.last_root_priors_noisy = root_priors
         self.last_root_value = root_value
 
         # ---- Build the root ----

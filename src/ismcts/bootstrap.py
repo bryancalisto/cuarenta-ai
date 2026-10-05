@@ -129,6 +129,9 @@ def play_one_heuristic_game(seed: int) -> List[Decision]:
             team=TEAMS[p],
             player=p,
             ply=ply,
+            # Teacher data, not self-play data: the one-hot target is the ground
+            # truth we are imitating, so the dataset must not soften it.
+            selfplay=False,
         ))
 
         tracker.record(p, obs, slot)
@@ -173,26 +176,32 @@ def collect_heuristic_games(seeds: List[int]) -> List[List[Decision]]:
 # ---------------------------------------------------------------------------
 
 def _unpack(batch, device):
-    obs, act, am, feats, mask, pi_target, v_target, length = batch
+    obs, act, am, feats, mask, pi_target, v_target, length, pol_weight = batch
     return (
         obs.to(device), act.to(device), am.to(device), feats.to(device),
         mask.to(device), pi_target.to(device), v_target.to(device), length.to(device),
+        pol_weight.to(device),
     )
 
 
 def train_one_epoch(net, loader, opt, device):
     net.train()
-    total_loss = total_p = total_v = 0.0
+    total_loss = total_p = total_v = total_ent = 0.0
     total_correct = total_samples = 0
 
     for batch in loader:
-        obs, act, am, feats, mask, pi_target, v_target, length = _unpack(batch, device)
+        obs, act, am, feats, mask, pi_target, v_target, length, pol_weight = _unpack(batch, device)
 
         logits, value = net(obs, act, am, feats, mask, lengths=length)
 
-        # Policy loss: cross-entropy between softmax(logits) and pi_target.
+        # Per-sample cross-entropy, then a weighted mean: samples with policy
+        # weight 0 (imitation data added just for the value head) do not push the
+        # policy at all. In bootstrap every sample is a teacher one-hot, so the
+        # weights are all 1.0.
         logp = torch.log_softmax(logits, dim=-1)
-        policy_loss = -(pi_target * logp).sum(dim=-1).mean()
+        ce = -(pi_target * logp).sum(dim=-1)
+        w = pol_weight.clamp(min=0.0)
+        policy_loss = (ce * w).sum() / w.sum().clamp(min=1e-6)
 
         # Value loss: MSE against the ±1 outcome.
         value_loss = ((value - v_target) ** 2).mean()
@@ -204,11 +213,17 @@ def train_one_epoch(net, loader, opt, device):
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
 
+        # Diagnostic: the entropy of the target distribution is the FLOOR of the
+        # cross-entropy (you cannot do better than predicting the target exactly).
+        # `policy_loss - target_entropy` is the part the net actually fails to fit.
+        # Weighted the same way as `policy_loss` so the two are comparable.
         with torch.no_grad():
             pred = logits.argmax(dim=-1)
             target = pi_target.argmax(dim=-1)
             total_correct += (pred == target).sum().item()
             total_samples += obs.size(0)
+            ent = -(pi_target * torch.log(pi_target + 1e-9)).sum(dim=-1)
+            total_ent += ((ent * w).sum() / w.sum().clamp(min=1e-6)).item()
 
         total_loss += loss.item()
         total_p += policy_loss.item()
@@ -216,7 +231,7 @@ def train_one_epoch(net, loader, opt, device):
 
     n = max(len(loader), 1)
     return (total_loss / n, total_p / n, total_v / n,
-            total_correct / max(total_samples, 1))
+            total_correct / max(total_samples, 1), total_ent / n)
 
 
 @torch.no_grad()
@@ -232,7 +247,7 @@ def evaluate(net, loader, device):
     v_se = 0.0
     v_correct = 0
     for batch in loader:
-        obs, act, am, feats, mask, pi_target, v_target, length = _unpack(batch, device)
+        obs, act, am, feats, mask, pi_target, v_target, length, _pw = _unpack(batch, device)
         logits, value = net(obs, act, am, feats, mask, lengths=length)
         correct += (logits.argmax(-1) == pi_target.argmax(-1)).sum().item()
         v_se += ((value - v_target) ** 2).sum().item()
@@ -278,14 +293,15 @@ def train(
 
     for epoch in range(epochs):
         t0 = time.perf_counter()
-        loss, pl, vl, acc = train_one_epoch(net, train_loader, opt, device)
+        loss, pl, vl, acc, tent = train_one_epoch(net, train_loader, opt, device)
         val = evaluate(net, val_loader, device)
         dt = time.perf_counter() - t0
 
         print(f"  epoch {epoch}: loss={loss:.4f} policy={pl:.4f} value={vl:.4f} "
               f"train_acc={acc:.3f} | val_acc={val['policy_acc']:.3f} "
               f"val_value_mse={val['value_mse']:.3f} "
-              f"val_value_sign={val['value_sign_acc']:.3f} ({dt:.1f}s)")
+              f"val_value_sign={val['value_sign_acc']:.3f} "
+              f"| target_ent={tent:.3f} excess_ce={pl - tent:.3f} ({dt:.1f}s)")
 
         if use_wandb:
             wandb.log({
@@ -297,6 +313,8 @@ def train(
                 "bootstrap/val_action_accuracy": val["policy_acc"],
                 "bootstrap/val_value_mse": val["value_mse"],
                 "bootstrap/val_value_sign_acc": val["value_sign_acc"],
+                "bootstrap/target_entropy": tent,
+                "bootstrap/excess_ce": pl - tent,
             })
 
         # ---- model selection on held-out metrics ----
