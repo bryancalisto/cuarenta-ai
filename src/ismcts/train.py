@@ -16,6 +16,9 @@ loop is converging, we can consider switching to PPO.
 from __future__ import annotations
 
 import os
+import subprocess
+import argparse
+from pathlib import Path
 import random
 import time
 from datetime import timedelta
@@ -32,6 +35,7 @@ from env import CuarentaEnv
 from network import CuarentaNet
 from selfplay import play_one_game, Decision
 from dataset import CuarentaDataset
+from network_ismcts_1 import NetworkISMCTS
 
 dotenv.load_dotenv() # to load wandb token
 
@@ -39,16 +43,17 @@ dotenv.load_dotenv() # to load wandb token
 # Config
 # ---------------------------------------------------------------------------
 
-N_ITERATIONS = 20              # outer loop iterations
+N_ITERATIONS = 3              # outer loop iterations
 # GAMES_PER_ITER = 40            # self-play games per iteration (bump if you can afford it)
 GAMES_PER_ITER = 8            # self-play games per iteration (bump if you can afford it)
 # N_SEARCH_ITER = 100            # ISMCTS sims per decision during self-play
 # N_SEARCH_ITER = 50            # ISMCTS sims per decision during self-play
 N_SEARCH_ITER = 100            # ISMCTS sims per decision during self-play
-MAX_ROLLOUT_LEN = 200           # short rollout for speed; bump to 200 for stronger teacher
+MAX_ROLLOUT_LEN = 80           # short rollout for speed; bump to 200 for stronger teacher
 EPOCHS_PER_ITER = 8            # training epochs per iteration
 BATCH_SIZE = 64
-LR = 1e-3
+# LR = 1e-3
+LR = 2.5e-3
 T_MAX = 32
 CKPT_DIR = "checkpoints"
 
@@ -186,6 +191,25 @@ def eval_vs_random(net: CuarentaNet, n_games: int = 50, seed_base: int = 10000) 
 
     return wins / n_games
 
+def eval_vs_heuristic_subprocess(ckpt_path: str, n_games: int = 30, n_iter: int = 100) -> float:
+    """Run eval_net_vs_heuristic.py as a subprocess and parse the winrate."""
+    script = Path(__file__).parent / "eval_net_vs_heuristic.py"
+    result = subprocess.run(
+        ["python", str(script), ckpt_path, str(n_games),
+         "--n-iter", str(n_iter), "--leaf-value", "v1"],
+        capture_output=True, text=True, timeout=900,
+    )
+    if result.returncode != 0:
+        print(f"[eval_vs_heuristic] subprocess failed:\n{result.stderr}")
+        return float("nan")
+    for line in result.stdout.splitlines():
+        if "Net (team 0) wins" in line:
+            pct = float(line.split("=")[-1].strip().rstrip("%"))
+            return pct / 100.0
+    print(f"[eval_vs_heuristic] could not parse output:\n{result.stdout}")
+    return float("nan")
+
+
 def _eval_worker(args):
     """Play one eval game: net (team 0) vs rollout-ISMCTS (team 1)."""
     seed, state_dict, n_iter = args
@@ -252,74 +276,104 @@ def eval_vs_rollout(net, n_games=30, seed_base=20000, n_iter=100):
 # ---------------------------------------------------------------------------
 
 def main():
-    wandb.init(
-        project="cuarenta-ai",
-        config={
-            "n_iterations": N_ITERATIONS,
-            "games_per_iter": GAMES_PER_ITER,
-            "n_search_iter": N_SEARCH_ITER,
-            "max_rollout_len": MAX_ROLLOUT_LEN,
-            "epochs_per_iter": EPOCHS_PER_ITER,
-            "batch_size": BATCH_SIZE,
-            "lr": LR,
-            "t_max": T_MAX,
-        },
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--init-checkpoint", type=str, default=None,
+                        help="Optional path to a checkpoint to initialize from.")
+    parser.add_argument("--iterations", type=int, default=N_ITERATIONS)
+    parser.add_argument("--games-per-iter", type=int, default=GAMES_PER_ITER)
+    parser.add_argument("--n-search-iter", type=int, default=N_SEARCH_ITER)
+    parser.add_argument("--no-wandb", action="store_true")
+    args = parser.parse_args()
+
+    if not args.no_wandb:
+        wandb.init(
+            project="cuarenta-ai",
+            config={
+                "n_iterations": args.iterations,
+                "games_per_iter": args.games_per_iter,
+                "n_search_iter": args.n_search_iter,
+                "max_rollout_len": MAX_ROLLOUT_LEN,
+                "epochs_per_iter": EPOCHS_PER_ITER,
+                "batch_size": BATCH_SIZE,
+                "lr": LR,
+                "t_max": T_MAX,
+                "init_checkpoint": args.init_checkpoint,
+            },
+        )
 
     net = CuarentaNet().to(DEVICE)
+
+    # Initialize from a checkpoint if requested.
+    if args.init_checkpoint:
+        state = torch.load(args.init_checkpoint, map_location="cpu")
+        if isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
+        net.load_state_dict(state)
+        print(f"Initialized net from {args.init_checkpoint}")
+    else:
+        print("Starting from random initialization")
+
     opt = torch.optim.Adam(net.parameters(), lr=LR)
 
     best_winrate = -1.0
     start = time.perf_counter()
+    decisions_buffer = []
+    REPLAY_ITERS = 5
 
-    for iteration in range(N_ITERATIONS):
+
+    for iteration in range(args.iterations):
         print(f"\n=== Iteration {iteration} ===")
 
         # 1. Self-play
         t0 = time.perf_counter()
-        decisions = collect_games(net, GAMES_PER_ITER, base_seed=iteration * 1000)
+        decisions = collect_games(net, args.games_per_iter, base_seed=iteration * 1000)
         t_collect = time.perf_counter() - t0
         print(f"  collected {len(decisions)} decisions in {timedelta(seconds=t_collect)}")
 
+        decisions_buffer.extend(decisions)
+        # Keep only the most recent REPLAY_ITERS worth
+        # Estimate as: REPLAY_ITERS * len(decisions) * 1.2 (safety margin)
+        max_buffer = int(REPLAY_ITERS * len(decisions) * 1.5)
+        if len(decisions_buffer) > max_buffer:
+            decisions_buffer = decisions_buffer[-max_buffer:]
+
         # 2. Train
-        ds = CuarentaDataset(decisions, t_max=T_MAX)
+        # ds = CuarentaDataset(decisions, t_max=T_MAX)
+        # loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+        # Train on the full buffer, not just the current iteration
+        ds = CuarentaDataset(decisions_buffer, t_max=T_MAX)
         loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
 
         for epoch in range(EPOCHS_PER_ITER):
             loss, pl, vl = train_one_epoch(net, loader, opt, DEVICE)
-            wandb.log({
-                "iter": iteration,
-                "epoch": epoch,
-                "loss": loss,
-                "policy_loss": pl,
-                "value_loss": vl,
-            })
+            if not args.no_wandb:
+                wandb.log({"iter": iteration, "epoch": epoch,
+                           "loss": loss, "policy_loss": pl, "value_loss": vl})
             print(f"  epoch {epoch}: loss={loss:.4f} policy={pl:.4f} value={vl:.4f}")
 
-        # 3. Eval
-        if iteration % 2 == 0:
-            wr_rollout = eval_vs_rollout(net, n_games=30, seed_base=20000 + iteration * 100)
-            wandb.log({"iter": iteration, "winrate_vs_rollout": wr_rollout})
-            print(f"  eval vs rollout-ISMCTS: {wr_rollout:.2%}")
-            if wr_rollout > best_winrate:
-                best_winrate = wr_rollout
-                torch.save(net.state_dict(), os.path.join(CKPT_DIR, "best.pt"))
-        # else:
-        #     wr = eval_vs_random(net, n_games=20, seed_base=9000 + iteration * 100)
-        #     wandb.log({"iter": iteration, "winrate_vs_random": wr})
-        #     print(f"  eval vs random: {wr:.2%}")
-        #     if wr > best_winrate:
-        #         best_winrate = wr
-        #         torch.save(net.state_dict(), os.path.join(CKPT_DIR, "best.pt"))
-
-        # 4. Save
+        
+        # 3. Save
         ckpt_path = os.path.join(CKPT_DIR, f"cuarenta_iter{iteration:03d}.pt")
         torch.save(net.state_dict(), ckpt_path)
         print(f"  saved {ckpt_path}")
 
+        # 4. Eval vs heuristic every 2 iterations
+        if iteration % 2 == 0:
+            wr_h = eval_vs_heuristic_subprocess(ckpt_path, n_games=30, n_iter=100)
+            print(f"  eval vs heuristic: {wr_h:.2%}")
+            if not args.no_wandb:
+                wandb.log({"iter": iteration, "winrate_vs_heuristic": wr_h})
+        # 5. Eval vs rollout every 5 iterations
+        if iteration % 5 == 0:
+            wr = eval_vs_rollout(net, n_games=30, seed_base=20000 + iteration * 100)
+            print(f"  eval vs rollout-ISMCTS: {wr:.2%}")
+            if not args.no_wandb:
+                wandb.log({"iter": iteration, "winrate_vs_rollout": wr})
+
 
     print(f"\nTotal time: {timedelta(seconds=time.perf_counter() - start)}")
-    wandb.finish()
+    if not args.no_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

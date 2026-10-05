@@ -91,10 +91,12 @@ def _rollout_policy(state: CuarentaState, rng: random.Random, policy: str = "gre
             non_caida_allowed=state.scores[team] < MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS,
         )
         score = pts
-        if reasons == PointsReasons.CAIDA:
-            score += 5
-        elif reasons == PointsReasons.LIMPIA:
-            score += 5
+        if PointsReasons.CAIDA in reasons:
+            score += 1
+
+        if PointsReasons.LIMPIA in reasons:
+            score += 1
+
         if score > best_score:
             best_score = score
             best = [a]

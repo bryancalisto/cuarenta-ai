@@ -13,9 +13,7 @@ The agent is deterministic given a seed (uses its own random.Random).
 from __future__ import annotations
 
 import random
-from typing import List, Optional
-
-import numpy as np
+from typing import Optional
 
 from env import Action
 from captures import score_play

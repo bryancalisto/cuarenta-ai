@@ -27,6 +27,7 @@ from env import CuarentaEnv, TEAMS
 from history import HistoryTracker
 from network import CuarentaNet
 from network_ismcts_1 import NetworkISMCTS
+from network_ismcts_v4 import NetworkISMCTS as NetworkISMCTS_net
 from network_ismcts_v3 import NetworkISMCTS as NetworkISMCTS_v3
 from heuristic_agent import HeuristicAgent
 
@@ -54,7 +55,7 @@ def play_one(args) -> dict:
     tracker = HistoryTracker(env)
     
     if leaf_value == "net":
-        net_searcher = NetworkISMCTS_v3(
+        net_searcher = NetworkISMCTS_net(
             env, net, tracker,
             n_iter=n_iter, max_rollout_len=max_rollout_len,
             rng=random.Random(seed * 2 + 1),
@@ -62,7 +63,7 @@ def play_one(args) -> dict:
             leaf_value_mode="net",
         )
     elif leaf_value == "rollout":
-        net_searcher = NetworkISMCTS_v3(
+        net_searcher = NetworkISMCTS(
             env, net, tracker,
             n_iter=n_iter, max_rollout_len=max_rollout_len,
             rng=random.Random(seed * 2 + 1),

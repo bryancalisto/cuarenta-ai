@@ -137,7 +137,7 @@ class MaskedDiscrete(spaces.Discrete):
 
 
 class CuarentaEnv(gym.Env):
-    MAX_ACTIONS = 32
+    MAX_ACTIONS = 64
     ACTION_FEAT_DIM = 84
 
     def __init__(self, seed: Optional[int] = None):

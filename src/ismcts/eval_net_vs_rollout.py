@@ -14,7 +14,6 @@ from tqdm import tqdm
 from env import CuarentaEnv
 from ismcts import ISMCTS as RolloutISMCTS
 from network_ismcts_1 import NetworkISMCTS
-from network_ismcts_2 import NetworkISMCTS as NetworkISMCTSWithValueOnLeafs
 from network import CuarentaNet
 from history import HistoryTracker
 
@@ -45,7 +44,6 @@ def play_game(n_iter: int = 100, seed: int = 0, dirichlet_eps: float = 0.0) -> i
     tracker = HistoryTracker(env)
 
     searcher_net = NetworkISMCTS(
-    # searcher_net = NetworkISMCTSWithValueOnLeafs(
         env, net, tracker,
         n_iter=n_iter,
         rng=random.Random(seed * 2 + 1),
@@ -115,10 +113,5 @@ if __name__ == "__main__":
     NetworkISMCTS (untrained) wins: 41/100 = 41.0%
     RolloutISMCTS wins:              59/100 = 59.0%
     Execution time: 0:07:44.637141
-
-    For NetworkISMCTSWithValueOnLeafs:
-    NetworkISMCTS (untrained) wins: 9/100 = 9.0%
-    RolloutISMCTS wins:              91/100 = 91.0%
-    Execution time: 0:04:17.547937
     """
     
