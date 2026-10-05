@@ -10,9 +10,18 @@ from rules import clone_state, legal_actions_from_state, step_state
 from determinize import Determinizer
 
 
-
 class Node:
+    """
+    A search-tree node for the *network-free* ISMCTS.
+
+    N         visit count
+    W         sum of values, ALWAYS from the ROOT TEAM's point of view
+    children  Action -> Node
+    player    whose turn it is at this node
+    team      TEAMS[player], cached
+    """
     __slots__ = ("N", "W", "children", "player", "team")
+
     def __init__(self, player):
         self.N = 0
         self.W = 0.0
@@ -20,19 +29,21 @@ class Node:
         self.player = player
         self.team = TEAMS[player]
 
-    def is_fully_expanded(self) -> bool:
-        return len(self.untried) == 0
-
     def is_leaf(self) -> bool:
         return len(self.children) == 0
 
 
-# helpers 
+# helpers
 
 def _value_for_root_team(s: CuarentaState, root_team: int) -> float:
     """
-    Terminal value from root team's POV. +1 win, -1 loss, 0 otherwise.
-    You can tune this: e.g. use score difference for a smoother signal.
+    Terminal value from the root team's POV: +1 win, -1 loss.
+
+    If the state is NOT terminal we return 0.0, which literally means "this playout
+    did not decide anything". Be careful with that number: 0.0 is a *bootstrap* value
+    of "unknown", not an estimate that the game is a draw (Cuarenta has no draws).
+    See `ISMCTS._rollout` for why silently returning 0.0 for a truncated rollout is
+    one of the things that broke the net-guided version of this search.
     """
     if not s.done:
         return 0.0
@@ -46,10 +57,9 @@ def _rollout_policy(
     policy: str = "greedy",
 ) -> Action:
     """
-    In-tree / out-of-tree move policy for rollouts.
+    Out-of-tree move policy used inside rollouts.
     - "random": uniform over legal actions
-    - "greedy": pick the action with max immediate points
-                (fall back to random among ties)
+    - "greedy": pick the action with max immediate points, breaking ties randomly
     """
     legal = legal_actions_from_state(state)
     if policy == "random":
@@ -57,7 +67,7 @@ def _rollout_policy(
 
     # greedy
     from captures import score_play
-    from utils import PointsReasons
+    from utils import PointsReasons, has_reason
     from env import MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS
 
     team = TEAMS[state.current_player]
@@ -72,9 +82,10 @@ def _rollout_policy(
             non_caida_allowed=state.scores[team] < MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS,
         )
         score = pts
-        if reasons == PointsReasons.CAIDA:
+        # `reasons` is a list -> always test membership (see utils.has_reason).
+        if has_reason(reasons, PointsReasons.CAIDA):
             score += 5   # value caída highly
-        elif reasons == PointsReasons.LIMPIA:
+        elif has_reason(reasons, PointsReasons.LIMPIA):
             score += 5
         if score > best_score:
             best_score = score
@@ -88,7 +99,11 @@ def _rollout_policy(
 
 class ISMCTS:
     """
-    Information Set MCTS with uniform determinization and rollout-based values.
+    Plain Information Set MCTS: uniform determinization sampling, uniform priors,
+    and *greedy rollouts* for leaf values. No neural network anywhere.
+
+    This is kept as the classic baseline (and as an evaluation opponent for the
+    net-guided search). The net-guided version lives in network_ismcts_1.py.
 
     Usage:
         searcher = ISMCTS(env, n_iter=400, rollout_policy="greedy")
@@ -105,15 +120,21 @@ class ISMCTS:
         n_iter: int = 400,
         c_puct: float = 1.4,
         rollout_policy: str = "greedy",
-        max_rollout_len: int = 200,
+        max_rollout_len: int = 512,
         rng: Optional[random.Random] = None,
     ):
         self.env = env
         self.n_iter = n_iter
         self.c_puct = c_puct
         self.rollout_policy = rollout_policy
+        # 512 is comfortably longer than any real game (games run ~130-215 plies),
+        # so rollouts should reach a terminal state. An old default of 200 could
+        # truncate, and a truncated rollout used to be scored as 0.0.
         self.max_rollout_len = max_rollout_len
         self.rng = rng or random.Random()
+        # Diagnostics: how many rollouts hit the length cap instead of terminating.
+        self.truncated_rollouts = 0
+        self.total_rollouts = 0
 
     # public
 
@@ -128,11 +149,9 @@ class ISMCTS:
         root_team = TEAMS[root_player]
 
         # Sanity: the root player must be the one to move.
-        # (If you later allow searching at non-root nodes, relax this.)
         assert self.env.state.current_player == root_player
 
         legal = legal_actions_from_state(self.env.state)
-        # print(f"[search] legal has {len(legal)} actions, current_player={self.env.state.current_player}")
         root = Node(player=root_player)
 
         determinizer = Determinizer(self.env, root_player)
@@ -160,34 +179,22 @@ class ISMCTS:
         node = root
         path: List[Tuple[Node, Action]] = []
 
-        # SELECTION / EXPANSION
+        # SELECTION + EXPANSION
+        #
+        # Note on tree sharing across determinizations: children are keyed by Action,
+        # and an action that was legal in one sampled world may be illegal in the next
+        # (the mover may hold different cards). Such "phantom" children are kept in the
+        # tree (their stats are still useful at the information-set level) but they are
+        # never traversed in a world where the action is illegal: `legal_set` filters
+        # them out in `_uct_select`.
         while not state.done:
-            # if node.untried:
-            #     # Expand one untried action
-            #     idx = self.rng.randrange(len(node.untried))
-            #     action = node.untried.pop(idx)
-            #     next_state, _, done, _ = step_state(state, action, self.rng)
-            #     child = Node(
-            #         player=next_state.current_player,
-            #         untried=[] if done else legal_actions_from_state(next_state),
-            #     )
-            #     node.children[action] = child
-            #     path.append((node, action))
-            #     state = next_state
-            #     node = child
-            #     break
             legal = legal_actions_from_state(state)
             if not legal:
                 break
-
-            # Find children that are legal in THIS determinization
             legal_set = set(legal)
 
-            # Any child not legal here is a "phantom" from another determinization.
-            # We keep it in the tree (its stats are still useful at info-set level)
-            # but we don't traverse it in this simulation.
+            # Any action with no child yet in THIS determinization -> expand one.
             unexplored = [a for a in legal if a not in node.children]
-
             if unexplored:
                 action = unexplored[self.rng.randrange(len(unexplored))]
                 next_state, _, done, _ = step_state(state, action, self.rng)
@@ -209,18 +216,23 @@ class ISMCTS:
         value = self._rollout(state, root_team)
 
         # BACKUP
+        #
+        # `node.N` = number of simulations that passed through that node, so the
+        # backup only increments the CHILD of each edge. The usual `parent.N += 1`
+        # looks harmless but double counts every intermediate node (once as a child,
+        # once as a parent), which inflates its visit count and halves `W / N`
+        # because W is added only once per simulation. Measured before the fix:
+        # 300 simulations produced visit counts summing to ~595.
         for parent, action in path:
             child = parent.children[action]
             child.N += 1
-            # Value is from root team's POV, but each node's W is tracked
-            # relative to the root team regardless of who acted there, which
-            # is fine because we only ever use UCT at the root's team-agnostic
-            # level... actually no — see note below.
+            # W is stored in ROOT-TEAM POV for every node, whatever team acted there,
+            # so `_uct_select` must flip the sign when the node's mover is on the
+            # other team.
             child.W += value
-            parent.N += 1
+        root.N += 1
 
         return value
-
 
     def _uct_select(self, node: Node, legal_set, root_team) -> Tuple[Action, Node]:
         """Select child with highest UCT score. Explores unvisited children."""
@@ -234,25 +246,28 @@ class ISMCTS:
                 u = 1e17  # force exploration of unvisited children
             else:
                 mean = child.W / child.N
-                if node.team == root_team:
-                    node_utility = mean
-                else:
-                    node_utility = -mean
+                # Q from the point of view of whoever moves at this node
+                node_utility = mean if node.team == root_team else -mean
                 u = node_utility + self.c_puct * math.sqrt(log_n / child.N)
             if u > best_u:
                 best_u, best = u, (action, child)
-        
+
         if best is None:
-            # No legal children — this can happen if all stored children come from
-            # determinizations where the current player held different cards.
-            # Treat as a leaf: pick a random legal action not yet expanded.
-            # (Handled by the caller via `unexplored`; if we get here, fall back.)
+            # No legal children — can happen if every stored child comes from a
+            # determinization where the current player held different cards.
             raise RuntimeError("_uct_select: no legal children (should be unreachable)")
-    
+
         return best
 
     def _rollout(self, state: CuarentaState, root_team: int) -> float:
-        """Play out to terminal with the rollout policy."""
+        """
+        Play out to terminal with the rollout policy.
+
+        We keep a truncation counter because a truncated rollout is scored 0.0, which
+        is a *neutral* value. If most rollouts truncate, every leaf looks equally good
+        and the search has no signal at all — that was exactly what happened when the
+        net-guided search used max_rollout_len=80 on games of 130+ plies.
+        """
         s = clone_state(state)
         steps = 0
         while not s.done and steps < self.max_rollout_len:
@@ -262,5 +277,8 @@ class ISMCTS:
             action = _rollout_policy(s, self.rng, policy=self.rollout_policy)
             s, _, _, _ = step_state(s, action, self.rng)
             steps += 1
-        return _value_for_root_team(s, root_team)
 
+        self.total_rollouts += 1
+        if not s.done:
+            self.truncated_rollouts += 1
+        return _value_for_root_team(s, root_team)

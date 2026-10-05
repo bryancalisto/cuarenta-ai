@@ -1,45 +1,40 @@
 """
-Smoke tests for CuarentaNet. No training, no ISMCTS integration.
+Smoke tests for CuarentaNet: shapes, masking, gradients, and padding equivalence.
+No training, no ISMCTS integration.
+
 Run:  python test_network.py
 """
 import numpy as np
 import torch
 
-from network import CuarentaNet, OBS_FLAT_DIM
-from history import build_net_inputs
+from network import CuarentaNet
+from history import OBS_FLAT_DIM, ACT_FEAT_DIM
 from env import CuarentaEnv
 
 N_ACTIONS = CuarentaEnv.MAX_ACTIONS
 ACTION_FEAT_DIM = CuarentaEnv.ACTION_FEAT_DIM
 
+
 def test_shapes():
     net = CuarentaNet()
     B, T = 2, 7
-    obs   = torch.randn(B, T, OBS_FLAT_DIM)
-    act   = torch.zeros(B, T, N_ACTIONS)
-    # pretend an action was taken at every step except the last
-    for b in range(B):
-        for t in range(T - 1):
-            act[b, t, np.random.randint(N_ACTIONS)] = 1
-    am    = torch.ones(B, T, dtype=torch.bool)
-    am[:, -1] = False                     # last step: no action yet
+    obs = torch.randn(B, T, OBS_FLAT_DIM)
+    act = torch.rand(B, T, ACT_FEAT_DIM)
+    am = torch.ones(B, T, dtype=torch.bool)
+    am[:, -1] = False                     # last step: pending, no action yet
     feats = torch.rand(B, N_ACTIONS, ACTION_FEAT_DIM)
-    mask  = torch.zeros(B, N_ACTIONS, dtype=torch.bool)
-    # make 3 slots legal per batch item
+    mask = torch.zeros(B, N_ACTIONS, dtype=torch.bool)
     for b in range(B):
-        mask[b, :3] = True
+        mask[b, :3] = True                # 3 legal slots per batch item
 
-    logits, value, (h, c) = net(obs, act, am, feats, mask)
+    logits, value = net(obs, act, am, feats, mask)
 
     assert logits.shape == (B, N_ACTIONS), logits.shape
     assert value.shape == (B,), value.shape
-    assert h.shape == (net.lstm.num_layers, B, net.hidden), h.shape
-    assert c.shape == h.shape
 
-    # Illegal slots should be -1e9 (or very negative)
+    # Illegal slots are -1e9 (or very negative); legal slots are finite.
     for b in range(B):
         assert (logits[b, 3:] <= -1e8).all()
-        # Legal slots should be finite
         assert torch.isfinite(logits[b, :3]).all()
 
     # Value in [-1, 1]
@@ -52,17 +47,15 @@ def test_masking_is_respected_by_softmax():
     """Softmax over masked logits should assign zero probability to illegal slots."""
     net = CuarentaNet()
     B, T = 1, 3
-    obs   = torch.randn(B, T, OBS_FLAT_DIM)
-    act   = torch.zeros(B, T, N_ACTIONS)
-    am    = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
+    obs = torch.randn(B, T, OBS_FLAT_DIM)
+    act = torch.rand(B, T, ACT_FEAT_DIM)
+    am = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
     feats = torch.rand(B, N_ACTIONS, ACTION_FEAT_DIM)
-    mask  = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, [0, 5, 7]] = True
+    mask = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, [0, 5, 7]] = True
 
-    logits, _, _ = net(obs, act, am, feats, mask)
+    logits, _ = net(obs, act, am, feats, mask)
     probs = torch.softmax(logits[0], dim=-1)
 
-    assert probs.shape == (N_ACTIONS,)
-    # Only slots 0, 5, 7 should have nonzero prob
     nonzero = (probs > 1e-6).nonzero(as_tuple=True)[0].tolist()
     assert set(nonzero) == {0, 5, 7}, nonzero
     assert abs(probs.sum().item() - 1.0) < 1e-5
@@ -73,121 +66,102 @@ def test_gradients_flow():
     """A single backward pass should produce non-None grads on every param."""
     net = CuarentaNet()
     B, T = 4, 9
-    obs   = torch.randn(B, T, OBS_FLAT_DIM, requires_grad=False)
-    act   = torch.zeros(B, T, N_ACTIONS)
-    for b in range(B):
-        for t in range(T - 1):
-            act[b, t, np.random.randint(N_ACTIONS)] = 1
-    am    = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
+    obs = torch.randn(B, T, OBS_FLAT_DIM)
+    act = torch.rand(B, T, ACT_FEAT_DIM)
+    am = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
     feats = torch.rand(B, N_ACTIONS, ACTION_FEAT_DIM)
-    mask  = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, :5] = True
+    mask = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, :5] = True
+    lengths = torch.tensor([T, T - 1, 3, 1])
 
-    logits, value, _ = net(obs, act, am, feats, mask)
+    logits, value = net(obs, act, am, feats, mask, lengths=lengths)
 
-    # Fake targets for both heads
     policy_target = torch.zeros(B, N_ACTIONS)
-    policy_target[:, 2] = 1.0              # pretend slot 2 was the "correct" action
+    policy_target[:, 2] = 1.0
     value_target = torch.tensor([1.0, -1.0, 0.5, -0.5])
 
     logp = torch.log_softmax(logits, dim=-1)
     policy_loss = -(policy_target * logp).sum(-1).mean()
-    value_loss  = ((value - value_target) ** 2).mean()
+    value_loss = ((value - value_target) ** 2).mean()
     loss = policy_loss + value_loss
     loss.backward()
 
     missing = [n for n, p in net.named_parameters() if p.grad is None]
     assert not missing, f"params with no grad: {missing}"
 
-    # Sanity: grads are finite
     for n, p in net.named_parameters():
         assert torch.isfinite(p.grad).all(), f"non-finite grad in {n}"
 
     print(f"test_gradients_flow: OK  loss={loss.item():.4f}")
 
 
-def test_build_net_inputs_shapes():
-    """Ensure history.build_net_inputs produces the shapes the net wants."""
-    from env import CuarentaEnv
-    from history import HistoryTracker
+def test_lengths_mask_padding():
+    """
+    `lengths` must make the LSTM ignore left padding.
 
-    env = CuarentaEnv(seed=0)
-    env.reset(seed=0)
-    tracker = HistoryTracker(env)
+    Same real sequence, once alone and once behind 5 padding steps: the last-step
+    embedding (hence logits and value) must be identical. If this fails, the net is
+    reading zeros as "a real state where nothing exists", and short histories are
+    being contaminated — which is what the dataset produces for every decision in
+    the first few plies of a game.
+    """
+    torch.manual_seed(0)
+    net = CuarentaNet().eval()
 
-    import random
-    rng = random.Random(0)
-    for _ in range(10):
-        p = env.state.current_player
-        obs = env.observe(p)
-        legal = env.legal_actions()
-        a = rng.randrange(len(legal))
-        tracker.record(p, obs, a)
-        _, _, done, _, _ = env.step(a)
-        if done:
-            break
+    T_real = 6
+    obs = torch.randn(1, T_real, OBS_FLAT_DIM)
+    act = torch.rand(1, T_real, ACT_FEAT_DIM)
+    am = torch.ones(1, T_real, dtype=torch.bool); am[:, -1] = False
+    feats = torch.rand(1, N_ACTIONS, ACTION_FEAT_DIM)
+    mask = torch.zeros(1, N_ACTIONS, dtype=torch.bool); mask[:, :4] = True
 
-    p = env.state.current_player
-    obs_seq, act_seq, act_mask, mask_seq = tracker.sequence_for(p, max_len=32)
+    with torch.no_grad():
+        logits_a, value_a = net(obs, act, am, feats, mask,
+                                lengths=torch.tensor([T_real]))
 
-    # Current decision inputs
-    obs_now = env.observe(p)
-    feats_now = obs_now["action_features"]      # [32, 84]
-    mask_now = obs_now["action_mask"]           # [32]
+        P = 5
+        obs_p = torch.cat([torch.zeros(1, P, OBS_FLAT_DIM), obs], dim=1)
+        act_p = torch.cat([torch.zeros(1, P, ACT_FEAT_DIM), act], dim=1)
+        am_p = torch.cat([torch.zeros(1, P, dtype=torch.bool), am], dim=1)
+        logits_b, value_b = net(obs_p, act_p, am_p, feats, mask,
+                                lengths=torch.tensor([T_real]))
 
-    obs_t, act_t, am_t, feats_t, mask_t = build_net_inputs(
-        obs_seq, act_seq, act_mask, feats_now, mask_now
+    assert torch.allclose(logits_a, logits_b, atol=1e-5), (
+        f"padding changed the policy: {(logits_a - logits_b).abs().max().item()}"
     )
+    assert torch.allclose(value_a, value_b, atol=1e-5), (
+        f"padding changed the value: {value_a.item()} vs {value_b.item()}"
+    )
+    print("test_lengths_mask_padding: OK")
 
-    assert obs_t.shape   == (1, obs_seq.shape[0], OBS_FLAT_DIM), obs_t.shape
-    assert act_t.shape   == (1, act_seq.shape[0], N_ACTIONS), act_t.shape
-    assert am_t.shape    == (1, act_seq.shape[0]), am_t.shape
-    assert feats_t.shape == (1, N_ACTIONS, ACTION_FEAT_DIM), feats_t.shape
-    assert mask_t.shape  == (1, N_ACTIONS), mask_t.shape
 
-    net = CuarentaNet()
-    logits, value, _ = net(obs_t, act_t, am_t, feats_t, mask_t)
-    assert logits.shape == (1, N_ACTIONS)
-    assert value.shape == (1,)
+def test_last_obs_drives_value():
+    """Replacing the last observation must change the value (the LSTM must see it)."""
+    torch.manual_seed(0)
+    net = CuarentaNet().eval()
+    B, T = 1, 8
+    obs = torch.randn(B, T, OBS_FLAT_DIM)
+    act = torch.rand(B, T, ACT_FEAT_DIM)
+    am = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
+    feats = torch.rand(B, N_ACTIONS, ACTION_FEAT_DIM)
+    mask = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, :4] = True
 
-    # Legal slots in the CURRENT decision should be finite
-    legal_idx = mask_t[0].nonzero(as_tuple=True)[0].tolist()
-    assert torch.isfinite(logits[0, legal_idx]).all()
+    with torch.no_grad():
+        _, v_a = net(obs, act, am, feats, mask)
+        _, v_ctrl = net(obs, act, am, feats, mask)
+        assert (v_a - v_ctrl).abs().item() == 0.0, "deterministic forward failed"
 
-    print("test_build_net_inputs_shapes: OK")
+        obs2 = obs.clone(); obs2[0, -1, :] = 1.0
+        _, v_b = net(obs2, act, am, feats, mask)
+
+    diff = (v_a - v_b).abs().item()
+    assert diff > 1e-6, "LSTM not sensitive to the last (pending) observation"
+    print(f"test_last_obs_drives_value: OK (diff={diff:.3e})")
 
 
 if __name__ == "__main__":
     test_shapes()
     test_masking_is_respected_by_softmax()
     test_gradients_flow()
-    test_build_net_inputs_shapes()
-
-
-    # Check with inputs
-    net = CuarentaNet().eval()
-    B, T = 1, 8
-    obs   = torch.randn(B, T, OBS_FLAT_DIM)
-    act   = torch.zeros(B, T, N_ACTIONS)
-    am    = torch.ones(B, T, dtype=torch.bool); am[:, -1] = False
-    feats = torch.rand(B, N_ACTIONS, ACTION_FEAT_DIM)
-    mask  = torch.zeros(B, N_ACTIONS, dtype=torch.bool); mask[:, :4] = True
-
-    with torch.no_grad():
-        _, v_a, _ = net(obs, act, am, feats, mask)
-
-        # Control: identical inputs -> identical output
-        _, v_ctrl, _ = net(obs, act, am, feats, mask)
-        assert (v_a - v_ctrl).abs().item() == 0.0, "deterministic forward failed"
-
-        # Real perturbation: set the whole last obs to ones
-        obs2 = obs.clone(); obs2[0, -1, :] = 1.0
-        _, v_b, _ = net(obs2, act, am, feats, mask)
-
-        # This should be clearly different. Use a generous threshold; if a full
-        # obs replacement doesn't change the value, the LSTM isn't seeing it.
-        diff = (v_a - v_b).abs().item()
-        print(f"value diff: {diff:.6e}")
-        assert diff > 1e-6, "LSTM not sensitive to last obs"
-
-    
+    test_lengths_mask_padding()
+    test_last_obs_drives_value()
     print("\nAll network tests passed.")

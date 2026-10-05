@@ -5,7 +5,7 @@ import copy
 
 from card import Card, build_deck, shuffled_deck
 from captures import valid_captures, score_play
-from utils import PointsReasons
+from utils import PointsReasons, has_reason
 from env import (
     Action, CuarentaState,
     NUM_PLAYERS, HAND_SIZE, WIN_SCORE,
@@ -136,9 +136,9 @@ def step_state(
         ns.cards_captured[team].append(action.card)
         ns.last_placed = None
 
-        if reasons == PointsReasons.CAIDA:
+        if has_reason(reasons, PointsReasons.CAIDA):
             reward += 2
-        elif reasons == PointsReasons.LIMPIA:
+        elif has_reason(reasons, PointsReasons.LIMPIA):
             reward += 2
     else:
         ns.table.append(action.card)

@@ -1,14 +1,27 @@
 """
+Evaluate a trained CuarentaNet checkpoint in a head-to-head match.
 
-Evaluate a trained CuarentaNet checkpoint against the HeuristicAgent.
+The net plays team 0 (seats 0 and 2). Team 1 is either:
 
-The net plays team 0 (seats 0 and 2). The heuristic plays team 1 (seats 1, 3).
+  --opponent heuristic  (default) the HeuristicAgent: the reference opponent used
+                        throughout this project. NOTE it was fixed recently (it used
+                        to never play for a caída/limpia because of a `list == str`
+                        bug), so it is a *stronger* opponent than the one earlier
+                        checkpoints were measured against. Do not compare new
+                        win rates with old numbers.
+  --opponent raw        the same net with NO search: it plays the argmax of its own
+                        policy head. This is the AlphaZero sanity check — if
+                        "net + search" cannot beat "net + argmax policy", the search
+                        is adding noise rather than strength, and self-play training
+                        will degrade the policy instead of improving it.
 
-Uses multiprocessing so each game runs in its own process.
-Reports winrate, score stats, and game length.
+Both sides use identical search/network settings; only the opponent differs.
+Games run in worker processes, so all settings are passed explicitly (a spawned
+worker does not see this process's globals).
 
 Usage:
-    uv run eval_net_vs_heuristic.py checkpoints/cuarenta_iter012.pt 100
+    uv run eval_net_vs_heuristic.py checkpoints/best.pt 100 --n-iter 200
+    uv run eval_net_vs_heuristic.py checkpoints/best.pt 100 --opponent raw
 """
 
 from __future__ import annotations
@@ -18,93 +31,66 @@ import random
 import time
 from datetime import timedelta
 from multiprocessing import Pool
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 from tqdm import tqdm
 
-from env import CuarentaEnv, TEAMS
-from history import HistoryTracker
-from network import CuarentaNet
-from network_ismcts_1 import NetworkISMCTS
-from network_ismcts_v4 import NetworkISMCTS as NetworkISMCTS_net
-from network_ismcts_v3 import NetworkISMCTS as NetworkISMCTS_v3
-from heuristic_agent import HeuristicAgent
-
-
-# ---------------------------------------------------------------------------
-# Single game
-# ---------------------------------------------------------------------------
 
 def play_one(args) -> dict:
-    seed, ckpt_path, n_iter, max_rollout_len, leaf_value = args
+    seed, ckpt_path, cfg, opponent = args
 
     import torch
     torch.set_num_threads(1)
+
+    from env import CuarentaEnv, TEAMS
+    from heuristic_agent import HeuristicAgent
+    from history import HistoryTracker
+    from network import CuarentaNet
+    from network_ismcts_1 import NetworkISMCTS
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
 
     net = CuarentaNet()
-    state = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(state, dict) and "model_state_dict" in state:
-        state = state["model_state_dict"]
-    net.load_state_dict(state)
+    CuarentaNet.load_checkpoint(net, ckpt_path)   # clear error on old checkpoints
     net.eval()
 
     tracker = HistoryTracker(env)
-    
-    if leaf_value == "net":
-        net_searcher = NetworkISMCTS_net(
-            env, net, tracker,
-            n_iter=n_iter, max_rollout_len=max_rollout_len,
-            rng=random.Random(seed * 2 + 1),
-            dirichlet_eps=0.0, device="cpu",
-            leaf_value_mode="net",
-        )
-    elif leaf_value == "rollout":
-        net_searcher = NetworkISMCTS(
-            env, net, tracker,
-            n_iter=n_iter, max_rollout_len=max_rollout_len,
-            rng=random.Random(seed * 2 + 1),
-            dirichlet_eps=0.0, device="cpu",
-            leaf_value_mode="rollout",
-        )
-    else:  # "v1" for the original
-        from network_ismcts_1 import NetworkISMCTS as NetworkISMCTS_v1
-        net_searcher = NetworkISMCTS_v1(
-            env, net, tracker,
-            n_iter=n_iter, max_rollout_len=max_rollout_len,
-            rng=random.Random(seed * 2 + 1),
-            dirichlet_eps=0.0, device="cpu",
-        )
-    
+    searcher = NetworkISMCTS(
+        env, net, tracker,
+        n_iter=cfg["n_iter"],
+        max_history_len=cfg["max_history_len"],
+        leaf_value_mode=cfg["leaf_value_mode"],
+        max_rollout_len=cfg["max_rollout_len"],
+        rng=random.Random(seed * 2 + 1),
+        dirichlet_eps=0.0,        # no exploration noise at eval
+        device="cpu",
+    )
     heuristic = HeuristicAgent(seed=seed * 2 + 2)
 
     steps = 0
     while not env.state.done:
         p = env.state.current_player
         obs = env.observe(p)
+        legal = env.legal_actions()
 
-        if p in (0, 2):
-            # Net's turn
-            visits = net_searcher.search()
-            legal = env.legal_actions()
-            if sum(visits.values()) == 0:
-                a = random.randrange(len(legal))
-            else:
-                a = max(visits, key=visits.get)
-            action = legal[a]
+        if TEAMS[p] == 0:
+            # ---- our agent: search over visit counts ----
+            visits = searcher.search(root_player=p)
+            a = (max(visits, key=visits.get) if sum(visits.values()) > 0
+                 else random.randrange(len(legal)))
+        elif opponent == "heuristic":
+            a = legal.index(heuristic.act(env, p))
         else:
-            # Heuristic's turn
-            action = heuristic.act(env, p)
+            # ---- "raw" opponent: argmax of the net's policy head, no search ----
+            # `_eval_root` is exactly the network call the search uses for its root
+            # priors, so this is the same policy minus the lookahead.
+            priors, _value = searcher._eval_root(p, legal)
+            a = int(np.argmax(priors))
 
-        # Record into tracker with the slot index of the chosen action
-        legal_now = env.legal_actions()
-        slot = legal_now.index(action)
-        tracker.record(p, obs, slot)
-
-        env.step(slot)
+        tracker.record(p, obs, a)
+        env.step(a)
         steps += 1
 
     return {
@@ -125,20 +111,31 @@ def worker(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint", type=str, help="Path to CuarentaNet .pt file")
+    parser.add_argument("checkpoint", type=str, help="Path to a CuarentaNet .pt file")
     parser.add_argument("n_games", type=int, help="Number of games to play")
-    parser.add_argument("--n-iter", type=int, default=100,
-                        help="ISMCTS sims per move for the net (default: 100)")
-    parser.add_argument("--max-rollout-len", type=int, default=200,
-                        help="Rollout length at leaves (default: 200)")
+    parser.add_argument("--n-iter", type=int, default=200,
+                        help="ISMCTS simulations per move (default: 200, same as training)")
+    parser.add_argument("--max-rollout-len", type=int, default=512,
+                        help="Only used with --leaf-value rollout")
+    parser.add_argument("--max-history-len", type=int, default=32)
+    parser.add_argument("--leaf-value", type=str, default="net",
+                        choices=["net", "rollout"],
+                        help="How leaf values are computed (default: net value head)")
+    parser.add_argument("--opponent", type=str, default="heuristic",
+                        choices=["heuristic", "raw"],
+                        help="heuristic = HeuristicAgent, raw = same net without search")
     parser.add_argument("--seed-base", type=int, default=50000)
-    parser.add_argument("--leaf-value", type=str, default="v1") # v1 | net | rollout
     args = parser.parse_args()
 
-    task_args = [
-        (args.seed_base + i, args.checkpoint, args.n_iter, args.max_rollout_len, args.leaf_value)
-        for i in range(args.n_games)
-    ]
+    cfg = {
+        "n_iter": args.n_iter,
+        "max_history_len": args.max_history_len,
+        "leaf_value_mode": args.leaf_value,
+        "max_rollout_len": args.max_rollout_len,
+    }
+
+    task_args = [(args.seed_base + i, args.checkpoint, cfg, args.opponent)
+                 for i in range(args.n_games)]
 
     start = time.perf_counter()
     with Pool() as pool:
@@ -155,13 +152,19 @@ def main():
     score_t1 = np.mean([r["score_team1"] for r in results])
     steps_avg = np.mean([r["steps"] for r in results])
 
+    # Standard error of a win rate: sqrt(p(1-p)/n). Useful because 30 games gives
+    # roughly ±9%, which is why single evaluations looked so noisy.
+    p = wins_t0 / max(args.n_games, 1)
+    stderr = (p * (1 - p) / max(args.n_games, 1)) ** 0.5
+
     print()
     print("=" * 60)
     print(f"Checkpoint: {args.checkpoint}")
-    print(f"Games: {args.n_games}   n_iter: {args.n_iter}   max_rollout_len: {args.max_rollout_len}")
-    print(f"Net (team 0) wins:       {wins_t0}/{args.n_games} = {wins_t0/args.n_games:.1%}")
-    print(f"Heuristic (team 1) wins: {wins_t1}/{args.n_games} = {wins_t1/args.n_games:.1%}")
-    print(f"Avg score: net {score_t0:.2f} - heuristic {score_t1:.2f}")
+    print(f"Games: {args.n_games}   n_iter: {args.n_iter}   "
+          f"leaf_value: {args.leaf_value}   opponent: {args.opponent}")
+    print(f"Net (team 0) wins:       {wins_t0}/{args.n_games} = {p:.1%} (±{stderr:.1%} se)")
+    print(f"Opponent (team 1) wins:  {wins_t1}/{args.n_games} = {wins_t1/args.n_games:.1%}")
+    print(f"Avg score: net {score_t0:.2f} - opponent {score_t1:.2f}")
     print(f"Avg game length: {steps_avg:.1f} plays")
     print(f"Time: {timedelta(seconds=elapsed)}")
     print("=" * 60)
@@ -169,31 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    """
-    # 100 games, default search settings
-    uv run src/ismcts/eval_net_vs_heuristic.py checkpoints/cuarenta_iter012.pt 100
-
-    # Faster eval with fewer sims
-    uv run src/ismcts/eval_net_vs_heuristic.py checkpoints/cuarenta_iter012.pt 100 --n-iter 50
-
-
-============================================================
-Checkpoint: checkpoints/cuarenta_iter012.pt
-Games: 100   n_iter: 50   max_rollout_len: 200
-Net (team 0) wins:       38/100 = 38.0%
-Heuristic (team 1) wins: 62/100 = 62.0%
-Avg score: net 27.74 - heuristic 36.42
-Avg game length: 134.6 plays
-Time: 0:01:45.012455
-    
-    ============================================================
-Checkpoint: checkpoints/cuarenta_iter012.pt
-Games: 100   n_iter: 200   max_rollout_len: 200
-Net (team 0) wins:       48/100 = 48.0%
-Heuristic (team 1) wins: 52/100 = 52.0%
-Avg score: net 29.68 - heuristic 33.26
-Avg game length: 131.7 plays
-Time: 0:06:55.472011
-    """
-    

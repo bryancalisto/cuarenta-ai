@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
 from captures import valid_captures, score_play
-from utils import PointsReasons
+from utils import PointsReasons, has_reason
 
 NUM_PLAYERS = 4
 HAND_SIZE = 5
@@ -112,6 +112,99 @@ class CuarentaState:
         return TEAMS[player]
 
 
+# ---------------------------------------------------------------------------
+# Action feature encoding (single source of truth)
+# ---------------------------------------------------------------------------
+#
+# ACTION_FEAT_DIM = 84 layout:
+#   [0  : 40]  played card one-hot
+#   [40 : 80]  captured cards one-hot
+#   [80]       is_capture
+#   [81]       is_caida   (worth 2 points)
+#   [82]       is_limpia  (worth 2 points)
+#   [83]       unused (reserved)
+#
+# These features are (a) the input the policy head scores each candidate action
+# with, and (b) the per-step encoding of the action history. Both branches must
+# agree, and the ISMCTS must be able to build them for a *sampled* state, so this
+# lives outside the env class.
+def action_features(action: Action, state: CuarentaState) -> np.ndarray:
+    f = np.zeros(CuarentaEnv.ACTION_FEAT_DIM, dtype=np.float32)
+
+    # played card
+    f[action.card.index] = 1.0
+
+    # captured cards + is_capture
+    if action.capture is not None:
+        for c in action.capture:
+            f[40 + c.index] = 1.0
+        f[80] = 1.0
+
+    # caída / limpia flags
+    #
+    # `score_play` returns reasons as a LIST, so membership must be tested with
+    # `has_reason` (or `in`). Comparing that list against a string with `==` is
+    # always False, which used to leave both features permanently at 0.0: the
+    # network could not tell a 2-point caída from a 0-point capture, and the
+    # current `last_placed` card was nowhere else in its input.
+    _, reasons = score_play(
+        played=action.card,
+        capture_set=action.capture,
+        table=state.table,
+        last_placed=state.last_placed,
+        non_caida_allowed=state.scores[TEAMS[state.current_player]]
+                        < MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS,
+    )
+    f[81] = 1.0 if has_reason(reasons, PointsReasons.CAIDA) else 0.0
+    f[82] = 1.0 if has_reason(reasons, PointsReasons.LIMPIA) else 0.0
+
+    return f
+
+
+def action_features_matrix(legal: List["Action"], state: CuarentaState):
+    """
+    Build the [MAX_ACTIONS, ACTION_FEAT_DIM] feature block and [MAX_ACTIONS] bool
+    mask for a list of legal actions (packed into the first len(legal) slots).
+    """
+    feats = np.zeros((CuarentaEnv.MAX_ACTIONS, CuarentaEnv.ACTION_FEAT_DIM), dtype=np.float32)
+    mask = np.zeros((CuarentaEnv.MAX_ACTIONS,), dtype=bool)
+    for i, a in enumerate(legal):
+        feats[i] = action_features(a, state)
+        mask[i] = True
+    return feats, mask
+
+
+def flat_obs_for(player: int, state: CuarentaState) -> np.ndarray:
+    """
+    Flat (208-dim) observation for `player` built directly from a state, using the
+    exact key order of history.flatten_obs. Needed by the search, which must build
+    observations for *sampled* determinizations (env.observe only knows the real
+    state). Only `player`'s own hand is included, so no hidden information leaks.
+    """
+    from history import flatten_obs
+
+    def bitvec(cards) -> np.ndarray:
+        vec = np.zeros(40, dtype=np.float32)
+        for c in cards:
+            vec[c.index] = 1.0
+        return vec
+
+    my_team = TEAMS[player]
+    opp_team = 1 - my_team
+    return flatten_obs({
+        "my_hand":           bitvec(state.hands[player]),
+        "table":             bitvec(state.table),
+        "my_team_captures":  bitvec(state.cards_captured[my_team]),
+        "opp_team_captures": bitvec(state.cards_captured[opp_team]),
+        "last_placed":       bitvec([state.last_placed] if state.last_placed else []),
+        "my_team_score":     np.array([state.scores[my_team]], dtype=np.float32),
+        "opp_team_score":    np.array([state.scores[opp_team]], dtype=np.float32),
+        "current_player":    np.array([state.current_player], dtype=np.float32),
+        "deck_remaining":    np.array([len(state.deck)], dtype=np.float32),
+        "plays_this_deal":   np.array(state.plays_this_deal, dtype=np.float32),
+    })
+
+
 # Gymnasium action space helper. Implemented this wrapper to avoid 'Environment has issues: Illegal action index 18; 5 legal actions.' error
 class MaskedDiscrete(spaces.Discrete):
     """A Discrete space whose sample() respects a per-state mask."""
@@ -173,30 +266,9 @@ class CuarentaEnv(gym.Env):
         })
     
     def _action_features(self, action: Action) -> np.ndarray:
-        f = np.zeros(self.ACTION_FEAT_DIM, dtype=np.float32)
-
-        # played card
-        f[action.card.index] = 1.0
-
-        # captured cards + is_capture
-        if action.capture is not None:
-            for c in action.capture:
-                f[40 + c.index] = 1.0
-            f[80] = 1.0
-        
-        # caída / limpia flags
-        _, reasons = score_play(
-            played=action.card,
-            capture_set=action.capture,
-            table=self.state.table,
-            last_placed=self.state.last_placed,
-            non_caida_allowed=self.state.scores[TEAMS[self.state.current_player]]
-                            < MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS,
-        )
-        f[81] = 1.0 if reasons == PointsReasons.CAIDA else 0.0
-        f[82] = 1.0 if reasons == PointsReasons.LIMPIA else 0.0
-            
-        return f
+        # Single source of truth lives at module level (see `action_features`), so
+        # the search can build identical features for sampled determinizations.
+        return action_features(action, self.state)
 
     def action_mask(self) -> np.ndarray:
         if self.state is None:
@@ -316,9 +388,11 @@ class CuarentaEnv(gym.Env):
             s.cards_captured[team].append(action.card)
             s.last_placed = None   # table was modified; caída chain resets
 
-            if reasons == PointsReasons.CAIDA:
+            # Bonus reward for a caída / limpia. (`reasons` is a list — see
+            # utils.has_reason for why `==` here was a bug.)
+            if has_reason(reasons, PointsReasons.CAIDA):
                 reward += 2 
-            elif reasons == PointsReasons.LIMPIA:
+            elif has_reason(reasons, PointsReasons.LIMPIA):
                 reward += 2
         else:
             # Place card on table
@@ -496,6 +570,12 @@ class CuarentaEnv(gym.Env):
         print(string)
         return string
 
+
+
+# Module-level aliases for the env's fixed sizes, so helpers outside the class
+# (and the history encoder / network) can import them without building an env.
+MAX_ACTIONS = CuarentaEnv.MAX_ACTIONS          # 64 policy-head slots
+ACTION_FEAT_DIM = CuarentaEnv.ACTION_FEAT_DIM  # 84 features per candidate action
 
 
 # Register the environment with Gymnasium

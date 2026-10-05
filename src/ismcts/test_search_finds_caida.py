@@ -18,12 +18,22 @@ for step in range(200):
         # Check whether any legal action gives +2 (caida/limpia)
         legal = env.legal_actions()
         from captures import score_play
-        from utils import PointsReasons
+        from utils import PointsReasons, has_reason
         has_bonus = any(
-            score_play(
-                played=a.card, capture_set=a.capture, table=env.state.table,
-                last_placed=env.state.last_placed, non_caida_allowed=True,
-            )[1] in (PointsReasons.CAIDA, PointsReasons.LIMPIA)
+            has_reason(
+                score_play(
+                    played=a.card, capture_set=a.capture, table=env.state.table,
+                    last_placed=env.state.last_placed, non_caida_allowed=True,
+                )[1],
+                PointsReasons.CAIDA,
+            )
+            or has_reason(
+                score_play(
+                    played=a.card, capture_set=a.capture, table=env.state.table,
+                    last_placed=env.state.last_placed, non_caida_allowed=True,
+                )[1],
+                PointsReasons.LIMPIA,
+            )
             for a in legal
         )
         if has_bonus:
