@@ -12,7 +12,7 @@ class Determinizer:
     """
     Samples a full CuarentaState consistent with the root player's observations.
 
-    Given the root player's info set — their hand, the table, both teams' captures, deck size, per-player turn counts — produce a fully-specified CuarentaState that is consistent with all of that. That means filling in:
+    Given the root player's info set - their hand, the table, both teams' captures, deck size, per-player turn counts - produce a fully-specified CuarentaState that is consistent with all of that. That means filling in:
     - Each opponent's hand (5 cards minus their plays)
     - Root player's teammate's hand (5 cards minus their plays)
     - The deck (whatever's left)
@@ -41,7 +41,7 @@ class Determinizer:
         # Everything else is unknown: lives in other hands or the deck.
         self.unknown_cards: List[Card] = [c for c in all_cards if c not in known]
 
-        # Sizes we must fill. Note: for the ROOT player's team, their teammate
+        # Sizes we must fill. Note: for the root player's team, their teammate
         # is still an opponent of the root for info-set purposes.
         self.other_hand_sizes: Dict[int, int] = {}
         for p in range(NUM_PLAYERS):
@@ -105,49 +105,3 @@ class Determinizer:
             done=self.s.done,
             winner=self.s.winner,
         )
-
-
-
-
-debug = False
-
-if debug:
-    def check_determinization(env, root, rng):
-        det = Determinizer(env, root)
-        for _ in range(50):
-            sampled = det.sample(rng)
-
-            # Card conservation
-            all_seen = []
-            for p in range(NUM_PLAYERS):
-                all_seen += sampled.hands[p]
-            all_seen += sampled.table
-            all_seen += sampled.cards_captured[0]
-            all_seen += sampled.cards_captured[1]
-            all_seen += sampled.deck
-            assert len(all_seen) == 40, len(all_seen)
-            assert len(set(all_seen)) == 40, "duplicate card in determinization"
-
-            # Size correctness
-            for p in range(NUM_PLAYERS):
-                if p == root:
-                    assert len(sampled.hands[p]) == len(env.state.hands[p])
-                else:
-                    expected = HAND_SIZE - env.state.plays_this_deal[p]
-                    assert len(sampled.hands[p]) == expected
-            assert len(sampled.deck) == len(env.state.deck)
-
-            # Root's own hand is untouched
-            assert set(sampled.hands[root]) == set(env.state.hands[root])
-
-    env = CuarentaEnv(seed=1)
-    env.reset()
-    rng = random.Random(123)
-    for _ in range(30):
-        root = env.state.current_player
-        check_determinization(env, root, rng)
-        a = int(np.flatnonzero(env.observe(root)["action_mask"])[0])
-        _, _, done, _, _ = env.step(a)
-        if done:
-            break
-    print("Determinizer invariants: 👍")
