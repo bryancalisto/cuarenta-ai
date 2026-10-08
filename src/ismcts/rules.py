@@ -8,7 +8,7 @@ from captures import valid_captures, score_play
 from utils import PointsReasons, has_reason
 from env import (
     Action, CuarentaState,
-    NUM_PLAYERS, HAND_SIZE, WIN_SCORE,
+    NUM_PLAYERS, HAND_SIZE, WIN_BONUS, WIN_SCORE,
     MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS,
     TEAMS,
 )
@@ -135,10 +135,13 @@ def step_state(
             ns.cards_captured[team].append(card)
         ns.cards_captured[team].append(action.card)
         ns.last_placed = None
+        # +1 per captured card, the dense term (capturing builds the carton and denies
+        # the opponent; see the REWARD note in env.py).
+        reward += len(action.capture)
 
         if has_reason(reasons, PointsReasons.CAIDA):
             reward += 2
-        elif has_reason(reasons, PointsReasons.LIMPIA):
+        if has_reason(reasons, PointsReasons.LIMPIA):
             reward += 2
     else:
         ns.table.append(action.card)
@@ -149,7 +152,7 @@ def step_state(
     if ns.scores[team] >= WIN_SCORE:
         ns.done = True
         ns.winner = team
-        reward += 50
+        reward += WIN_BONUS
         return ns, reward, True, player
 
     ns.current_player = (player + 1) % NUM_PLAYERS
@@ -166,6 +169,8 @@ def step_state(
                 ns.scores[t] = min(
                     ns.scores[t] + carton, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS
                 )
+                if t == team:
+                    reward += carton      # the acting team's carton, as env.py pays it
             _new_round(ns, rng)
 
     return ns, reward, False, player

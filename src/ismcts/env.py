@@ -14,6 +14,11 @@ from utils import PointsReasons, has_reason
 NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
+
+# Reward for winning the game. This is the one sparse term in an otherwise dense reward
+# (+1 per captured card, +2 caída, +2 limpia, + cartón). See the REWARD note in the module
+# docstring for why it is this size; it is a single knob on purpose.
+WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
 TEAM_PLAYERS = {0: [0, 2], 1: [1, 3]}
@@ -387,12 +392,13 @@ class CuarentaEnv(gym.Env):
             # add the thrown card to cards captured
             s.cards_captured[team].append(action.card)
             s.last_placed = None   # table was modified; caída chain resets
+            reward += len(action.capture)
 
             # Bonus reward for a caída / limpia. (`reasons` is a list — see
             # utils.has_reason for why `==` here was a bug.)
             if has_reason(reasons, PointsReasons.CAIDA):
                 reward += 2 
-            elif has_reason(reasons, PointsReasons.LIMPIA):
+            if has_reason(reasons, PointsReasons.LIMPIA):
                 reward += 2
         else:
             # Place card on table
@@ -405,7 +411,7 @@ class CuarentaEnv(gym.Env):
         if s.scores[team] >= WIN_SCORE:
             s.done = True
             s.winner = team
-            reward += 50   # terminal bonus
+            reward += WIN_BONUS   # terminal bonus
             info["winner"] = team
             self._legal_cache = None
             return self.observe(player), reward, True, truncated, info
@@ -435,6 +441,7 @@ class CuarentaEnv(gym.Env):
 
                 current_team = TEAMS[player]
                 info["carton_points"] = team_carton[current_team]
+                reward += team_carton[current_team]
 
                 self._new_round()
 

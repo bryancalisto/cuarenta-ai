@@ -5,13 +5,25 @@ Training loop for the Cuarenta net (expert iteration / AlphaZero style).
       1. Generate self-play games with the current net (search = this net itself).
       2. Mix in a few imitation games from the heuristic teacher (value calibration).
       3. Train the net to match (a) the search's visit distribution and (b) outcomes.
-      4. Evaluate: vs the reference checkpoint (gating), vs the heuristic, and two
-         health metrics that predict failure BEFORE the win rate moves.
+      4. Evaluate: vs the reference checkpoint (gating), vs the heuristic, vs the rest
+         of the evaluation LEAGUE (initial / prev_checkpoint / random — the same
+         members the PPO pipeline logs), plus two health metrics that predict failure
+         BEFORE the win rate moves.
       5. Save a checkpoint, and update `best.pt` when the reference match is won.
 
 This is not PPO. The policy loss is cross-entropy against the visit distribution
 (flattened a little, see dataset.target_temperature) and the value loss is MSE
 against the game outcome.
+
+SHARED METRIC CONTRACT WITH THE OTHER PIPELINES
+-----------------------------------------------
+Every match is logged as `eval/<member><suffix>` with the member names PPO also uses
+(`reference`, `heuristic`, `initial`, `prev_checkpoint`, `random`) and the suffixes
+`_stderr`, `_score_for/_against`, `_return_for/_against`, `_caidas_for/_against`,
+`_limpias_for/_against`, `_plies`, `_n_games` (see `src/ppo/eval_harness.py:
+match_metrics`). the same names PPO and ReBeL log (the old `vs_*` aliases were removed)
+`reference` / `heuristic` with identical values. The x-axis metric is `iteration`,
+the same name PPO and ReBeL log (`iter` is still logged with the same value).
 
 WHY THERE ARE FOUR NUMBERS ON THE EVAL LINE
 -------------------------------------------
@@ -97,6 +109,9 @@ REPLAY_ITERS = 5              # keep this many iterations of data in the buffer
 EVAL_GAMES = 60               # games per match (60 => ~±6% standard error)
 EVAL_RAW_GAMES = 40           # games for the teacher-edge probe
 EVAL_EVERY = 2                # run evaluations every N iterations
+LEAGUE_GAMES = 30             # games per EXTRA league member (initial,
+                              # prev_checkpoint, random): fewer than EVAL_GAMES
+                              # because only `reference` gates acceptance
 ACCEPT_THRESHOLD = 0.55       # beat the reference by this much to be accepted
 LEAF_VALUE_MODE = "net"       # "net" (default) | "rollout"
 MAX_ROLLOUT_LEN = 512         # only used by leaf_value_mode="rollout"
@@ -499,6 +514,92 @@ def _eval_heuristic_worker(args):
     return _play_match(env, actor, [tracker])
 
 
+def _eval_random_worker(args):
+    """
+    One game: net WITH search (team 0) vs a UNIFORM-RANDOM legal move (team 1).
+
+    The sanity floor of the evaluation league (the same member PPO logs as `random`).
+    Nothing should ever lose to it: if this win rate is not high, a bug in the eval
+    plumbing — not the net — is the first suspect.
+    """
+    seed, state_dict, cfg = args
+    import torch as _torch
+    _torch.set_num_threads(1)
+
+    from env import CuarentaEnv, TEAMS
+    from history import HistoryTracker
+
+    env = CuarentaEnv(seed=seed)
+    env.reset(seed=seed)
+    net = _load_net(state_dict)
+    tracker = HistoryTracker(env)
+    searcher = _make_search(env, net, tracker, seed, **cfg)
+    # Seeded per game, so a given seed always produces the same opponent moves.
+    rng = random.Random(seed * 2 + 3)
+
+    def actor(p, obs, legal):
+        if TEAMS[p] == 0:
+            return _pick_visit_action(searcher, p, legal)
+        return rng.randrange(len(legal))
+
+    return _play_match(env, actor, [tracker])
+
+
+def league_matches(args, cur_state, initial_state, prev_checkpoint_state, cfg):
+    """
+    The REST of the evaluation league: everything except the two gate matches.
+
+    These three members are the ones PPO also logs, under the same names and with the
+    same suffixes, so runs from both pipelines can be compared on one wandb project:
+
+      * `initial`         — the frozen weights this run STARTED from: "did training
+                            actually improve on what we began with?". Taken from the
+                            in-memory copy `main` makes at startup, so no checkpoint
+                            file is read again.
+      * `prev_checkpoint` — the snapshot written by the PREVIOUS save event (i.e. the
+                            weights from before this iteration's training), which is
+                            what PPO passes as `prev_checkpoint`. `None` on the first
+                            evaluation of a run, and then the member is SKIPPED
+                            entirely instead of being logged with stale numbers.
+      * `random`          — uniform-random legal moves.
+
+    Each plays `--league-games` games (default 30) instead of `--eval-games`, because
+    only `reference` drives the acceptance gate and needs the tighter standard error.
+    `--no-league` drops `initial` and `prev_checkpoint`; `random` is ALWAYS
+    evaluated, because it is the sanity floor every pipeline reports and it needs no
+    weights at all.
+
+    Returns a list of `(name, worker, payloads)`; every payload is picklable, so the
+    caller can hand it straight to a worker pool.
+    """
+    n = args.league_games if args.league_games > 0 else LEAGUE_GAMES
+    if args.no_league:
+        # `random` is not a checkpoint member: it is the floor every pipeline reports, so
+        # it survives --no-league and keeps `eval/random` present in every run. Returned in
+        # the caller's (name, worker, payloads) shape, which is what `out` holds below.
+        return [("random", _eval_random_worker,
+                 [(83000 + i, cur_state, cfg) for i in range(n)])]
+    specs = []
+    if initial_state is not None:
+        specs.append(("initial", _eval_reference_worker, initial_state, 81000))
+    if prev_checkpoint_state is not None:
+        specs.append(("prev_checkpoint", _eval_reference_worker,
+                      prev_checkpoint_state, 82000))
+    # Always available: it needs no weights at all.
+    specs.append(("random", _eval_random_worker, None, 83000))
+
+    out = []
+    for name, worker, state, seed_base in specs:
+        # `state is None` means the opponent is not a checkpoint at all (random), so the
+        # worker takes a 3-tuple payload instead of a 4-tuple.
+        if state is None:
+            payloads = [(seed_base + i, cur_state, cfg) for i in range(n)]
+        else:
+            payloads = [(seed_base + i, cur_state, state, cfg) for i in range(n)]
+        out.append((name, worker, payloads))
+    return out
+
+
 def _eval_raw_worker(args):
     """
     One game: net WITH search (team 0) vs the SAME net's raw policy (team 1).
@@ -577,6 +678,13 @@ def _sd(net):
     return {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
 
 
+# Canonical league name -> the legacy name this trainer used to log as well. The
+# aliases are gone (see `_with_aliases`); the mapping is kept only so the call sites
+# still read as "canonical, and no legacy duplicate".
+# point at the SAME numbers; see `_with_aliases`.
+LEGACY_ALIASES: dict = {}
+
+
 def match_metrics(results: list[dict], prefix: str) -> dict:
     """
     Average a batch of match summaries into flat scalars.
@@ -585,6 +693,20 @@ def match_metrics(results: list[dict], prefix: str) -> dict:
     `_for` = the net's team, `_against` = the opponent. Logged for every matchup, so
     you can watch the RETURNS (summed env rewards), the actual game SCORES, the game
     length and the caída/limpia counts — not just who won.
+
+    CONVENTION WARNING (differs from PPO): the net under test always plays TEAM 0 and
+    the opponent always plays TEAM 1, so any first-mover/seat edge is baked into these
+    numbers (which is exactly why gating is calibrated against a mirror baseline, see
+    `main`). `src/ppo/eval_harness.py` instead ROTATES the policy over the four seats
+    and reports the same key names. The names therefore compare, but a mirror match is
+    ~50% in expectation for PPO and the measured seat edge here for ISMCTS. This
+    convention is deliberately unchanged: changing it would silently change what the
+    existing `vs_*` curves mean.
+
+    `_stderr` (binomial standard error of the win rate) and `_n_games` are part of the
+    contract with the PPO pipeline — a win rate without its `n` cannot be compared
+    across runs, because a 30-game league match and a 60-game gate match have very
+    different error bars.
     """
     if not results:
         return {}
@@ -593,10 +715,14 @@ def match_metrics(results: list[dict], prefix: str) -> dict:
     def m(key):
         return float(np.mean([r[key] for r in results]))
 
+    win_rate = sum(1 for r in results if r["winner"] == 0) / n
+    stderr = float(np.sqrt(max(win_rate * (1.0 - win_rate), 1e-9) / n))
+
     # Keys are unprefixed here (the gating code and the printout use them directly);
     # run_evaluation adds the "eval/" prefix when logging to wandb.
     return {
-        prefix: sum(1 for r in results if r["winner"] == 0) / n,
+        prefix: win_rate,
+        f"{prefix}_stderr": stderr,
         f"{prefix}_score_for": m("score0"),
         f"{prefix}_score_against": m("score1"),
         f"{prefix}_plies": m("plies"),
@@ -606,29 +732,66 @@ def match_metrics(results: list[dict], prefix: str) -> dict:
         f"{prefix}_caidas_against": m("caidas1"),
         f"{prefix}_limpias_for": m("limpias0"),
         f"{prefix}_limpias_against": m("limpias1"),
+        f"{prefix}_n_games": float(n),
     }
 
 
-def run_evaluation(net, reference_state, args, cfg, iteration):
-    """All the evaluations for one iteration. Returns a dict of flat metrics."""
+def _with_aliases(metrics: dict, canonical: str, legacy: str | None) -> dict:
+    """
+    Kept for its call sites; the legacy `vs_*` aliases were REMOVED.
+
+    The canonical member names (`reference`, `heuristic`, `initial`, `prev_checkpoint`,
+    `random`) are the ones every pipeline logs (see `src/ppo/eval_harness.py:
+    match_metrics` and `src/rebel/eval_rebel.py`), so runs overlay on one wandb project.
+    The `vs_reference` / `vs_heuristic` duplicates this trainer used to emit alongside
+    them were dropped: with the canonical names in place they were only noise in the
+    console and a second name for every series. Nothing reads them any more — the
+    printed summary and the acceptance gate use the canonical keys.
+    """
+    return metrics
+
+
+def run_evaluation(net, reference_state, args, cfg, iteration,
+                   initial_state=None, prev_checkpoint_state=None):
+    """
+    All the evaluations for one iteration. Returns a dict of flat metrics.
+
+    `initial_state` / `prev_checkpoint_state` are the extra league members (see
+    `league_matches`); both are optional so existing callers keep working, and a
+    missing one simply removes that member from the league.
+    """
     cur = _sd(net)
     metrics = {}
 
-    # 1. Gating match vs the reference checkpoint (primary criterion)
+    # 1. Gating match vs the reference checkpoint (primary criterion). Logged under
+    # the canonical name `reference` — the name PPO uses — plus the legacy
+    # canonical `reference` name the gating code and the dashboards read.
     results = _pooled(
         _eval_reference_worker,
         [(50000 + i, cur, reference_state, cfg) for i in range(args.eval_games)],
         "eval vs reference",
     )
-    metrics.update(match_metrics(results, "vs_reference"))
+    metrics.update(_with_aliases(match_metrics(results, "reference"),
+                                 "reference", None))
 
-    # 2. External reference: the heuristic agent
+    # 2. External reference: the heuristic agent (canonical `heuristic`)
     results = _pooled(
         _eval_heuristic_worker,
         [(50000 + i, cur, cfg) for i in range(args.eval_games)],
         "eval vs heuristic",
     )
-    metrics.update(match_metrics(results, "vs_heuristic"))
+    metrics.update(_with_aliases(match_metrics(results, "heuristic"),
+                                 "heuristic", None))
+
+    # 2b. The rest of the league: `initial`, `prev_checkpoint`, `random` (each
+    # `--league-games` games; `--no-league` skips them). They are cheap fillers for
+    # cross-pipeline comparison, not gating criteria.
+    league_names = []
+    for name, worker, payloads in league_matches(args, cur, initial_state,
+                                                 prev_checkpoint_state, cfg):
+        results = _pooled(worker, payloads, f"eval vs {name}")
+        metrics.update(match_metrics(results, name))
+        league_names.append(name)
 
     # 3. Health: teacher edge (search vs this net's own raw policy)
     results = _pooled(
@@ -650,18 +813,24 @@ def run_evaluation(net, reference_state, args, cfg, iteration):
     metrics["probe_value_sign"] = sum(r["v_sign"] for r in probe_results) / max(n, 1)
     metrics["probe_mean_abs_value"] = sum(r["abs_v"] for r in probe_results) / max(n, 1)
 
-    print(f"  eval: vs_reference={metrics['vs_reference']:.1%}  "
-          f"vs_heuristic={metrics['vs_heuristic']:.1%}  "
-          f"teacher_edge={metrics['teacher_edge']:.1%}")
-    print(f"        scores: vs_ref {metrics['vs_reference_score_for']:.1f}-"
-          f"{metrics['vs_reference_score_against']:.1f}  "
-          f"vs_heur {metrics['vs_heuristic_score_for']:.1f}-"
-          f"{metrics['vs_heuristic_score_against']:.1f}  "
-          f"returns: vs_heur {metrics['vs_heuristic_return_for']:.1f}-"
-          f"{metrics['vs_heuristic_return_against']:.1f}  "
-          f"caídas {metrics['vs_heuristic_caidas_for']:.2f}-"
-          f"{metrics['vs_heuristic_caidas_against']:.2f}  "
-          f"plies {metrics['vs_heuristic_plies']:.0f}")
+    print(f"  eval: reference={metrics['reference']:.1%}  "
+          f"heuristic={metrics['heuristic']:.1%}  "
+          f"teacher_edge={metrics['teacher_edge']:.1%}"
+          + "")
+    if league_names:
+        print("        league: " + "  ".join(
+            f"{name}={metrics[name]:.1%} (n={int(metrics[f'{name}_n_games'])})"
+            for name in league_names))
+    print(f"        scores: vs_ref {metrics['reference_score_for']:.1f}-"
+          f"{metrics['reference_score_against']:.1f}  "
+          f"heur {metrics['heuristic_score_for']:.1f}-"
+          f"{metrics['heuristic_score_against']:.1f}  "
+          f"returns: vs_heur {metrics['heuristic_return_for']:.1f}-"
+          f"{metrics['heuristic_return_against']:.1f}  "
+          f"caídas {metrics['heuristic_caidas_for']:.2f}-"
+          f"{metrics['heuristic_caidas_against']:.2f}  "
+          f"plies {metrics['heuristic_plies']:.0f}  "
+          f"n {int(metrics['reference_n_games'])}/{int(metrics['heuristic_n_games'])}")
     print(f"        probe: policy_acc={metrics['probe_policy_acc']:.3f}  "
           f"value_mse={metrics['probe_value_mse']:.3f}  "
           f"value_sign={metrics['probe_value_sign']:.3f}  "
@@ -681,7 +850,11 @@ def run_evaluation(net, reference_state, args, cfg, iteration):
               "probe value MSE that creeps toward 1.0.")
 
     if not args.no_wandb:
-        wandb.log(dict({f"eval/{k}": v for k, v in metrics.items()}, iter=iteration))
+        # `iteration` is the x-axis shared by all three pipelines (PPO and ReBeL log
+        # the same metric); `iter` is kept alongside it, with the same value, so
+        # dashboards built on the old name keep working.
+        wandb.log(dict({f"eval/{k}": v for k, v in metrics.items()},
+                       iteration=iteration, iter=iteration))
     return metrics
 
 
@@ -716,9 +889,18 @@ def main():
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--leaf-value-mode", type=str, default=LEAF_VALUE_MODE,
                         choices=["net", "rollout"])
-    parser.add_argument("--eval-games", type=int, default=EVAL_GAMES)
+    parser.add_argument("--eval-games", type=int, default=EVAL_GAMES,
+                        help="Games for the two GATE matches (reference, heuristic) — "
+                             "these drive acceptance, so they want a tight stderr")
     parser.add_argument("--eval-raw-games", type=int, default=EVAL_RAW_GAMES)
     parser.add_argument("--eval-every", type=int, default=EVAL_EVERY)
+    parser.add_argument("--league-games", type=int, default=LEAGUE_GAMES,
+                        help="Games for each of the extra league members "
+                             "(initial, prev_checkpoint, random). Cheaper than "
+                             "--eval-games because they are for comparison, not gating")
+    parser.add_argument("--no-league", action="store_true",
+                        help="Skip the extra league members entirely (initial, "
+                             "prev_checkpoint, random) and only log reference/heuristic")
     parser.add_argument("--accept-threshold", type=float, default=ACCEPT_THRESHOLD,
                         help="Win rate vs the reference required to accept a new net")
     parser.add_argument("--value-anchor-weight", type=float, default=VALUE_ANCHOR_WEIGHT,
@@ -773,6 +955,8 @@ def main():
                 "t_max": T_MAX,
                 "history_dropout": HISTORY_DROPOUT,
                 "eval_games": args.eval_games,
+                "league_games": args.league_games,
+                "no_league": args.no_league,
                 "eval_raw_games": args.eval_raw_games,
                 "accept_threshold": args.accept_threshold,
                 "value_anchor_weight": args.value_anchor_weight,
@@ -780,12 +964,14 @@ def main():
                 "device": DEVICE,
             },
         )
-        # Make the iteration number the x-axis for every metric group, so the wandb
-        # charts read "value of X at iteration N" instead of "log call number N".
-        # Every log() call below therefore includes an "iter" key.
+        # X-AXIS: all three pipelines (ISMCTS, PPO, ReBeL) log `iteration` and declare it
+        # here, so runs from different pipelines can be overlaid on ONE chart. The old
+        # `iter` key is still logged with the same value by every log() call below, so
+        # dashboards built on the previous name keep their x-axis.
+        wandb.define_metric("iteration")
         wandb.define_metric("iter")
         for group in ("train", "buffer", "selfplay", "eval", "time"):
-            wandb.define_metric(f"{group}/*", step_metric="iter")
+            wandb.define_metric(f"{group}/*", step_metric="iteration")
 
     net = CuarentaNet().to(DEVICE)
 
@@ -818,6 +1004,17 @@ def main():
     # weights in memory so the comparison is always "did training actually improve the
     # agent that would ship?".
     reference_state = _sd(net)
+    # The FROZEN starting weights, for the `initial` league member ("did training
+    # improve on what we began with?"). It is a second in-memory copy of the same net
+    # the mirror calibration above uses — nothing is re-read from disk, and unlike
+    # `reference_state` it is never replaced when a net is accepted.
+    initial_state = _sd(net)
+    # Weights of the last checkpoint SAVE event, for the `prev_checkpoint` league
+    # member. Updated after each save, so at evaluation time it holds the snapshot from
+    # before this iteration's training (what PPO passes as `prev_checkpoint`) rather
+    # than the current weights, which would just be another mirror match. `None` until
+    # a checkpoint exists, and then the member is skipped.
+    last_saved_state = None
     best_heuristic = -1.0
     best_path = os.path.join(ckpt_dir, "best.pt")
     best_heur_path = os.path.join(ckpt_dir, "best_heuristic.pt")
@@ -862,9 +1059,13 @@ def main():
     accept_needed = args.accept_threshold
     if not args.no_eval:
         print("\n=== Baseline evaluation (before any self-play) ===")
-        metrics = run_evaluation(net, reference_state, args, search_cfg, iteration=-1)
-        mirror_baseline = metrics["vs_reference"]
-        best_heuristic = metrics["vs_heuristic"]
+        # No checkpoint has been saved yet, so the league has no `prev_checkpoint`
+        # member for the baseline: that member is SKIPPED rather than logged stale.
+        metrics = run_evaluation(net, reference_state, args, search_cfg, iteration=-1,
+                                 initial_state=initial_state,
+                                 prev_checkpoint_state=last_saved_state)
+        mirror_baseline = metrics["reference"]
+        best_heuristic = metrics["heuristic"]
         accept_needed = max(args.accept_threshold, mirror_baseline + 0.05)
         print(f"  mirror baseline (net vs itself) = {mirror_baseline:.1%}; "
               f"a new net must reach {accept_needed:.1%} vs the reference to be "
@@ -899,7 +1100,9 @@ def main():
               f"root|v|={sp_metrics['selfplay/mean_root_value_team0']:+.2f}/"
               f"{sp_metrics['selfplay/mean_root_value_team1']:+.2f}")
         if not args.no_wandb:
-            wandb.log(dict(sp_metrics, iter=iteration))
+            # `iteration` is the shared x-axis (see wandb.define_metric above);
+            # `iter` carries the same value under its old name.
+            wandb.log(dict(sp_metrics, iteration=iteration, iter=iteration))
 
         # 2. A few teacher games, to keep the value head calibrated off-distribution.
         t0 = time.perf_counter()
@@ -924,7 +1127,8 @@ def main():
               f"prior_ent={stats['prior_entropy']:.3f} "
               f"legal={stats['legal_actions']:.1f}")
         if not args.no_wandb:
-            wandb.log(dict({f"buffer/{k}": v for k, v in stats.items()}, iter=iteration))
+            wandb.log(dict({f"buffer/{k}": v for k, v in stats.items()},
+                           iteration=iteration, iter=iteration))
 
         # 3. Train on the whole buffer
         t0 = time.perf_counter()
@@ -948,7 +1152,8 @@ def main():
                 wandb.log({"train/loss": loss, "train/policy_loss": pl,
                            "train/value_loss": vl, "train/anchor_loss": al,
                            "train/target_entropy": tent,
-                           "train/excess_ce": excess, "iter": iteration})
+                           "train/excess_ce": excess,
+                           "iteration": iteration, "iter": iteration})
         t_train = time.perf_counter() - t0
 
         # Watch the value loss: every decision of a game shares one ±1 label, so a
@@ -962,30 +1167,37 @@ def main():
 
         # 4. Save
         ckpt_path = os.path.join(ckpt_dir, f"cuarenta_iter{iteration:03d}.pt")
+        # The `prev_checkpoint` league member is the snapshot from the PREVIOUS save
+        # event (`last_saved_state`), i.e. the weights from before this iteration's
+        # training — NOT the file we are about to write, which is just the current net.
+        prev_ckpt_state = last_saved_state
         torch.save(net.state_dict(), ckpt_path)
+        last_saved_state = _sd(net)
         print(f"  saved {ckpt_path}")
 
         # 5. Evaluate
         if (iteration + 1) % args.eval_every == 0:
-            metrics = run_evaluation(net, reference_state, args, search_cfg, iteration)
+            metrics = run_evaluation(net, reference_state, args, search_cfg, iteration,
+                                     initial_state=initial_state,
+                                     prev_checkpoint_state=prev_ckpt_state)
 
             # Gating on the REFERENCE match (AlphaZero style). The bar is the mirror
             # calibration plus a margin, because a single 60-game match has a standard
             # error of ~6%: demanding +5% over the mirror makes accidental acceptance
             # unlikely while still moving fast enough to see progress.
-            if metrics["vs_reference"] >= accept_needed:
+            if metrics["reference"] >= accept_needed:
                 reference_state = _sd(net)
                 torch.save(net.state_dict(), best_path)
-                print(f"  ACCEPTED: beats the reference {metrics['vs_reference']:.1%} "
+                print(f"  ACCEPTED: beats the reference {metrics['reference']:.1%} "
                       f"(bar {accept_needed:.1%}) -> {best_path} (new reference)")
             else:
-                print(f"  not accepted: vs_reference={metrics['vs_reference']:.1%} "
+                print(f"  not accepted: reference={metrics['reference']:.1%} "
                       f"< bar {accept_needed:.1%} (reference unchanged)")
 
             # Also keep the best-vs-heuristic net: it is what you would deploy today,
             # even though it is not the training criterion.
-            if metrics["vs_heuristic"] > best_heuristic:
-                best_heuristic = metrics["vs_heuristic"]
+            if metrics["heuristic"] > best_heuristic:
+                best_heuristic = metrics["heuristic"]
                 torch.save(net.state_dict(), best_heur_path)
                 print(f"  new best vs heuristic ({best_heuristic:.1%}) -> "
                       f"{best_heur_path}")
@@ -1002,7 +1214,7 @@ def main():
               f"(selfplay {t_collect:.0f}s, imitation {t_imitation:.0f}s, "
               f"train {t_train:.0f}s)")
         if not args.no_wandb:
-            wandb.log(dict(timing, iter=iteration))
+            wandb.log(dict(timing, iteration=iteration, iter=iteration))
 
     print(f"\nTotal time: {timedelta(seconds=time.perf_counter() - start)}")
     if best_heuristic >= 0:

@@ -22,7 +22,7 @@ from selfplay import Decision, play_one_game
 from train import (MAX_ROLLOUT_LEN, T_MAX, _eval_reference_worker, _load_net,
                    _probe_worker, _sd, buffer_stats)
 from history import OBS_FLAT_DIM, ACT_FEAT_DIM, HistoryTracker
-from env import CuarentaEnv
+from env import WIN_BONUS, CuarentaEnv
 
 
 def _decision(T=6, visits=None, selfplay=True, priors=None):
@@ -131,18 +131,22 @@ def test_selfplay_marks_data_as_selfplay_and_records_priors():
 
 def test_game_result_return_identity():
     """
-    The env only pays +2 per caída, +2 per limpia and +50 for winning, so each team's
-    episode return must equal 2*caidas + 2*limpias + 50*won exactly. This is the
-    identity the return curves rely on, so it is worth pinning down.
+    The env's reward is dense: +1 per card captured, +2 per caída, +2 per limpia, the
+    cartón bonus at the end of a deal, and WIN_BONUS for winning. Every term this test can
+    account for must therefore be PRESENT in the return (`return >= accounted`). It used to
+    assert the old exact `2*caidas + 2*limpias + 50*won`, which stopped being true when the
+    reward was reshaped; the card and cartón terms are not reconstructable from here
+    because a cartón payment starts a new round and resets the capture piles.
     """
     net = CuarentaNet().eval()
     for seed in (950_000, 950_001, 950_002):
         decisions, r = play_one_game(net, n_iter=8, seed=seed, device="cpu")
         for team in (0, 1):
             won = 1.0 if r.winner == team else 0.0
-            expected = 2.0 * r.caidas[team] + 2.0 * r.limpias[team] + 50.0 * won
-            assert abs(r.returns[team] - expected) < 1e-6, (
-                f"seed={seed} team={team}: return {r.returns[team]} != {expected}"
+            accounted = 2.0 * r.caidas[team] + 2.0 * r.limpias[team] + WIN_BONUS * won
+            assert r.returns[team] - accounted >= -1e-6, (
+                f"seed={seed} team={team}: return {r.returns[team]} is less than the "
+                f"bonuses it should contain ({accounted})"
             )
         assert r.plies == len(decisions), (r.plies, len(decisions))
         assert sum(r.scores) > 0, "scores should be non-zero at the end of a game"
@@ -161,10 +165,10 @@ def test_match_metrics_and_selfplay_metrics():
     match = [{"winner": 0, "score0": 40, "score1": 30, "plies": 120,
               "return0": 60.0, "return1": 52.0, "caidas0": 5, "caidas1": 1,
               "limpias0": 0, "limpias1": 0}]
-    mm = match_metrics(match, "vs_heuristic")
-    assert mm["vs_heuristic"] == 1.0
-    assert mm["vs_heuristic_score_for"] == 40.0
-    assert mm["vs_heuristic_return_against"] == 52.0
+    mm = match_metrics(match, "heuristic")   # canonical member name
+    assert mm["heuristic"] == 1.0
+    assert mm["heuristic_score_for"] == 40.0
+    assert mm["heuristic_return_against"] == 52.0
     print(f"test_match_metrics_and_selfplay_metrics: OK ({len(sp)} + {len(mm)} keys)")
 
 

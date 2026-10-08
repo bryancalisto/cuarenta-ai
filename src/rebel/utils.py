@@ -27,6 +27,10 @@ class PointsReasons(StrEnum):
     LIMPIA='limpia'
 
 
+def has_reason(reasons, reason: "PointsReasons") -> bool:
+    return reason in (reasons or [])
+
+
 class OpponentMode(StrEnum):
     HEURISTIC="heuristic"
     SELFPLAY="selfplay"

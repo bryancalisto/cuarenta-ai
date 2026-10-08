@@ -16,13 +16,15 @@ from tkinter import messagebox
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# The game core, networks, agents and UI live in src/ppo (shared with the
+# PPO pipeline); put that directory on sys.path so the imports below resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ppo"))
 
 from card import build_deck
 from env import CuarentaEnv
 from agents import load_agent_from_checkpoint
 from ui import CuarentaUI
-from env import Action
+from env import Action, TEAMS
 
 
 def parse_human_players(value: str) -> List[int]:
@@ -32,31 +34,6 @@ def parse_human_players(value: str) -> List[int]:
     if not value.strip():
         return []
     return [int(part.strip()) for part in value.split(",") if part.strip()]
-
-
-def decode_action_index(action_idx: int, legal: List[Action]) -> Action:
-    """Mirror the 40x41 action encoding used by the PPO checkpoint."""
-    action_idx = int(np.asarray(action_idx).item())
-    card_idx = action_idx // 41
-    capture_idx = action_idx % 41
-    card = build_deck()[card_idx]
-
-    matching = [a for a in legal if a.card == card]
-    if not matching:
-        return legal[action_idx % len(legal)]
-
-    if capture_idx == 0:
-        for legal_action in matching:
-            if legal_action.capture is None:
-                return legal_action
-        return legal[action_idx % len(legal)]
-
-    capture_actions = [a for a in matching if a.capture is not None]
-    capture_offset = capture_idx - 1
-    if capture_offset < len(capture_actions):
-        return capture_actions[capture_offset]
-
-    return legal[action_idx % len(legal)]
 
 
 def run_game(
@@ -75,28 +52,32 @@ def run_game(
     root.title("Cuarenta vs Agent")
     torch_device = torch.device(device or ("mps" if torch.backends.mps.is_available() else "cpu"))
     agent = load_agent_from_checkpoint(checkpoint, torch_device, deterministic=True)
+    agent.reset()      # fresh recurrent state for a fresh game
 
     try:
         while not env.state.done:
             current_player = env.state.current_player
             legal = env.legal_actions()
+            obs = env.observe(current_player)
 
             ui.refresh_display()
             if current_player in human_players:
                 ui.action_label.config(text=f"Your turn: P{current_player}")
+                # Let a recurrent agent observe this turn even though it does not act
+                # on it; otherwise its LSTM history differs from training.
+                if hasattr(agent, "advance"):
+                    agent.advance(obs, legal, state=env.state)
                 selected_action = ui.wait_for_action()
                 action_for_env = selected_action
             else:
                 ui.action_label.config(text=f"AI thinking: P{current_player}")
                 root.update_idletasks()
                 root.update()
-                chosen = agent.act(env.observe(current_player), legal)
-                if isinstance(chosen, Action):
-                    selected_action = chosen
-                    action_for_env = chosen
-                else:
-                    selected_action = decode_action_index(chosen, legal)
-                    action_for_env = selected_action
+                # `state` is needed because the candidate-action features encode the
+                # caída/limpia bonuses (scores + the last placed card).
+                selected_action = agent.act(obs, legal, state=env.state,
+                                            team=TEAMS[current_player])
+                action_for_env = selected_action
                 ui.record_action(selected_action)
 
             _, reward, done, info = env.step(action_for_env)

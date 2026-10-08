@@ -9,7 +9,9 @@ from pathlib import Path
 import tkinter as tk
 import argparse
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# The game core, networks, agents and UI live in src/ppo (shared with the
+# PPO pipeline); put that directory on sys.path so the imports below resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ppo"))
 
 from env import CuarentaEnv
 from ui import CuarentaUI

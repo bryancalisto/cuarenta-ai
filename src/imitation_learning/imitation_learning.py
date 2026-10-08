@@ -7,6 +7,10 @@ Policy is saved for later RL finetuning.
 
 import sys
 from pathlib import Path
+
+# The game core, networks, agents and UI live in src/ppo (shared with the PPO
+# pipeline); put that directory on sys.path so the imports below resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ppo"))
 from typing import Optional, Callable
 import numpy as np
 import torch
@@ -16,8 +20,6 @@ import pickle
 from datetime import datetime
 
 from networks import PolicyNetwork
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from env import ActionEncoder, CuarentaEnv, Action
 
