@@ -19,8 +19,13 @@ NOTE on figure captures (Jack/Caballo/Rey = 11/12/13):
 """
 
 from __future__ import annotations
+from functools import lru_cache
 from typing import List, Set, FrozenSet, Tuple
 from card import Card, Rank
+
+# Bound: the key space is (card, table) and a long training run sees many deals, so the
+# memo must evict instead of growing without limit. 64k entries is a few MB.
+CACHE_SIZE = 1 << 16
 from utils import sort_cards_by_rank, PointsReasons
 
 # Ranks that can only be captured by exact match (not as part of a sum from numbers)
@@ -104,10 +109,10 @@ def get_stairs_captures(played: Card, table: List[Card]) -> List[FrozenSet[Card]
     return captures
 
 
-def valid_captures(
+def _valid_captures_uncached(
     played: Card,
-    table: List[Card],
-) -> List[FrozenSet[Card]]:
+    table: Tuple[Card, ...],
+) -> Tuple[FrozenSet[Card], ...]:
     """
     Return all distinct legal capture sets for `played` card against `table`.
 
@@ -122,7 +127,7 @@ def valid_captures(
 
     """
     if not table:
-        return []
+        return ()
 
     captures: List[FrozenSet[Card]] = []
     played_is_figure = _is_figure(played)
@@ -162,7 +167,37 @@ def valid_captures(
             seen.add(cap)
             unique.append(cap)
 
-    return unique
+    return tuple(unique)
+
+
+@lru_cache(maxsize=CACHE_SIZE)
+def _valid_captures_cached(played: Card, table: Tuple[Card, ...]) -> Tuple[FrozenSet[Card], ...]:
+    return _valid_captures_uncached(played, table)
+
+
+def valid_captures(played: Card, table: List[Card]) -> Tuple[FrozenSet[Card], ...]:
+    """
+    All legal capture sets for `played` against `table` (see `_valid_captures_uncached`).
+
+    MEMOISED, because this is the innermost cost of the search: the sum and stairs rules
+    walk subsets of the table, and a single ISMCTS decision calls this ~1000 times (once
+    per card in every simulated hand, for every simulation). The answer depends ONLY on
+    the played card and the cards on the table, and both repeat constantly inside one
+    decision -- thousands of calls collapse onto a few dozen distinct pairs.
+
+    The key is the table IN ITS GIVEN ORDER (`tuple(table)`): the returned list's order can
+    depend on iteration order, so canonicalising by sorting would change results for
+    equal-but-reordered tables. Cache entries are immutable tuples, and callers only
+    iterate/sort/index them.
+    """
+    if not table:
+        return ()
+    return _valid_captures_cached(played, tuple(table))
+
+
+def valid_captures_cache_info():
+    """(hits, misses, ...) for the memo above -- used by the tests and the profiler."""
+    return _valid_captures_cached.cache_info()
 
 
 def must_capture(played: Card, table: List[Card]) -> bool:

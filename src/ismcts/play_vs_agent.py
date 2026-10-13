@@ -34,7 +34,7 @@ import torch
 
 from env import CuarentaEnv, Action
 from history import HistoryTracker
-from network import CuarentaNet
+from network import CuarentaNet, VALUE_TARGETS
 from network_ismcts_1 import NetworkISMCTS   # <- swap to _v3 if you switch later
 from ui import CuarentaUI
 
@@ -68,14 +68,12 @@ class Agent:
         max_rollout_len: int = 200,
         device: str = "cpu",
         seed: Optional[int] = None,
+        value_target: Optional[str] = None,
     ):
         self.device = device
-        self.net = CuarentaNet()
-        state = torch.load(checkpoint, map_location="cpu")
-        # Handle both raw state_dicts and wrapped dicts
-        if isinstance(state, dict) and "model_state_dict" in state:
-            state = state["model_state_dict"]
-        self.net.load_state_dict(state)
+        # `from_checkpoint` builds the head the weights were trained with and loads them
+        # (`resolve_value_target`: --value-target, else the sidecar, else win + a warning).
+        self.net = CuarentaNet.from_checkpoint(checkpoint, value_target=value_target)
         self.net.to(device)
         self.net.eval()
 
@@ -121,6 +119,7 @@ def run_game(
     show_agent_hand: bool = False,
     delay: float = 1.0,
     n_iter: int = 200,
+    value_target: Optional[str] = None,
 ):
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
@@ -135,7 +134,8 @@ def run_game(
 
     torch_device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Loading checkpoint on {torch_device}: {checkpoint}")
-    agent = Agent(checkpoint, n_iter=n_iter, device=torch_device, seed=seed)
+    agent = Agent(checkpoint, n_iter=n_iter, device=torch_device, seed=seed,
+                  value_target=value_target)
 
     tracker = HistoryTracker(env)
 
@@ -221,6 +221,11 @@ def main():
                         help="Seconds between moves (visual pacing).")
     parser.add_argument("--n-iter", type=int, default=200,
                         help="ISMCTS simulations per move. 200 is strong; 100 is fine.")
+    parser.add_argument("--value-target", type=str, default=None,
+                        choices=list(VALUE_TARGETS),
+                        help="value target the checkpoint was trained with (defaults to its "
+                             "sidecar, else win). With the wrong one the agent you watch is "
+                             "not the agent you trained — see CuarentaNet.from_checkpoint")
     args = parser.parse_args()
 
     run_game(
@@ -231,6 +236,7 @@ def main():
         seed=args.seed,
         delay=args.delay,
         n_iter=args.n_iter,
+        value_target=args.value_target,
     )
 
 

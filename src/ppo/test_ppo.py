@@ -6,8 +6,9 @@ they break:
 
   1. the observation layout the policy head consumes (and therefore every exported
      ONNX model),
-  2. the env's reward decomposition `return == 2*caidas + 2*limpias + 50*won`
-     (this is also the regression test for the caída/limpia reward bug),
+  2. the env's reward decomposition
+     `return == captures + 2*caidas + 2*limpias + carton + WIN_BONUS*won` (exactly; this is
+     also the regression test for the caída/limpia reward bug),
   3. the action-id encoding round-trip and legal-action masking,
   4. GAE against a hand-computed example,
   5. the recurrence contract: replaying a buffered sequence must reproduce exactly
@@ -89,13 +90,18 @@ def test_obs_layouts():
 
 def test_env_reward_identity():
     """
-    The env pays exactly +2 per caída, +2 per limpia and +50 for the win, so each
-    team's episode return must equal `2*caidas + 2*limpias + 50*won`. Before the
-    caída/limpia reward bug was fixed the bonuses never fired, so returns were just
-    50*won (this test fails on that code).
+    The env's reward is dense and its terms are all here: +1 per captured card, +2 per
+    caída, +2 per limpia and WIN_BONUS for the win, so a team's episode return must equal
+    `cards + 2*caidas + 2*limpias + WIN_BONUS*won` EXACTLY. Before the caída/limpia reward
+    bug was fixed the bonuses never fired, so returns were just WIN_BONUS*won (this test
+    fails on that code).
+
+    The cartón is counted too, so this exact identity covers it as well: a cartón payment
+    moves the SCORE and pays the same number of reward points.
     """
     rng = random.Random(0)
     saw_bonus = 0
+    carton_total = 0
     for game in range(3):
         env = CuarentaEnv(seed=200 + game)
         env.reset(seed=200 + game)
@@ -117,16 +123,23 @@ def test_env_reward_identity():
                 saw_bonus += 1
         for team in (0, 1):
             won = 1.0 if env.state.winner == team else 0.0
-            # The env's reward is dense: +1 per captured card, +2 caída, +2 limpia,
-            # +4 for the win. This test used to assert 2*caidas+2*limpias+50*won, which
-            # stopped being true when the reward was reshaped.
+            # The carton is a reward term again (it was off for a while), so it is back in
+            # the identity. Kept as an exact equality: every term the env pays must appear
+            # here, and a term that stops being paid must disappear from here too.
             expected = (float(cards[team]) + 2.0 * caidas[team] + 2.0 * limpias[team]
                         + float(carton[team]) + WIN_BONUS * won)
             assert abs(returns[team] - expected) < 1e-9, (
                 f"game {game} team {team}: return {returns[team]} != {expected}"
             )
+        carton_total += sum(carton)
     assert saw_bonus > 0, "no caída/limpia was ever scored; test is not exercising the fix"
-    print(f"test_env_reward_identity: OK ({saw_bonus} bonus events across 3 games)")
+    # The identity is only evidence about the cartón term if a cartón actually happened.
+    assert carton_total > 0, (
+        "no cartón was ever paid in these 3 games, so this test says nothing about "
+        "whether the cartón is rewarded"
+    )
+    print(f"test_env_reward_identity: OK ({saw_bonus} bonus events, "
+          f"{carton_total} cartón points paid as reward, across 3 games)")
 
 
 def test_heuristic_plays_for_caida():
@@ -390,18 +403,21 @@ def test_episode_stats_are_recorded():
     metrics = trainer.episode_metrics.metrics()
     assert len(trainer.episode_metrics) >= 1, "a 400-turn window should finish a game"
     for key in ("selfplay/win_rate", "selfplay/score_for", "selfplay/return_for",
-                "selfplay/caidas_for", "selfplay/plies"):
+                "selfplay/caidas_for", "selfplay/captures_for", "selfplay/plies"):
         assert key in metrics, f"missing {key}"
-    # the return decomposition holds for the learner's team too
+    # The return decomposition holds EXACTLY for the learner's team too: the harness now
+    # counts captures per step, so every rewarded term is reconstructable from outside the
+    # env (the capture piles themselves are not, because a cartón clears them).
+    saw_captures = False
     for stat in trainer.episode_metrics.stats:
         lt = stat.learner_team
-        won = 1.0 if stat.winner == lt else 0.0
-        expected = 2 * stat.caidas[lt] + 2 * stat.limpias[lt] + stat.carton[lt] + WIN_BONUS * won
-        # Everything this harness counts must be PRESENT in the return. Not an exact
-        # identity: the env's per-card and carton terms cannot be reconstructed from
-        # outside it (a carton payment starts a new round and resets the pools).
-        assert stat.returns[lt] - expected >= -1e-6, (stat.returns[lt], expected)
-    print(f"test_episode_stats_are_recorded: OK ({metrics['selfplay/plies']:.0f} plies/game)")
+        assert abs(stat.returns[lt] - stat.accounted_return(lt)) < 1e-6, (
+            stat.returns[lt], stat.accounted_return(lt), stat
+        )
+        saw_captures = saw_captures or stat.captures[lt] > 0
+    assert saw_captures, "no capture was recorded, so the identity above is vacuous"
+    print(f"test_episode_stats_are_recorded: OK ({metrics['selfplay/plies']:.0f} plies/game, "
+          f"captures {metrics['selfplay/captures_for']:.1f}/game)")
 
 
 def test_shaped_reward_rule():

@@ -56,6 +56,10 @@ import torch
 from torch import nn
 from torch import distributions as torch_dist
 
+# The win bonus of the env's reward, so `EpisodeStats.accounted_return` refers to the same
+# number the env pays instead of a copy that can drift.
+from env import WIN_BONUS
+
 LSTMState = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -310,18 +314,23 @@ class EpisodeStats:
 
     `returns` is the episode RETURN: the sum of the env's step rewards for that team's
     players. The env's reward is dense -- +1 per card captured, +2 per caída, +2 per
-    limpia, the cartón bonus at the end of a deal, and `env.WIN_BONUS` for winning the
-    game -- so `returns == cards + 2*caidas + 2*limpias + carton + WIN_BONUS*won` (the
-    cards term is not tracked here because a cartón payment starts a new round and resets
-    the capture piles, which makes it unrecoverable from outside the env).
+    limpia, the cartón points at the end of a deal, and `env.WIN_BONUS` for winning the
+    game -- so
+
+        returns == captures + 2*caidas + 2*limpias + carton + WIN_BONUS*won
+
+    holds EXACTLY. `captures` is counted per step from the action that was actually
+    played, because the capture piles themselves are reset by every cartón and so cannot
+    be read off the final state.
     """
     winner: int                     # winning team (0 or 1)
     scores: Tuple[int, int]         # final game points per team (0..40 scale)
     plies: int                      # moves played
     returns: Tuple[float, float]    # summed step rewards per team
+    captures: Tuple[int, int]       # cards captured (env pays +1 per captured card)
     caidas: Tuple[int, int]         # caída bonuses earned per team
     limpias: Tuple[int, int]        # limpia bonuses earned per team
-    carton: Tuple[int, int] = (0, 0)  # cartón points paid per team
+    carton: Tuple[int, int] = (0, 0)  # cartón points paid per team (a reward term again)
     learner_team: int = 0
     # The learner's SHAPED return (its own team's rewards, opponents' negated): this
     # is the quantity PPO actually optimises, and it is what the value head estimates.
@@ -329,6 +338,21 @@ class EpisodeStats:
     # is on, and from the old code where opponent rewards were simply dropped.
     shaped_return: float = 0.0
     opponent_is_latest: bool = False
+
+    def accounted_return(self, team: int) -> float:
+        """
+        The return the env's reward terms must add up to for `team`.
+
+        Sits next to the fields it uses so a reward change and the identity describing it
+        are edited together; `test_ppo.py` asserts `returns[team] == accounted_return(team)`
+        on real rollouts.
+        """
+        won = 1.0 if self.winner == team else 0.0
+        return (float(self.captures[team])
+                + 2.0 * self.caidas[team]
+                + 2.0 * self.limpias[team]
+                + float(self.carton[team])
+                + WIN_BONUS * won)
 
     def as_metrics(self, prefix: str = "selfplay") -> Dict[str, float]:
         """Flatten into wandb-friendly scalars."""
@@ -346,6 +370,8 @@ class EpisodeStats:
             f"{prefix}/return_mean": float(np.mean(self.returns)),
             f"{prefix}/shaped_return": float(self.shaped_return),
             f"{prefix}/shaped_return_vs_raw": float(self.shaped_return - self.returns[lt]),
+            f"{prefix}/captures_for": float(self.captures[lt]),
+            f"{prefix}/captures_against": float(self.captures[ot]),
             f"{prefix}/caidas_for": float(self.caidas[lt]),
             f"{prefix}/caidas_against": float(self.caidas[ot]),
             f"{prefix}/limpias_for": float(self.limpias[lt]),

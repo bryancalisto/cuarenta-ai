@@ -71,7 +71,7 @@ def test_policy_weight_and_value_only_batches():
 
     net = CuarentaNet()
     opt = torch.optim.SGD(net.parameters(), lr=0.1)
-    loss, pl, vl, al, tent = train_one_epoch(net, DataLoader(ds_only_im, batch_size=4),
+    loss, pl, vl, al, tent, v_r2, v_var = train_one_epoch(net, DataLoader(ds_only_im, batch_size=4),
                                              opt, "cpu")
     assert pl == 0.0, f"policy loss should be exactly 0 for value-only data, got {pl}"
     print(f"test_policy_weight_and_value_only_batches: OK (policy={pl} value={vl:.3f})")
@@ -131,22 +131,31 @@ def test_selfplay_marks_data_as_selfplay_and_records_priors():
 
 def test_game_result_return_identity():
     """
-    The env's reward is dense: +1 per card captured, +2 per caída, +2 per limpia, the
-    cartón bonus at the end of a deal, and WIN_BONUS for winning. Every term this test can
-    account for must therefore be PRESENT in the return (`return >= accounted`). It used to
-    assert the old exact `2*caidas + 2*limpias + 50*won`, which stopped being true when the
-    reward was reshaped; the card and cartón terms are not reconstructable from here
-    because a cartón payment starts a new round and resets the capture piles.
+    The env's reward is dense and `play_one_game` counts every one of its terms, so the
+    return is accounted for EXACTLY:
+
+        returns == captures + 2*caidas + 2*limpias + WIN_BONUS*won
+
+    This asserted a weak `>=` for a while, because the card term could not be
+    reconstructed after the fact: `_new_round` resets `cards_captured` at every cartón, so
+    the capture piles at the end of the game only describe the last deal. `play_one_game`
+    now counts captures per step instead (the env's own +1-per-card term), which is what
+    makes the exact identity checkable again - and it is worth checking, because the value
+    log is the only place where a reward change becomes visible.
     """
     net = CuarentaNet().eval()
     for seed in (950_000, 950_001, 950_002):
         decisions, r = play_one_game(net, n_iter=8, seed=seed, device="cpu")
+        captured_total = sum(r.captures)
+        assert captured_total > 0, (
+            f"seed={seed}: no cards captured at all, so the capture term of the reward is "
+            "not exercised by this test"
+        )
         for team in (0, 1):
-            won = 1.0 if r.winner == team else 0.0
-            accounted = 2.0 * r.caidas[team] + 2.0 * r.limpias[team] + WIN_BONUS * won
-            assert r.returns[team] - accounted >= -1e-6, (
-                f"seed={seed} team={team}: return {r.returns[team]} is less than the "
-                f"bonuses it should contain ({accounted})"
+            assert abs(r.returns[team] - r.accounted_return(team)) < 1e-6, (
+                f"seed={seed} team={team}: return {r.returns[team]} != accounted "
+                f"{r.accounted_return(team)} (captures={r.captures[team]}, "
+                f"caidas={r.caidas[team]}, limpias={r.limpias[team]}, winner={r.winner})"
             )
         assert r.plies == len(decisions), (r.plies, len(decisions))
         assert sum(r.scores) > 0, "scores should be non-zero at the end of a game"
@@ -161,6 +170,11 @@ def test_match_metrics_and_selfplay_metrics():
     sp = mean_game_metrics([result], prefix="selfplay")
     assert "selfplay/win_rate_team0" in sp and "selfplay/return_team0" in sp
     assert "selfplay/caidas_team1" in sp and "selfplay/score_diff" in sp
+    # The capture term is the biggest part of the return, so it must be a curve of its own.
+    assert "selfplay/captures_team0" in sp and "selfplay/capture_diff" in sp
+    # and the win bonus must reflect the env's actual WIN_BONUS, not a hardcoded value
+    assert sp["selfplay/win_bonus_team0"] in (0.0, float(WIN_BONUS))
+    assert sp["selfplay/win_bonus_team0"] + sp["selfplay/win_bonus_team1"] == float(WIN_BONUS)
 
     match = [{"winner": 0, "score0": 40, "score1": 30, "plies": 120,
               "return0": 60.0, "return1": 52.0, "caidas0": 5, "caidas1": 1,

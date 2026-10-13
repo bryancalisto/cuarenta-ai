@@ -13,6 +13,25 @@ type Environ struct {
 	OnnxModelPath            string `env:"ONNX_MODEL_PATH"`
 	OnnxRuntimeSharedLibPath string `env:"ONNXRUNTIME_SHARED_LIBRARY_PATH"`
 	DbPath                   string `env:"DB_PATH"`
+
+	// AiSearchIterations is how many ISMCTS simulations each AI turn runs. 0 (or unset)
+	// keeps the old behaviour: one forward pass, argmax over the policy.
+	//
+	// This is the strength/latency knob, and it is worth being explicit about what it buys.
+	// The served network is a POLICY: on its own it is worth about a coin flip against the
+	// rule-based heuristic (measured over 200 games: 49.0%), while the same weights WITH the
+	// search win 77%. Measured budget curve per AI turn, against the heuristic:
+	//
+	//	0 sims   49.0%   (policy only, no search)
+	//	32 sims  57.0%
+	//	64 sims  59.0%
+	//	128 sims 72.0%
+	//	400 sims 77.0%
+	//
+	// Each simulation costs one model forward (~1-3 ms at batch 1), so 128 is roughly
+	// 0.15-0.4 s of "thinking" per turn.
+	AiSearchIterations int     `env:"AI_SEARCH_ITERATIONS" envDefault:"128"`
+	AiSearchCPuct      float64 `env:"AI_SEARCH_CPUCT" envDefault:"1.5"`
 }
 
 var env Environ

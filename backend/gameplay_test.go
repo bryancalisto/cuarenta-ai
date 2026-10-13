@@ -128,7 +128,7 @@ func TestCancelGame(t *testing.T) {
 		}
 
 		// Clean up session (normally done in controller, mock here to assert)
-		deleteSession(gameObj.Id)
+		gameplayHandler.deleteSession(gameObj.Id)
 
 		// assert
 		if canceledGame.Status != "canceled" {

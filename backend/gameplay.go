@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"cua/internal/config"
 	"cua/internal/game"
 	"cua/internal/models"
+	"cua/internal/search"
 
 	"github.com/benbjohnson/clock"
 )
@@ -23,6 +25,7 @@ type Gameplay interface {
 	playHumanTurnAndAdvanceAI(gameId string, userID string, dto PlayGameDTO) (models.Game, error)
 	playAITurns(gameId string) error
 	cancelRunningGames() int
+	deleteSession(gameId string)
 }
 
 type MainGameplay struct {
@@ -156,12 +159,6 @@ func setSession(gameId string, session *gameSession) {
 	Sessions.M[normalizeGameId(gameId)] = session
 }
 
-func deleteSession(gameId string) {
-	Sessions.Mu.Lock()
-	defer Sessions.Mu.Unlock()
-	delete(Sessions.M, normalizeGameId(gameId))
-}
-
 func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) models.Game {
 	state := session.env.State()
 	snapshot := base
@@ -230,6 +227,9 @@ func (g *MainGameplay) prepareSession(snapshot models.Game) (*gameSession, model
 
 	session = g.newGameSession(snapshot)
 	session.env.Reset()
+	// A brand new game gets a brand new recurrent state: the LSTM memory of a previous
+	// game (same game id, e.g. after a restart) must not leak into this one.
+	g.inferService.ClearGameState(snapshot.Id)
 	setSession(snapshot.Id, session)
 	return session, sessionSnapshot(snapshot, session, nil), nil
 }
@@ -322,6 +322,59 @@ func (g *MainGameplay) getGameDurationSeconds(game models.Game) int {
 	return int(g.clock.Now().Sub(duration).Seconds())
 }
 
+// searchWarnOnce makes the "search unavailable" message appear once per process instead of
+// on every AI turn of every game.
+var searchWarnOnce sync.Once
+
+// searchTurn runs one ISMCTS decision for `seat`, or reports that the search is not
+// available so the caller can fall back to the bare policy.
+//
+// WHY THE SEARCH IS THE POINT: the served network is a POLICY, and on its own it is worth
+// about a coin flip against the rule-based heuristic (measured over 200 games: 49.0%), while
+// the same weights WITH the search win 77%. `AI_SEARCH_ITERATIONS=0` turns this off.
+//
+// The caller holds the session's lock, so a game's AI turns are serialized; the ONNX session
+// is shared process-wide and the search runs one decision at a time.
+func (g *MainGameplay) searchTurn(gameId string, seat int, state *game.State,
+	legal []game.Action) (game.Action, bool) {
+	iterations := config.GetEnv().AiSearchIterations
+	if iterations <= 0 {
+		return game.Action{}, false
+	}
+
+	evaluator, err := g.inferService.SearchEvaluator()
+	if err != nil {
+		searchWarnOnce.Do(func() {
+			log.Printf("AI search unavailable: %v (falling back to the bare policy)", err)
+		})
+		return game.Action{}, false
+	}
+
+	cfg := evaluator.Config(iterations, config.GetEnv().AiSearchCPuct)
+	searcher, err := search.New(state, seat, evaluator, cfg,
+		rand.New(rand.NewSource(time.Now().UnixNano())))
+	if err != nil {
+		log.Printf("AI search could not start for game %s: %v", gameId, err)
+		return game.Action{}, false
+	}
+
+	action, stats, err := searcher.Decide(state, g.inferService.History(gameId, seat))
+	if err != nil {
+		log.Printf("AI search failed for game %s: %v; falling back to the bare policy",
+			gameId, err)
+		return game.Action{}, false
+	}
+	if !game.ActionIsLegal(action, legal) {
+		log.Printf("AI search returned %s, which is not legal for game %s; falling back",
+			action, gameId)
+		return game.Action{}, false
+	}
+
+	log.Printf("AI search: game %s seat %d -> %s (%d sims, %d evals, root value %.2f pts)",
+		gameId, seat, action, stats.Simulations, stats.Evaluations, stats.RootValuePts)
+	return action, true
+}
+
 func (g *MainGameplay) playAITurn(gameId string) error {
 	base, exists := g.db.GetGame(gameId)
 
@@ -359,12 +412,38 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 		session.Mu.Unlock()
 		return fmt.Errorf("ai turn has no legal actions")
 	}
+
+	// The policy scores candidate ACTIONS by features, so the observation, the
+	// [64][84] action-feature block and the [64] mask are built in exactly the order of
+	// `legal`: the slot the model answers with indexes this same list.
 	obs := game.FlattenObservation(session.env.Observe(currentSeat))
-	action, _, err := g.inferService.PredictAction(gameId, obs, legal)
-	if err != nil {
-		log.Printf("AI inference failed for game %s: %v; falling back to first legal action", base.Id, err)
-		action = legal[0]
+	feats, mask, slots := game.BuildActionFeatures(legal, state)
+
+	action := legal[0]
+	switch {
+	case slots < len(legal):
+		log.Printf("AI turn for game %s has %d legal actions but only %d policy slots; falling back to first legal action", base.Id, len(legal), slots)
+	default:
+		if searchAction, ok := g.searchTurn(gameId, currentSeat, state, legal); ok {
+			// The SEARCH played this turn: the same network, but with a tree over
+			// determinizations instead of a single forward pass (see searchTurn).
+			action = searchAction
+			break
+		}
+		slot, _, err := g.inferService.PredictActionSlot(gameId, obs, feats.Flatten(), mask.Flatten(), slots)
+		if err != nil {
+			log.Printf("AI inference failed for game %s: %v; falling back to first legal action", base.Id, err)
+		} else if picked, ok := game.ActionForSlot(slot, legal); ok {
+			action = picked
+		} else {
+			log.Printf("AI inference returned slot %d for game %s with %d legal actions; falling back to first legal action", slot, base.Id, len(legal))
+		}
 	}
+
+	// Remember this decision for the search's next root evaluation: the network reads the
+	// acting seat's OWN history window, so the observation it saw and the features of the
+	// action it is about to play are appended here (see InferenceService.RecordHistory).
+	g.inferService.RecordHistory(gameId, currentSeat, obs, game.ActionFeatures(action, state))
 
 	_, done, info, err := session.env.Step(action)
 
@@ -392,6 +471,12 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	g.publishGameSnapshot(snapshot)
 
 	// If newRound happened during step, recursively continue AI turns from new state
+	//
+	// The recurrent state is deliberately NOT cleared here: the Python reference keeps
+	// one (h, c) per match and resets it only when the game ends (src/ppo/rollout.py:
+	// replay_state_embeddings, src/ppo/eval_harness.py), so a mid-game reset would feed
+	// the network a state it never saw while training. It IS cleared when a new game
+	// session starts (prepareSession) and when a game ends, above.
 	if newRound, ok := info["newRound"].(bool); ok && newRound {
 		session.Mu.Unlock()
 		if err := g.playAITurns(gameId); err != nil {
@@ -402,6 +487,54 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 
 	session.Mu.Unlock()
 	return nil
+}
+
+// advanceRecurrentState feeds one turn of a match to the policy without using its
+// answer, so the per-game LSTM memory is advanced on the HUMAN turns too.
+//
+// The network was trained with its recurrent state advanced on EVERY turn of a match,
+// each turn fed the ACTING player's observation and legal-action features
+// (src/ppo/trainer.py). Advancing it only on the AI's own decisions would hand the
+// network, at its own decisions, a hidden state it never saw during training — hence
+// every human turn goes through here: after the action has been validated (a rejected
+// play must not pollute the memory with a turn that never happened) and before it is
+// applied.
+//
+// `seat` is the acting player, whose point of view the observation is built from; while
+// the turn is being played it is the current player. A net that cannot run is logged and
+// ignored: a human's move must never fail because inference was unavailable.
+func (g *MainGameplay) advanceRecurrentState(gameId string, session *gameSession, seat int) {
+	state := session.env.State()
+	if state == nil {
+		return
+	}
+
+	legal := session.env.LegalActions()
+	if len(legal) == 0 {
+		return
+	}
+
+	obs := game.FlattenObservation(session.env.Observe(seat))
+	feats, mask, slots := game.BuildActionFeatures(legal, state)
+	if slots < len(legal) {
+		log.Printf("Not advancing the recurrent state of game %s: %d legal actions do not fit the %d policy slots", gameId, len(legal), slots)
+		return
+	}
+
+	if err := g.inferService.AdvanceRecurrentState(gameId, obs, feats.Flatten(), mask.Flatten(), slots); err != nil {
+		log.Printf("AI recurrent state was not advanced for game %s (seat %d): %v", gameId, seat, err)
+	}
+}
+
+// deleteSession drops a game's session together with the policy's recurrent state for
+// it, so a cancelled or removed game cannot leave memory behind (lstmStates is keyed by
+// game id and would otherwise grow without bound).
+func (g *MainGameplay) deleteSession(gameId string) {
+	Sessions.Mu.Lock()
+	delete(Sessions.M, normalizeGameId(gameId))
+	Sessions.Mu.Unlock()
+
+	g.inferService.ClearGameState(gameId)
 }
 
 func (g *MainGameplay) cancelRunningGames() int {
@@ -537,11 +670,27 @@ func (g *MainGameplay) playHumanTurnAndAdvanceAI(gameId string, userID string, d
 		return models.Game{}, ErrIllegalAction
 	}
 
+	// `legal` above is scoped to the played card and does not know whose hand it is in,
+	// so re-check the resolved action against the acting player's own legal actions
+	// before anything is committed: an illegal or rejected play must leave both the game
+	// AND the policy's memory untouched.
+	if !game.ActionIsLegal(action, session.env.LegalActions()) {
+		session.Mu.Unlock()
+		return models.Game{}, ErrIllegalAction
+	}
+
+	// The turn is real from here on, so it counts for the policy's memory: advance the
+	// recurrent state with the acting (human) player's own decision point, exactly as
+	// the AI turns do, and only then apply the action.
+	g.advanceRecurrentState(gameId, session, currentSeat)
+
 	_, done, _, err := session.env.Step(action)
 
 	if done {
 		base.DurationSeconds = g.getGameDurationSeconds(base)
 		log.Println("Game has ended in human turn")
+		// The game is over: its memory is of no further use (playAITurn does the same).
+		g.inferService.ClearGameState(gameId)
 	}
 
 	session.stepCount++

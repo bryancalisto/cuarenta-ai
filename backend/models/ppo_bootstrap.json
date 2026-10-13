@@ -1,0 +1,40 @@
+{
+  "architecture": "ppo_actor_critic_action_features",
+  "observation": {
+    "keys": [
+      "my_hand",
+      "table",
+      "my_team_captures",
+      "opp_team_captures",
+      "last_placed",
+      "my_team_score",
+      "opp_team_score",
+      "current_player",
+      "deck_remaining",
+      "plays_this_deal"
+    ],
+    "size": 208
+  },
+  "action_features": {
+    "size": 84,
+    "layout": {
+      "[0:40]": "played card one-hot",
+      "[40:80]": "captured cards one-hot",
+      "[80]": "is_capture",
+      "[81]": "is_caida",
+      "[82]": "is_limpia",
+      "[83]": "unused"
+    }
+  },
+  "action_slots": 64,
+  "use_lstm": true,
+  "lstm_layers": 1,
+  "lstm_hidden": 128,
+  "value_semantics": "outcome estimate in [-1,1] for the mover's team",
+  "action_selection": "argmax(action_logits[:n_legal]); slot i == your i-th legal action",
+  "source_checkpoint": "checkpoints-ppo/bootstrap.pt",
+  "source_checkpoint_sha256": "88ee1cf3c41f9ffca610b7ccbf1b413a3761edd489e55ec9ba2862e5742e98e2",
+  "source_step": 0,
+  "exported_at": "2026-10-06T00:09:37+00:00",
+  "exporter": "scripts/pth2onnx.py"
+}

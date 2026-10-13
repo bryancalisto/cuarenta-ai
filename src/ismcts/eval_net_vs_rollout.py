@@ -39,6 +39,9 @@ def play_game(n_iter: int = 100, seed: int = 0, dirichlet_eps: float = 0.0) -> i
     except Exception:
         pass
 
+    # Deliberately a FRESH random net: this script is a baseline ("what does an untrained
+    # net with a search do against rollout-ISMCTS?"), so there is no checkpoint and no
+    # trained value target to resolve.
     net = CuarentaNet()
     net.eval()
     tracker = HistoryTracker(env)

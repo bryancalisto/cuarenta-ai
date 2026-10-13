@@ -402,7 +402,8 @@ func (s *Server) CancelGameCtl(c *gin.Context) {
 
 	hub.broadcast(game)
 
-	deleteSession(gameId)
+	// Drops the session and the policy's recurrent state kept for this game.
+	s.gameplay.deleteSession(gameId)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Game canceled and deleted successfully"})
 }

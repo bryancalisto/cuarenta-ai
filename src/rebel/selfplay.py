@@ -24,10 +24,11 @@ things the network learns from:
     z              +1 if the acting seat's TEAM won the game, else -1   -> value target
 
 `z` is attached AFTER the game, from the acting team's point of view, because utility in
-this game is the win: both seats of a team share it (they cooperate), and the per-move
-scores (+2 caída, +50 win) are already folded into who wins. Utilities are therefore
-zero-sum across teams, which is what makes one value head enough for the whole table.
-No discounting: a game is short and the payoff is terminal.
+this game is the win: both seats of a team share it (they cooperate), and the env's dense
+rewards (+1 per captured card, +2 caída, +2 limpia, WIN_BONUS for the win) only matter
+through who wins. Utilities are therefore zero-sum across teams, which is what makes one
+value head enough for the whole table. No discounting: a game is short and the payoff is
+terminal.
 
 THE INPUT VECTOR IS BUILT ONCE, HERE
 ------------------------------------

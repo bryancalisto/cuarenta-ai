@@ -1,10 +1,14 @@
 # rules.py
 from __future__ import annotations
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 import copy
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play
+
+# Bound so a long run cannot grow the memo without limit; keys are (hand, table).
+LEGAL_CACHE_SIZE = 1 << 14
+from captures import CAIDA_POINTS, LIMPIA_POINTS, valid_captures, score_play
 from utils import PointsReasons, has_reason
 from env import (
     Action, CuarentaState,
@@ -35,15 +39,14 @@ def clone_state(s: CuarentaState) -> CuarentaState:
 
 
 # legality
-def legal_actions_from_state(s: CuarentaState) -> List[Action]:
-    """Same logic as CuarentaEnv.legal_actions, but stateless."""
-    player = s.current_player
-    hand = s.hands[player]
+@lru_cache(maxsize=LEGAL_CACHE_SIZE)
+def _legal_actions_cached(hand: Tuple[Card, ...], table: Tuple[Card, ...]) -> Tuple[Action, ...]:
+    """Memoised body of `legal_actions_from_state` (see there for why it is cached)."""
     actions: List[Action] = []
 
     for card in hand:
         captures = sorted(
-            valid_captures(card, s.table),
+            valid_captures(card, table),
             key=lambda cap: tuple(sorted(c.index for c in cap)),
         )
         if captures:
@@ -53,7 +56,23 @@ def legal_actions_from_state(s: CuarentaState) -> List[Action]:
             actions.append(Action(card=card, capture=None))
 
     actions.sort(key=lambda a: (a.card.index, sorted(c.index for c in (a.capture or []))))
-    return actions
+    return tuple(actions)
+
+
+def legal_actions_from_state(s: CuarentaState) -> List[Action]:
+    """
+    Same logic as `CuarentaEnv.legal_actions`, but stateless.
+
+    MEMOISED on (acting seat's hand, table). A decision asks for the same hand against the
+    same table over and over -- the root of every simulation, and every node a simulation
+    revisits -- and `manual_actions` cost ~2 `valid_captures` calls per card each time. The
+    action list depends on NOTHING else: not the scores, not `last_placed` (those only feed
+    the per-action FEATURES, which are still computed per call and must not be cached with
+    the actions).
+
+    Returns a fresh list, so callers may sort or mutate it freely.
+    """
+    return list(_legal_actions_cached(tuple(s.hands[s.current_player]), tuple(s.table)))
 
 # transitions
 
@@ -140,9 +159,9 @@ def step_state(
         reward += len(action.capture)
 
         if has_reason(reasons, PointsReasons.CAIDA):
-            reward += 2
+            reward += CAIDA_POINTS
         if has_reason(reasons, PointsReasons.LIMPIA):
-            reward += 2
+            reward += LIMPIA_POINTS
     else:
         ns.table.append(action.card)
         ns.last_placed = action.card
@@ -169,8 +188,15 @@ def step_state(
                 ns.scores[t] = min(
                     ns.scores[t] + carton, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS
                 )
+                # Cartón IS rewarded, matching env.py (see the REWARD note there). This
+                # matters more than it looks: in `--value-target return` these rewards are
+                # what the search accumulates into its backup, so a cartón paid by the env
+                # but not here would make the search blind to the one reward term a game is
+                # decided by late — and would make the search's values disagree with the
+                # very targets it is trained on. `test_reward_parity.py` pins the two copies
+                # of this reward against each other on real games.
                 if t == team:
-                    reward += carton      # the acting team's carton, as env.py pays it
+                    reward += carton
             _new_round(ns, rng)
 
     return ns, reward, False, player

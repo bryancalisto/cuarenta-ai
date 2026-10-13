@@ -280,8 +280,12 @@ class PPOTrainer:
         learning_player = [random.randrange(4) for _ in range(cfg.n_envs)]
         pending_reward = [0.0] * cfg.n_envs     # awaiting attribution to the last move
 
-        # Per-episode reward bookkeeping for logging (raw, per team).
+        # Per-episode reward bookkeeping for logging (raw, per team). Every term of the
+        # env's reward is counted, so `EpisodeStats.accounted_return` can be checked
+        # exactly: captures (+1/card) + caídas + limpias + the win bonus. `carton` is NOT
+        # a reward term any more (it only moves the SCORE), so it is logged separately.
         returns: List[List[float]] = [[0.0, 0.0] for _ in range(cfg.n_envs)]
+        captures: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
         caidas: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
         carton: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
         limpias: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
@@ -306,6 +310,7 @@ class PPOTrainer:
                         ep_len[env_idx] = 0
                         pending_reward[env_idx] = 0.0
                         returns[env_idx] = [0.0, 0.0]
+                        captures[env_idx] = [0, 0]
                         caidas[env_idx] = [0, 0]
                         carton[env_idx] = [0, 0]
                         limpias[env_idx] = [0, 0]
@@ -387,8 +392,14 @@ class PPOTrainer:
                     ep_reward[env_idx] += shaped
                     ep_len[env_idx] += 1
 
-                    # Raw per-team rewards, for the logging curves.
+                    # Raw per-team rewards, for the logging curves. Counted from the action
+                    # the env actually applied (`action` above, which is `legal_actions[slot]`
+                    # or the opponent's pick), matching the env's own `len(action.capture)`
+                    # reward term exactly — the capture piles themselves are cleared by every
+                    # cartón, so they cannot be read back off the final state.
                     returns[env_idx][current_team] += float(reward)
+                    if action.capture:
+                        captures[env_idx][current_team] += len(action.capture)
                     reasons = info.get("reasons") or []
                     if has_reason(reasons, PointsReasons.CAIDA):
                         caidas[env_idx][current_team] += 1
@@ -412,6 +423,7 @@ class PPOTrainer:
                             scores=(int(env.state.scores[0]), int(env.state.scores[1])),
                             plies=ep_len[env_idx],
                             returns=(returns[env_idx][0], returns[env_idx][1]),
+                            captures=(captures[env_idx][0], captures[env_idx][1]),
                             caidas=(caidas[env_idx][0], caidas[env_idx][1]),
                             limpias=(limpias[env_idx][0], limpias[env_idx][1]),
                             carton=(carton[env_idx][0], carton[env_idx][1]),

@@ -18,6 +18,90 @@ const (
 	MaxAchievablePointsByNonCaidaActions = 38
 )
 
+// ---------------------------------------------------------------------------
+// Policy input contract (the ONNX model's tensors)
+// ---------------------------------------------------------------------------
+//
+// The neural players are the PPO actor-critic exported by scripts/pth2onnx.py: one
+// call per decision, taking the observation of the player about to move, a FEATURE
+// vector per candidate action and a mask of which slots are legal. The mirror of
+// these constants in Python is src/ppo/env.py (MAX_ACTIONS, ACTION_FEAT_DIM),
+// src/ppo/utils.py (OBS_KEYS_ISMCTS, OBS_SIZE_ISMCTS) and backend/models/*.json.
+//
+// Slot i of the model's logits is the i-th entry of the []Action list the caller
+// passes to BuildActionFeatures — there is no other ordering contract.
+const (
+	// MaxActionSlots is MAX_ACTIONS: the policy scores at most this many candidate
+	// actions per decision, the legal ones packed into slots 0..n-1.
+	MaxActionSlots = 64
+
+	// ActionFeatureDim is ACTION_FEAT_DIM: the width of one candidate action's
+	// description, see ActionFeatures.
+	ActionFeatureDim = 84
+
+	// CardVecSize is the width of a card bit vector: one float per Card.Index().
+	CardVecSize = 40
+
+	// Flat observation layout — OBS_KEYS_ISMCTS in src/ppo/utils.py, in this exact
+	// order, 208 floats total. The set, the order and the widths are pinned by every
+	// exported model: do not reorder, do not add keys.
+	ObsOffsetMyHand          = 0   // [0, 40)    cards in the moving player's hand
+	ObsOffsetTable           = 40  // [40, 80)   cards face-up on the table
+	ObsOffsetMyTeamCaptures  = 80  // [80, 120)  capture pile of the mover's team
+	ObsOffsetOppTeamCaptures = 120 // [120, 160) capture pile of the other team
+	ObsOffsetLastPlaced      = 160 // [160, 200) the caída reference card, or all zeros
+	ObsOffsetMyTeamScore     = 200 // mover's team score
+	ObsOffsetOppTeamScore    = 201 // other team's score
+	ObsOffsetCurrentPlayer   = 202 // seat index of the mover (0..3)
+	ObsOffsetDeckRemaining   = 203 // cards left to deal
+	ObsOffsetPlaysThisDeal   = 204 // [204, 208) turns taken this deal by seats 0,1,2,3
+	ObsSizeISMCTS            = 208
+
+	// Action feature layout — ACTION_FEAT_DIM in src/ppo/env.py.
+	ActionFeatureCapturesStart = 40 // [40, 80) bitvec of the cards the action captures
+	ActionFeatureIsCapture     = 80 // 1.0 iff the action captures
+	ActionFeatureIsCaida       = 81 // 1.0 iff the action is a caída (+2)
+	ActionFeatureIsLimpia      = 82 // 1.0 iff the action is a limpia (+2)
+	// Index 83 is reserved by the exporter and always left at 0.
+)
+
+// obsLayoutISMCTS is OBS_KEYS_ISMCTS made explicit: the key, its offset and its width
+// in the flattened observation, in the order the network reads them. Adding a row here
+// without re-exporting the model silently shifts every later block, which is why
+// TestFlattenObservationLayout pins each offset.
+var obsLayoutISMCTS = []struct {
+	key    string
+	offset int
+	width  int
+}{
+	{"my_hand", ObsOffsetMyHand, CardVecSize},
+	{"table", ObsOffsetTable, CardVecSize},
+	{"my_team_captures", ObsOffsetMyTeamCaptures, CardVecSize},
+	{"opp_team_captures", ObsOffsetOppTeamCaptures, CardVecSize},
+	{"last_placed", ObsOffsetLastPlaced, CardVecSize},
+	{"my_team_score", ObsOffsetMyTeamScore, 1},
+	{"opp_team_score", ObsOffsetOppTeamScore, 1},
+	{"current_player", ObsOffsetCurrentPlayer, 1},
+	{"deck_remaining", ObsOffsetDeckRemaining, 1},
+	{"plays_this_deal", ObsOffsetPlaysThisDeal, NumPlayers},
+}
+
+// Reasons reported by scorePlay. They are awarded as a list (one play can be both a
+// caída and a limpia in principle), so always test membership with hasReason.
+const (
+	ReasonCaida  = "caída (+2)"
+	ReasonLimpia = "limpia (+2)"
+)
+
+// hasReason reports whether `reason` is one of the reasons scorePlay returned.
+//
+// The Python pipelines once compared the LIST of reasons against a single string with
+// `==` — always false — which silently zeroed the caída/limpia rewards and the
+// is_caida/is_limpia features. Keep the membership test (see src/ppo/utils.py).
+func hasReason(reasons []string, reason string) bool {
+	return slices.Contains(reasons, reason)
+}
+
 var teamByPlayer = map[int]int{
 	0: 0,
 	1: 1,
@@ -367,12 +451,13 @@ func scorePlay(played Card, captureSet []Card, table []Card, lastPlaced *Card, n
 	reasons := make([]string, 0, 2)
 
 	if len(captureSet) > 0 {
+		// A caída wins over a limpia: a play that is both scores once, as a caída.
 		if detectCaida(played, captureSet, lastPlaced) {
 			points += 2
-			reasons = append(reasons, "caída (+2)")
+			reasons = append(reasons, ReasonCaida)
 		} else if detectLimpia(captureSet, table) && nonCaidaAllowed {
 			points += 2
-			reasons = append(reasons, "limpia (+2)")
+			reasons = append(reasons, ReasonLimpia)
 		}
 	}
 
@@ -390,6 +475,12 @@ type State struct {
 	LastPlaced    *Card
 	Done          bool
 	Winner        *int
+
+	// PlaysThisDeal counts the turns each seat has taken in the current deal; it is
+	// the last four floats of the flattened observation (ObsOffsetPlaysThisDeal). It
+	// advances on every step and resets when a new deal starts (redeal / newRound),
+	// mirroring `state.plays_this_deal` in src/ppo/env.py.
+	PlaysThisDeal [NumPlayers]int
 }
 
 type Env struct {
@@ -427,6 +518,7 @@ func (e *Env) Reset() Observation {
 		LastPlaced:    nil,
 		Done:          false,
 		Winner:        nil,
+		PlaysThisDeal: [NumPlayers]int{},
 	}
 	return e.Observe(0)
 }
@@ -450,6 +542,8 @@ func (e *Env) redeal() {
 		s.Hands[p] = hand
 		s.Deck = s.Deck[HandSize:]
 	}
+	// The observation reports the turns of the CURRENT deal.
+	s.PlaysThisDeal = [NumPlayers]int{}
 }
 
 func (e *Env) newRound() {
@@ -460,6 +554,7 @@ func (e *Env) newRound() {
 	s.Table = nil
 	s.LastPlaced = nil
 	s.CurrentPlayer = (s.CurrentPlayer + 1) % NumPlayers
+	s.PlaysThisDeal = [NumPlayers]int{}
 }
 
 func cardsToBitVec(cards []Card) []float32 {
@@ -471,7 +566,16 @@ func cardsToBitVec(cards []Card) []float32 {
 }
 
 func (e *Env) Observe(player int) Observation {
-	s := e.state
+	return ObserveState(e.state, player)
+}
+
+// ObserveState is `Env.Observe` for a bare state.
+//
+// The search needs it: it explores SAMPLED worlds that are not the env's own state (the
+// hidden hands are dealt from the unseen pool), and it must build the same observation the
+// policy was trained on for such a world. Keeping one implementation is what stops the
+// search's inputs from drifting away from the engine's.
+func ObserveState(s *State, player int) Observation {
 	allCards := BuildDeck()
 	allSet := make(map[Card]struct{}, len(allCards))
 	for _, card := range allCards {
@@ -521,24 +625,146 @@ func (e *Env) Observe(player int) Observation {
 			return nil
 		}()),
 		"deck_remaining": []float32{float32(len(s.Deck))},
+		// Turns taken this deal by seats 0..3 — required by the ISMCTS layout the ONNX
+		// model uses. ("played_this_deal" above is only kept for the legacy layout,
+		// which is the union of both capture piles and not part of the model input.)
+		"plays_this_deal": playsToFloats(s.PlaysThisDeal),
 	}
 	return obs
 }
 
+func playsToFloats(plays [NumPlayers]int) []float32 {
+	out := make([]float32, NumPlayers)
+	for seat, count := range plays {
+		out[seat] = float32(count)
+	}
+	return out
+}
+
 type Observation map[string][]float32
 
+// FlattenObservation concatenates an Observation into the flat 208-float vector the
+// ONNX policy takes, in the fixed OBS_KEYS_ISMCTS order (src/ppo/utils.py). The
+// obsLayoutISMCTS table above documents which slice of the result is which block, and
+// ObsSizeISMCTS is the total the model declares as its observation input.
+//
+// A key that is missing (or shorter than its block) leaves its slice zeroed, so an
+// incomplete observation degrades to "nothing known" instead of shifting every block
+// after it, which is the failure mode that would silently feed the network nonsense.
 func FlattenObservation(obs Observation) []float32 {
-	keys := make([]string, 0, len(obs))
-	for k := range obs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	flat := make([]float32, 0, 244)
-	for _, key := range keys {
-		flat = append(flat, obs[key]...)
+	flat := make([]float32, ObsSizeISMCTS)
+	for _, block := range obsLayoutISMCTS {
+		copy(flat[block.offset:block.offset+block.width], obs[block.key])
 	}
 	return flat
+}
+
+// ---------------------------------------------------------------------------
+// Candidate-action features (the policy head's second input)
+// ---------------------------------------------------------------------------
+
+// ActionFeatureMatrix is the [MaxActionSlots][ActionFeatureDim] feature block of one
+// decision: row i describes the i-th legal action the caller offered.
+type ActionFeatureMatrix [MaxActionSlots][ActionFeatureDim]float32
+
+// ActionSlotMask is the [MaxActionSlots] mask sent alongside it: 1.0 on the slots that
+// hold a legal action, 0.0 everywhere else.
+type ActionSlotMask [MaxActionSlots]float32
+
+// Flatten returns the row-major block the ONNX `action_features` tensor ([1,64,84])
+// expects.
+func (m *ActionFeatureMatrix) Flatten() []float32 {
+	flat := make([]float32, 0, MaxActionSlots*ActionFeatureDim)
+	for slot := 0; slot < MaxActionSlots; slot++ {
+		flat = append(flat, m[slot][:]...)
+	}
+	return flat
+}
+
+// Flatten returns the mask as the ONNX `action_mask` tensor ([1,64]).
+func (m *ActionSlotMask) Flatten() []float32 {
+	return m[:]
+}
+
+// ActionFeatures describes ONE candidate action in ActionFeatureDim floats, exactly as
+// `action_features` in src/ppo/env.py does:
+//
+//	[0:40]   the card being played (one bit at Card.Index())
+//	[40:80]  the cards this action captures (empty when it only places a card)
+//	[80]     is_capture
+//	[81]     is_caida  — the capture includes LastPlaced and the played card has its rank
+//	[82]     is_limpia — the capture takes every card on the table, and the acting team
+//	         is below MaxAchievablePointsByNonCaidaActions (38), because above that a
+//	         limpia no longer pays
+//	[83]     reserved, always 0
+//
+// The two bonuses are read from scorePlay rather than re-derived, so the features and
+// the rules cannot drift apart; scorePlay also settles caída-over-limpia precedence.
+func ActionFeatures(action Action, s *State) []float32 {
+	feats := make([]float32, ActionFeatureDim)
+
+	feats[action.Card.Index()] = 1
+	for _, card := range action.Capture {
+		feats[ActionFeatureCapturesStart+card.Index()] = 1
+	}
+	if len(action.Capture) > 0 {
+		feats[ActionFeatureIsCapture] = 1
+	}
+
+	team := teamByPlayer[s.CurrentPlayer]
+	_, reasons := scorePlay(action.Card, action.Capture, s.Table, s.LastPlaced,
+		s.Scores[team] < MaxAchievablePointsByNonCaidaActions)
+
+	if hasReason(reasons, ReasonCaida) {
+		feats[ActionFeatureIsCaida] = 1
+	}
+	if hasReason(reasons, ReasonLimpia) {
+		feats[ActionFeatureIsLimpia] = 1
+	}
+
+	return feats
+}
+
+// BuildActionFeatures packs `legal` into the feature block and mask of one decision:
+// slot i gets the features of legal[i] and mask[i] is set, so the model's answer (a
+// slot) can be used directly as `legal[slot]`.
+//
+// It returns the number of slots filled — min(len(legal), MaxActionSlots). A caller
+// with more legal actions than slots must not query the model at all: the policy can
+// only see, and therefore only choose between, the first MaxActionSlots of them.
+func BuildActionFeatures(legal []Action, s *State) (ActionFeatureMatrix, ActionSlotMask, int) {
+	var feats ActionFeatureMatrix
+	var mask ActionSlotMask
+
+	slots := min(len(legal), MaxActionSlots)
+	for i := 0; i < slots; i++ {
+		copy(feats[i][:], ActionFeatures(legal[i], s))
+		mask[i] = 1
+	}
+
+	return feats, mask, slots
+}
+
+// ActionForSlot maps a slot predicted by the model back to the action to play. Slots
+// are indices into the very same list BuildActionFeatures was given, so an in-range
+// slot is legal by construction; out of range means the model/caller disagree and the
+// caller must fall back.
+func ActionForSlot(slot int, legal []Action) (Action, bool) {
+	if slot < 0 || slot >= len(legal) {
+		return Action{}, false
+	}
+	return legal[slot], true
+}
+
+// ActionIsLegal reports whether `action` is one of `legal`, comparing actions the way the
+// rules do (the played card plus the captured cards as a set).
+//
+// It is the hand-aware check: LegalActionsForCard answers "what could this card do",
+// ignoring whose hand it is in, so a caller that must not commit an illegal turn — for
+// instance before feeding that turn to the policy's memory — has to test the resolved
+// action against the acting player's own LegalActions().
+func ActionIsLegal(action Action, legal []Action) bool {
+	return actionExists(action, legal)
 }
 
 func (e *Env) legalActions() []Action {
@@ -627,6 +853,8 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 	}
 
 	s.Hands[player] = removeCard(s.Hands[player], action.Card)
+	// Count the turn for this deal: `plays_this_deal` is part of the observation.
+	s.PlaysThisDeal[player]++
 
 	team := teamByPlayer[player]
 	points, reasons := scorePlay(action.Card, action.Capture, s.Table, s.LastPlaced, s.Scores[team] < MaxAchievablePointsByNonCaidaActions)
@@ -749,6 +977,12 @@ func (e *Env) Step(action Action) (Observation, bool, map[string]any, error) {
 	return e.step(action)
 }
 
+// EncodeAction and DecodeAction translate the LEGACY flat action id used by the old
+// DAgger/ONNX model (`card_index * 41 + capture_option_index`, a 1640-wide policy head).
+// The current policy does not use them: it scores each candidate action by its features
+// (ActionFeatures) and answers with a slot into the caller's own legal-action list, so
+// nothing has to agree on a global action numbering any more. Kept for the legacy
+// tooling that still speaks the flat encoding.
 func EncodeAction(action Action, legal []Action) int {
 	cardIdx := action.Card.Index()
 	captureIdx := 0
@@ -769,6 +1003,8 @@ func EncodeAction(action Action, legal []Action) int {
 	return cardIdx*41 + captureIdx
 }
 
+// DecodeAction is the inverse of EncodeAction, for the legacy flat action id. See the
+// note above: the feature-based policy does not need it.
 func DecodeAction(actionIdx int, legal []Action) (Action, bool) {
 	if len(legal) == 0 {
 		return Action{}, false

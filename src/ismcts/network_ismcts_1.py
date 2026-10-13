@@ -42,10 +42,40 @@ version fixes, and why they mattered:
     With `leaf_value_mode="rollout"` (a debugging/baseline mode) a rollout that hits
     the length cap is bootstrapped with the net's value instead of 0.0.
 
+VALUE TARGET: the search MIRRORS the net's units
+------------------------------------------------
+`value_target` is read from `net.value_target` (see network.py for the two targets and why
+they exist), because the search's terminal value, its leaf value and what the value head
+predicts must all be the same quantity. Two modes:
+
+  "win" (default)
+      Every backup is a game result: a terminal node is worth +/-1 and nothing else, and
+      per-step rewards are IGNORED. The search maximizes P(win), and Q is symmetric
+      around 0 ("unvisited child = 0 = even"), which is what `c_puct` is calibrated
+      against. This is plain AlphaZero.
+
+  "return"
+      The search accumulates the env's DENSE reward down every simulation path and adds
+      the net's value at the leaf, i.e. it estimates the shaped return-to-go
+
+          G = sum over plies of sign(actor team) * reward / RETURN_VALUE_SCALE
+
+      with sign + for the root's team and - for the opponent's. Two consequences deserve
+      to be stated out loud:
+        * The sign flip is borrowed from the zero-sum case as a SHAPING choice. The env's
+          reward is not zero-sum (both teams are paid for captures), so this optimizes a
+          surrogate of the payoff. PPO does the same to its critic
+          (`rollout.shaped_reward`); here it steers the POLICY, so it is a stronger
+          assumption and `c_puct`/sim budget may want retuning.
+        * Q is then a return: always positive and far from 0, so an unvisited child must
+          NOT be scored as 0 (that reads as "terrible" and kills exploration).
+          `_puct_select` centers Q on the node's own value, which makes a fresh child
+          exactly neutral -- the same thing 0 means in win mode.
+
 Sign / bookkeeping conventions (used everywhere below)
 -----------------------------------------------------
   * `node.W` is the SUM of values in ROOT-TEAM POV, for every node, whoever moved
-    there. `_puct_select` negates it when the node's mover is on the other team.
+    there. `_puct_select` converts it to MOVER POV before comparing children.
   * `node.N` counts simulations that passed through the edge into that node, i.e.
     it is N(s,a) of the parent's action.
   * `node.value_mover_pov` caches the net's value for the player to move at that
@@ -69,7 +99,7 @@ from env import (
 from rules import clone_state, legal_actions_from_state, step_state
 from determinize import Determinizer
 from history import HistoryTracker, ACT_FEAT_DIM
-from network import CuarentaNet, N_ACTIONS, ACTION_FEAT_DIM
+from network import CuarentaNet, N_ACTIONS, ACTION_FEAT_DIM, RETURN_VALUE_SCALE
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +161,14 @@ class Node:
 # ---------------------------------------------------------------------------
 
 def _terminal_value_root_pov(state: CuarentaState, root_team: int) -> float:
-    """+1 if the root team won, -1 otherwise. Cuarenta has no draws."""
+    """
+    Value of a finished game in WIN mode: +1 if the root team won, -1 otherwise.
+    Cuarenta has no draws.
+
+    (In return mode a finished game is worth 0: there are no future rewards left, and the
+    reward of the final ply is counted as that edge's reward. See
+    `NetworkISMCTS._terminal_value`.)
+    """
     return 1.0 if state.winner == root_team else -1.0
 
 
@@ -181,6 +218,7 @@ class NetworkISMCTS:
         dirichlet_eps: float = 0.25,       # 0.0 disables exploration noise (eval)
         rng: Optional[random.Random] = None,
         device: str = "cpu",
+        value_target: Optional[str] = None,   # None = take it from the net (see below)
     ):
         assert leaf_value_mode in ("net", "rollout")
         self.env = env
@@ -195,6 +233,14 @@ class NetworkISMCTS:
         self.dirichlet_eps = dirichlet_eps
         self.rng = rng or random.Random()
         self.device = device
+        # The search's units follow the value head's (see the VALUE TARGET section in the
+        # module docstring). Taken from the net by default so that a return-mode
+        # checkpoint is automatically searched with return-mode semantics, in every
+        # evaluator, without threading a flag through each of them.
+        self.value_target = value_target or getattr(net, "value_target", "win")
+        assert self.value_target in ("win", "return"), self.value_target
+        self.value_scale = (float(getattr(net, "return_value_scale", RETURN_VALUE_SCALE))
+                            if self.value_target == "return" else 1.0)
         self.net.to(device)
         self.net.eval()
 
@@ -345,16 +391,24 @@ class NetworkISMCTS:
         """
         One simulation: descend by PUCT, evaluate/expand the leaf, back up.
 
-        Returns the value (root-team POV) that was backed up.
+        Returns the value (root-team POV) that was backed up: in win mode that is just the
+        leaf/terminal value, in return mode it is the leaf/terminal value PLUS the rewards
+        collected on the way down (see the VALUE TARGET note in the module docstring).
         """
         node = root
         path: List[Tuple[Node, Action]] = []
         value_root_pov: Optional[float] = None
+        # Rewards collected along this simulation's path, already in root POV and in the
+        # value head's units. Stays 0.0 in win mode, where rewards are deliberately not
+        # part of the value (the search then optimizes P(win), not the shaped return).
+        collected = 0.0
 
         while True:
-            # --- terminal: use the TRUE result, it is free and exact ---
+            # --- terminal ---
             if state.done:
-                value_root_pov = _terminal_value_root_pov(state, root_team)
+                # win: the true result, free and exact. return: 0 future reward (the reward
+                # of the ply that ended the game was counted as that edge's reward below).
+                value_root_pov = self._terminal_value(state, root_team)
                 break
 
             legal = legal_actions_from_state(state)
@@ -380,30 +434,41 @@ class NetworkISMCTS:
 
                 self.stats["sims"] += 1
 
+                # The net's value for the player to move here, flipped into root-team POV.
+                # In BOTH modes this is "the value from this state onward", which is exactly
+                # what the value head was trained on (win probability, or return-to-go).
+                net_value_root_pov = self._to_root_pov(
+                    node.value_mover_pov, node.team, root_team
+                )
+
                 if self.leaf_value_mode == "rollout":
                     # Baseline/debug mode: value this leaf with a greedy playout.
                     rollout_v, terminated = self._rollout_value(state, root_team)
                     if terminated:
                         value_root_pov = rollout_v
                     else:
-                        # A truncated playout means UNKNOWN, not a draw. Bootstrap it
-                        # with the net's value of this state instead of scoring 0.0
-                        # (that silent zero is what made v1's search blind).
+                        # A truncated playout means UNKNOWN, not a draw. Bootstrap the rest
+                        # with the net's value of this state instead of scoring 0.0 (that
+                        # silent zero is what made v1's search blind). In return mode the
+                        # playout's own rewards are kept and the net values what is left.
                         self.stats["truncated_rollouts"] += 1
-                        value_root_pov = self._to_root_pov(
-                            node.value_mover_pov, node.team, root_team
-                        )
+                        value_root_pov = (rollout_v + net_value_root_pov
+                                          if self.value_target == "return"
+                                          else net_value_root_pov)
                 else:
-                    # Default: the net's value for the player to move here, flipped
-                    # into root-team POV.
-                    value_root_pov = self._to_root_pov(
-                        node.value_mover_pov, node.team, root_team
-                    )
+                    value_root_pov = net_value_root_pov
                 break
 
             # --- fully expanded in this world: select and descend ---
             action, _ = self._puct_select(node, legal_set, root_team)
-            next_state, _, _, _ = step_state(state, action, self.rng)
+            # The reward of this edge is paid to the team of the player moving in `state`,
+            # read from the state itself: a node's cached `player`/`team` may have been set
+            # by an earlier determinization, and deal boundaries depend on the (sampled)
+            # hands, so the cached mover is not authoritative for THIS world.
+            actor_team = TEAMS[state.current_player]
+            next_state, reward, _, _ = step_state(state, action, self.rng)
+            if self.value_target == "return":
+                collected += self._shaped_value(reward, actor_team, root_team)
             path.append((node, action))
             state = next_state
             node = node.children[action]
@@ -430,13 +495,45 @@ class NetworkISMCTS:
         #     added once per simulation.
         # The root has no incoming edge, so its visit count is incremented here once
         # per simulation.
+        backup = value_root_pov + collected
         for parent, action in path:
             child = parent.children[action]
             child.N += 1
-            child.W += value_root_pov
+            child.W += backup
         root.N += 1
 
-        return value_root_pov
+        return backup
+
+    def _terminal_value(self, state: CuarentaState, root_team: int) -> float:
+        """
+        Value of a FINISHED game in the value head's units (root-team POV).
+
+          win    -> +/-1. The payoff is winner-take-all, and winning is zero-sum, which is
+                    exactly what lets one value be negated for the opposing team.
+          return -> 0.0, because no rewards remain to be collected. The reward of the ply
+                    that ended the game is already on that edge, so the simulation's
+                    backed-up value still ends up equal to the game's shaped return.
+        """
+        if self.value_target == "return":
+            return 0.0
+        return _terminal_value_root_pov(state, root_team)
+
+    def _shaped_value(self, reward: float, actor_team: Optional[int],
+                      root_team: int) -> float:
+        """
+        One step's reward as a contribution to the root team's value: positive when the
+        root's team was paid, negative when the opponent was, in the value head's units.
+
+        This mirror image of `ppo/rollout.shaped_reward` is a SHAPING choice, not a fact
+        about the game: the env's reward is not zero-sum (both teams earn for captures), so
+        negating the opponent's reward invents a rivalry the reward does not have. It is
+        the only choice that keeps a single scalar Q usable by PUCT, and it is documented
+        as such in the VALUE TARGET note above.
+        """
+        if actor_team is None:
+            return 0.0
+        sign = 1.0 if actor_team == root_team else -1.0
+        return sign * float(reward) / self.value_scale
 
     @staticmethod
     def _to_root_pov(value_mover_pov: float, mover_team: Optional[int], root_team: int) -> float:
@@ -456,25 +553,34 @@ class NetworkISMCTS:
         `N(s)` is the node's own visit count and `N(s,a)` is the child's (see the
         visit-count convention in `_simulate`).
 
-        Q is stored in ROOT-TEAM POV, so it is negated when the node's mover is on
-        the other team. Unvisited children have Q = 0.0 ("unknown"), which combined
-        with the exploration term makes them attractive — the standard AlphaZero
-        treatment (no need for an "unvisited gets +infinity" hack, which would
-        ignore the priors).
+        Q is expressed in the MOVER's POV (converted from root POV), so the mover
+        maximizes it. Unvisited children are NEUTRAL: in win mode that is exactly Q = 0.0
+        (a value symmetric around 0 makes "even" the natural unknown), and in return mode
+        it is the node's OWN value, because a return is large and positive — scoring a
+        fresh child 0.0 there would look catastrophic and the search would never try it.
+        Both give `u = c_puct * P * sqrt(N) / (1 + N)` for a fresh child, i.e. the standard
+        AlphaZero treatment (no "unvisited gets +infinity" hack, which would ignore the
+        priors).
         """
         assert node.team is not None, "PUCT on a node whose mover is unknown"
         sqrt_n = math.sqrt(max(node.N, 1))
+
+        # Return mode works on ADVANTAGES (Q minus this node's own value), which is what
+        # makes the exploration bonus comparable to the differences that matter, and what
+        # makes a fresh child exactly neutral. Win mode is unchanged: there 0.0 is already
+        # the neutral point, so centering would be a no-op at best.
+        center = node.value_mover_pov if self.value_target == "return" else 0.0
 
         best_u, best = -1e18, None
         for action, child in node.children.items():
             if action not in legal_set:
                 continue   # phantom action from another determinization
             if child.N == 0:
-                q = 0.0
+                q = center
             else:
                 mean_root_pov = child.W / child.N
                 q = self._to_root_pov(mean_root_pov, node.team, root_team)
-            u = q + self.c_puct * child.prior * sqrt_n / (1 + child.N)
+            u = (q - center) + self.c_puct * child.prior * sqrt_n / (1 + child.N)
             if u > best_u:
                 best_u, best = u, (action, child)
 
@@ -492,20 +598,28 @@ class NetworkISMCTS:
         """
         Greedy playout to a terminal state.
 
-        Returns (value in root-team POV, terminated?). `terminated=False` means the
-        playout hit `max_rollout_len` without the game ending, in which case the
-        value is meaningless and the caller should bootstrap instead.
+        Returns (value in root-team POV, terminated?), where the value is the value of
+        everything from `state` ONWARD: in win mode the terminal +/-1, in return mode the
+        shaped reward the playout collected. `terminated=False` means the playout hit
+        `max_rollout_len` without the game ending, in which case the value is incomplete
+        and the caller must add the net's bootstrap for the remainder.
         """
         s = clone_state(state)
         steps = 0
+        collected = 0.0
         while not s.done and steps < self.max_rollout_len:
             legal = legal_actions_from_state(s)
             if not legal:
                 break
+            actor_team = TEAMS[s.current_player]
             a = _rollout_policy(s, self.rng)
-            s, _, _, _ = step_state(s, a, self.rng)
+            s, reward, _, _ = step_state(s, a, self.rng)
+            if self.value_target == "return":
+                collected += self._shaped_value(reward, actor_team, root_team)
             steps += 1
         self.stats["rollouts"] += 1
         if s.done:
-            return _terminal_value_root_pov(s, root_team), True
-        return 0.0, False
+            # win: `collected` is 0.0, so this is the old +/-1 exactly.
+            # return: the terminal state adds no further reward.
+            return collected + self._terminal_value(s, root_team), True
+        return collected, False

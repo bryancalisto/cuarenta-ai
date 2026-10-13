@@ -57,12 +57,13 @@ def canonical_keys(member: str) -> list[str]:
     return [f"{member}{s}" for s in SUFFIXES]
 
 
-def _args(eval_games=2, league_games=2, no_league=False):
+def _args(eval_games=2, league_games=2, no_league=False, members=None):
     return SimpleNamespace(
         eval_games=eval_games,
         eval_raw_games=1,
         league_games=league_games,
         no_league=no_league,
+        members=members,
         no_wandb=True,
     )
 
@@ -98,7 +99,8 @@ def test_full_league_logs_every_canonical_key():
     torch.manual_seed(2)
     prev_state = T._sd(CuarentaNet())
 
-    args = _args(eval_games=2, league_games=2)
+    args = _args(eval_games=2, league_games=2,
+                 members="reference,heuristic,initial,prev_checkpoint,random")
     metrics = _serial_eval(net, reference_state, args, cfg, iteration=0,
                            initial_state=initial_state,
                            prev_checkpoint_state=prev_state)
@@ -158,10 +160,23 @@ def test_prev_checkpoint_is_skipped_without_a_snapshot():
     assert names == ["initial", "random"], names
     assert all(len(payloads) == 2 for _n, _w, payloads in league)
 
-    with_prev = T.league_matches(_args(league_games=3), {"w": 1}, {"w": 1}, {"w": 1}, {})
+    # `prev_checkpoint` is opt-in now (it left the default set), so ask for it by name.
+    args = _args(league_games=3)
+    args.members = "reference,heuristic,initial,prev_checkpoint,random"
+    with_prev = T.league_matches(args, {"w": 1}, {"w": 1}, {"w": 1}, {})
     names = [name for name, _worker, _payloads in with_prev]
     assert names == ["initial", "prev_checkpoint", "random"], names
     assert all(len(payloads) == 3 for _n, _w, payloads in with_prev)
+
+    # The DEFAULT set does not spend games on `prev_checkpoint`.
+    default = T.league_matches(_args(league_games=3), {"w": 1}, {"w": 1}, {"w": 1}, {})
+    assert [n for n, _w, _p in default] == ["initial", "random"], [n for n, _w, _p in default]
+
+    # A selection with no league members runs none of them.
+    gate_only_args = _args(league_games=3)
+    gate_only_args.members = "reference,heuristic"
+    only_gate = T.league_matches(gate_only_args, {"w": 1}, {"w": 1}, {"w": 1}, {})
+    assert only_gate == [], only_gate
 
     # No `initial` state at all (defensive: a run started from nothing).
     no_initial = T.league_matches(_args(league_games=1), {"w": 1}, None, None, {})
@@ -221,10 +236,48 @@ def test_match_metrics_key_set_is_exact():
     print(f"test_match_metrics_key_set_is_exact: OK ({len(mm)} keys)")
 
 
+def test_trimmed_members_run_end_to_end():
+    """
+    A trimmed `--members` set must run all the way through `run_evaluation` — matches,
+    metric keys, AND the printed summary.
+
+    This is here because the summary print read `metrics['heuristic_*']` unconditionally and
+    only blew up on the real command line (`--members reference,random` -> KeyError), which
+    no unit test of `requested_members` could catch: the crash is in the reporting code, not
+    the selection logic. Two shapes are covered — a set without `heuristic`, and the
+    gate-only set with no league members at all.
+    """
+    cfg = {"n_iter": 4, "leaf_value_mode": "net", "max_rollout_len": T.MAX_ROLLOUT_LEN}
+    torch.manual_seed(0)
+    net = CuarentaNet().eval()
+    state = T._sd(net)
+
+    args = _args(eval_games=1, league_games=1, members="reference,random")
+    metrics = _serial_eval(net, state, args, cfg, iteration=0,
+                           initial_state=state, prev_checkpoint_state=state)
+    assert "reference" in metrics and "random" in metrics, sorted(metrics)
+    assert not any(k.startswith("heuristic") for k in metrics), (
+        "heuristic was not requested but its keys were logged: "
+        f"{[k for k in metrics if k.startswith('heuristic')]}"
+    )
+
+    # Gate only: no league members, so no `random` either.
+    gate_args = _args(eval_games=1, league_games=1, members="reference,heuristic")
+    gate_metrics = _serial_eval(net, state, gate_args, cfg, iteration=1,
+                                initial_state=state, prev_checkpoint_state=state)
+    assert "heuristic" in gate_metrics, sorted(gate_metrics)
+    assert not any(k.startswith("random") for k in gate_metrics), (
+        f"random was not requested: {[k for k in gate_metrics if k.startswith('random')]}"
+    )
+    print("test_trimmed_members_run_end_to_end: OK "
+          "(reference+random, then reference+heuristic, both printed and logged)")
+
+
 if __name__ == "__main__":
     test_match_metrics_key_set_is_exact()
     test_prev_checkpoint_is_skipped_without_a_snapshot()
     test_no_league_keeps_the_gate_matches()
+    test_trimmed_members_run_end_to_end()
     test_full_league_logs_every_canonical_key()
     print("\nAll eval-metric tests passed.")
     print("Canonical key set per member (12): " + ", ".join(canonical_keys("reference")))

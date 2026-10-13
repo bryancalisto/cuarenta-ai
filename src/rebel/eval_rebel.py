@@ -298,7 +298,7 @@ def play_eval_game(net, seed: int, cfg: SelfPlayConfig, net_team: int,
     caidas = [0, 0]
     limpias = [0, 0]
     cards = [0, 0]          # cards captured, the env's dense reward term
-    carton = [0, 0]         # cartón bonus, paid at the end of a deal
+    carton = [0, 0]         # cartón points, paid to the acting team at the end of a deal
     plies = 0
     net_leaf_evals = 0
 
@@ -324,12 +324,18 @@ def play_eval_game(net, seed: int, cfg: SelfPlayConfig, net_team: int,
 
         belief.record_action(clone_state(state), seat, legal[pick], strategy=strategy)
 
-        captured_before = (len(env.state.cards_captured[0]),
-                           len(env.state.cards_captured[1]))
+        # `legal[pick]` IS the action the env applies (it validates exactly this card/capture
+        # pair before playing it), so counting the capture from it is exact. The previous
+        # version instead diffed `cards_captured`, which silently undercounts the capture of
+        # the last ply of a deal: a cartón payment resets the piles, so the delta goes
+        # negative and that ply's captured cards were never counted.
+        played = legal[pick]
         _obs, reward, _done, _truncated, info = env.step(pick)
 
         team = int(TEAMS[seat])
         returns[team] += float(reward)
+        if played.capture:
+            cards[team] += len(played.capture)
         reasons = info.get("reasons") or []
         # Caída and limpia are mutually exclusive, and the env's own reward tests caída
         # first; the same order here keeps this count equal to the reward decomposition.
@@ -337,38 +343,26 @@ def play_eval_game(net, seed: int, cfg: SelfPlayConfig, net_team: int,
             caidas[team] += 1
         elif has_reason(reasons, PointsReasons.LIMPIA):
             limpias[team] += 1
-        # Count the capture from the ENV's own bookkeeping, not from the action we asked
-        # for: the rules can force a capture, in which case what was played is not
-        # `legal[pick]` and counting the intended action undercounts the reward. The env
-        # files the captured cards AND the thrown card, but rewards only the captured ones.
-        delta = len(env.state.cards_captured[team]) - captured_before[team]
-        if delta > 0:
-            cards[team] += delta - 1
         carton[team] += int(info.get("carton_points") or 0)
         plies += 1
 
-    # Reward identity, per team. The env's reward is DENSE and has five terms:
-    #     +1 per captured card, +2 caída, +2 limpia, + cartón points, +4 for the win
-    # so a team's return is `cards + 2*caidas + 2*limpias + carton + 4*won`. This assertion
-    # is the guard that THIS evaluation counts what it thinks it counts; it used to assert
-    # the older `2*caidas + 2*limpias + 50*won` and stopped being true when the reward was
-    # reshaped (the same change landed in src/ppo and src/ismcts). It holds for both sides.
+    # Reward identity, per team. The env's reward is DENSE and has FIVE terms:
+    #     +1 per captured card, +2 caída, +2 limpia, the cartón points, +WIN_BONUS for the win
+    # so a team's return is `cards + 2*caidas + 2*limpias + carton + WIN_BONUS*won` (see the
+    # REWARD note in src/ismcts/env.py, which all three pipelines follow).
+    #
+    # This assertion is the guard that THIS evaluator counts what it thinks it counts. It
+    # now checks the identity EXACTLY, which is possible because the captures are counted
+    # from the action that was played rather than from the env's capture piles (those are
+    # reset by every cartón, which is what previously forced a weak `return >= accounted`).
     for team in (0, 1):
         won = 1.0 if env.state.winner == team else 0.0
-        # Only the terms this evaluator can account for reliably. The per-card and carton
-        # terms are NOT checkable from outside the env: a carton payment starts a new round
-        # that resets the capture piles, so the card delta across such a step is not the
-        # cards that were just taken. The assertion below therefore checks that everything
-        # this harness counts is PRESENT in the reward (return >= accounted), which is the
-        # property that matters here -- a grossly wrong decomposition still fails.
-        expected = (2.0 * caidas[team] + 2.0 * limpias[team] + 4.0 * won)
-        # Tolerance, not equality: the env's reward now has five terms and a carton
-        # payment starts a NEW ROUND that resets the capture piles, so the per-card
-        # term cannot be recovered exactly from outside the env. This guard is here to
-        # catch a grossly wrong decomposition, not to re-derive the env's reward.
-        assert returns[team] - expected >= -1e-9, (
+        expected = (float(cards[team]) + 2.0 * caidas[team] + 2.0 * limpias[team]
+                    + float(carton[team]) + WIN_BONUS * won)
+        assert abs(returns[team] - expected) < 1e-9, (
             f"seed {seed} team {team}: return {returns[team]} != {expected} "
-            f"(caidas {caidas[team]}, limpias {limpias[team]}, won {won})"
+            f"(cards {cards[team]}, caidas {caidas[team]}, limpias {limpias[team]}, "
+            f"carton {carton[team]}, won {won})"
         )
 
     opp_team = 1 - net_team

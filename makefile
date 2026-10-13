@@ -1,29 +1,80 @@
+# Cuarenta training & play targets.
+#
+# PPO (self-play, no search) lives in src/ppo/: see src/ppo/__init__.py for the
+# layout and `python3 src/ppo/train.py --help` for every knob. Metrics go to
+# Weights & Biases (project cuarenta-ai, shared with the ISMCTS runs) and
+# checkpoints to --save-dir.
+
+# Play against the best net a run has accepted, or the warm start until one exists
+# (`best.pt` only appears once self-play beats the reference).
+POLICY ?= $(if $(wildcard checkpoints-ppo/best.pt),checkpoints-ppo/best.pt,checkpoints-ppo/bootstrap.pt)
+
 train_with_imitation:
 	python3 src/imitation_learning/train.py
 
 play_with_ai:
-	python3 src/imitation_learning/play_vs_agent.py --show-agent-hand true --checkpoint /Users/t1000/Documents/src/40-ai/output/policies/lstm_6/policy_1003520.pt --human-players 0 --delay 2
+	python3 src/imitation_learning/play_vs_agent.py --show-agent-hand true --checkpoint $(POLICY) --human-players 0 --delay 2
 
-train_ppo_without_lstm:
-	python3 src/ppo.py --use-lstm false --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/ppo0/no_lstm
+# --- PPO (self-play, no search; see src/ppo/__init__.py) -------------------
+# 1) supervised warm start -> checkpoints-ppo/bootstrap.pt
+# 2) self-play PPO, warm-started from it
+train_ppo_bootstrap:
+	python3 src/ppo/bootstrap.py --games 2000 --epochs 8 --use-lstm true
 
-train_ppo_with_lstm_1:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/ppo0/lstm_1
+train_ppo:
+	python3 src/ppo/train.py --use-lstm true --steps 2_000_000 --n-envs 10 --lr 3e-4 --device cpu
 
-train_ppo_with_lstm_2:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 256 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/ppo0/lstm_2
+train_ppo_feedforward:
+	python3 src/ppo/train.py --use-lstm false --steps 2_000_000 --n-envs 10 --lr 3e-4 --device cpu
 
-train_ppo_with_lstm_3:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/ppo0/lstm_3
+train_ppo_smoke:
+	./src/ppo/run_training.sh --smoke
 
-train_ppo_with_lstm_4:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --trunk-hidden 512 --value-hidden 256 --steps 2_000_000 --n-envs 10 --lr 3e-3 --opponent-mode selfplay --init-policy none --device cpu --save-dir output/policies/ppo0/lstm_4
+test_ppo:
+	python3 src/ppo/test_ppo.py
 
-train_ppo_with_lstm_5:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 64 --trunk-hidden 64 --value-hidden 64 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy none --device cpu --save-dir output/policies/ppo0/lstm_5
+play_vs_ppo:
+	python3 src/imitation_learning/play_vs_agent.py --show-agent-hand true --checkpoint $(POLICY) --human-players 0 --delay 1
 
-train_ppo_with_lstm_6:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy output/policies/cuarenta_dagger_policy_final.pt --device cpu --save-dir output/policies/lstm_6
+# --- serving an ISMCTS checkpoint from the Go backend -----------------------
+# The backend runs the RAW policy (no search), so what it serves is much weaker
+# than the agent its own evaluations measure; see scripts/pth2onnx_ismcts.py.
+# RVALUE is the value target the checkpoint was trained with; get it wrong and the
+# exported `value` means something else (the exporter refuses to guess).
+ISMCTS_POLICY ?= checkpoints-return/best.pt
+RVALUE ?= return
 
-train_ppo_with_lstm_7:
-	python3 src/ppo.py --use-lstm true --lstm-hidden 128 --steps 2_000_000 --n-envs 10 --lr 1e-3 --opponent-mode selfplay --init-policy none --device cpu --save-dir output/policies/lstm_7
+export_ismcts_onnx:
+	python3 -m scripts.pth2onnx_ismcts $(ISMCTS_POLICY) --value-target $(RVALUE) --out backend/models/ismcts_return.onnx
+	python3 scripts/onnx_parity_fixture_ismcts.py --checkpoint $(ISMCTS_POLICY) --value-target $(RVALUE) --onnx backend/models/ismcts_return.onnx --out backend/internal/inference/testdata/ismcts_fixture.json
+
+# Parity + contract check for whatever is in backend/models/ismcts_return.onnx.
+test_onnx_ismcts:
+	cd backend && go test ./internal/inference/ -run "TestONNXMatchesPyTorchISMCTS" -v
+
+# --- cross-pipeline evaluation ----------------------------------------------
+# PPO (no search) against ISMCTS, head to head. Each deal is played twice, once
+# per team assignment, so the comparison is paired. See the script docstring for
+# why the match runs across two processes.
+eval_ppo_vs_ismcts:
+	python3 src/eval_ppo_only_vs_ismcts.py --games 50 --workers 4
+
+# --- ReBeL (CFR search over a public belief state; see src/rebel/) ----------
+# Self-play games are generated by the search itself, so a run costs ~10s per
+# game at the defaults; --smoke is the same code path in seconds.
+REBEL_POLICY ?= $(if $(wildcard checkpoints-rebel/best.pt),checkpoints-rebel/best.pt,checkpoints-rebel/policy_1.pt)
+
+train_rebel_bootstrap:
+	python3 src/rebel/bootstrap.py
+
+train_rebel:
+	./src/rebel/run_training.sh
+
+train_rebel_smoke:
+	./src/rebel/run_training.sh --smoke
+
+test_rebel:
+	python3 src/rebel/test_rebel.py
+
+eval_rebel:
+	python3 src/rebel/eval_rebel.py --checkpoint $(REBEL_POLICY) --games 20 --workers 4

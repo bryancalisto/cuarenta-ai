@@ -22,7 +22,8 @@ run measured 41.7% over 60 games), which is why the trainer calibrates its accep
 against a measured mirror baseline rather than assuming exactly 50%.
 
 Reported per match (`_for` = the policy's team, `_against` = the opponent), and
-`return` is the env's dense reward (`cards + 2*caidas + 2*limpias + carton + WIN_BONUS*won`), reported for both sides.
+`return` is the env's dense reward (`cards + 2*caidas + 2*limpias + WIN_BONUS*won` — there
+includes the cartón points, see the REWARD note in src/ismcts/env.py), for both sides.
 """
 
 from __future__ import annotations

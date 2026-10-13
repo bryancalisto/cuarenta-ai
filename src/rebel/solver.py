@@ -34,11 +34,11 @@ answer the search returns.
 WHAT THE VALUE IS
 -----------------
 Utility is the GAME OUTCOME: +1 if the acting team wins the game, -1 if it loses. The
-per-move rewards the rules return (+2 for a caida, +50 for winning) are NOT added into the
-backup -- they are scoring events that influence who eventually wins, which the search
-accounts for through the dynamics, not utility in their own right. Keeping the value on
-the win/loss scale is what makes it comparable across depths and what `tanh` in the
-network can represent.
+env's dense per-move rewards (+1 per captured card, +2 caida, +2 limpia, WIN_BONUS=20 for
+the win) are NOT added into the backup -- they are scoring events that influence who
+eventually wins, which the search accounts for through the dynamics, not utility in their
+own right. Keeping the value on the win/loss scale is what makes it comparable across
+depths and what `tanh` in the network can represent.
 """
 
 from __future__ import annotations

@@ -226,6 +226,7 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
     """
     CuarentaEnv = ctx["CuarentaEnv"]
     TEAMS = ctx["TEAMS"]
+    WIN_BONUS = ctx["WIN_BONUS"]
     action_features_matrix = ctx["action_features_matrix"]
     HistoryTracker = ctx["HistoryTracker"]
     NetworkISMCTS = ctx["NetworkISMCTS"]
@@ -254,6 +255,7 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
     game = worker.new_game()
     caidas = [0, 0]
     limpias = [0, 0]
+    captures = [0, 0]
     reward_sum = [0.0, 0.0]
     plies = 0
     started = time.perf_counter()
@@ -279,12 +281,19 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
         # ISMCTS reads the whole public history, so it records every turn, not just its own.
         tracker.record(player, obs, action_index)
 
+        # What the env is about to apply is exactly `legal[action_index]`, which is where
+        # the +1-per-captured-card term of the reward comes from (the capture piles cannot
+        # be read back after the step: a cartón clears them).
+        played = legal[action_index]
+
         # step returns (observation, reward, done, truncated, info); the loop condition
         # reads env.state.done, so only the reward and info matter here.
         _obs, reward, _done, _truncated, info = env.step(action_index)
 
         team = info["team"]
         reward_sum[team] += float(reward)
+        if played.capture:
+            captures[team] += len(played.capture)
         # caída and limpia are mutually exclusive in the env's own reward (if/elif), so
         # mirror that here to keep the identity below exact.
         if has_reason(info["reasons"], PointsReasons.CAIDA):
@@ -296,17 +305,21 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
     winner = env.state.winner
     ppo_won = int(winner == ppo_team)
 
-    # Self-check of the whole harness: the env's rewards must decompose exactly as
-    # return == 2*caidas + 2*limpias + 50*won, for both teams. If this ever fails, the
-    # numbers below are not measuring what they claim to.
+    # Self-check of the whole harness: the env's rewards are dense (+1 per captured card,
+    # +2 caída, +2 limpia, the cartón points, WIN_BONUS for the win — see the REWARD note
+    # in src/ismcts/env.py), so they must decompose EXACTLY as
+    # `return == captures + 2*caidas + 2*limpias + WIN_BONUS*won` for both teams. If this
+    # ever fails, the numbers below are not measuring what they claim to.
     for team in (0, 1):
         won = 1 if winner == team else 0
-        expected = 2 * caidas[team] + 2 * limpias[team] + 50 * won
+        expected = (captures[team] + 2 * caidas[team] + 2 * limpias[team]
+                    + WIN_BONUS * won)
         if abs(reward_sum[team] - expected) > 1e-6:
             raise AssertionError(
                 f"game {game}: team {team} accumulated return {reward_sum[team]} but "
-                f"2*caidas + 2*limpias + 50*won = {expected} "
-                f"(caidas={caidas[team]}, limpias={limpias[team]}, won={won})")
+                f"captures + 2*caidas + 2*limpias + WIN_BONUS*won = {expected} "
+                f"(captures={captures[team]}, caidas={caidas[team]}, "
+                f"limpias={limpias[team]}, won={won})")
 
     return {
         "game": task["game"],
@@ -335,7 +348,7 @@ def match_main(tasks: List[dict], result_queue: Queue, setup: dict) -> None:
     import torch
 
     torch.set_num_threads(1)
-    from env import CuarentaEnv, TEAMS, action_features_matrix
+    from env import CuarentaEnv, TEAMS, WIN_BONUS, action_features_matrix
     from history import HistoryTracker
     from network import CuarentaNet
     from network_ismcts_1 import NetworkISMCTS
@@ -343,13 +356,18 @@ def match_main(tasks: List[dict], result_queue: Queue, setup: dict) -> None:
 
     # The ISMCTS network is loaded once per process: it is an eval-mode nn.Module the
     # search only reads, and the per-decision state lives in the searcher, not the net.
-    net = CuarentaNet()
-    CuarentaNet.load_checkpoint(net, setup["ismcts_checkpoint"])
+    # The ISMCTS side must be built with the value target its weights were trained with:
+    # the mode decides whether the search accumulates the dense reward (return) or ignores
+    # it and backs up ±1 results (win), so the wrong one measures a different agent. It
+    # comes from the checkpoint's sidecar, or from --value-target on the command line.
+    net = CuarentaNet.from_checkpoint(setup["ismcts_checkpoint"],
+                                      value_target=setup.get("value_target"))
     net.eval()
 
     ctx = {
         "CuarentaEnv": CuarentaEnv,
         "TEAMS": TEAMS,
+        "WIN_BONUS": WIN_BONUS,
         "action_features_matrix": action_features_matrix,
         "HistoryTracker": HistoryTracker,
         "NetworkISMCTS": NetworkISMCTS,
@@ -494,6 +512,12 @@ def main() -> None:
                         help="ISMCTS simulations per move (default 200, same as training)")
     parser.add_argument("--max-history-len", type=int, default=32,
                         help="ISMCTS history window (default 32)")
+    parser.add_argument("--value-target", type=str, default=None,
+                        choices=["win", "return"],
+                        help="value target the ISMCTS checkpoint was trained with; defaults "
+                             "to the sidecar beside it, else win. It changes what the "
+                             "ISMCTS search optimizes, so the wrong one is a different "
+                             "opponent (see CuarentaNet.resolve_value_target)")
     parser.add_argument("--leaf-value", type=str, default="net", choices=["net", "rollout"],
                         help="how ISMCTS values its leaves (default: the net's value head)")
     parser.add_argument("--max-rollout-len", type=int, default=512,
@@ -538,6 +562,7 @@ def main() -> None:
     setup = {
         "ppo_checkpoint": str(ppo_checkpoint.resolve()),
         "ismcts_checkpoint": str(ismcts_checkpoint.resolve()),
+        "value_target": args.value_target,
         "max_history_len": args.max_history_len,
         "leaf_value": args.leaf_value,
         "max_rollout_len": args.max_rollout_len,

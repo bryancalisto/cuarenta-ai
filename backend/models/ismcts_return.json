@@ -1,0 +1,31 @@
+{
+  "architecture": "ismcts_cuarenta_net_action_features",
+  "observation": {
+    "size": 208,
+    "steps": 1,
+    "layout": "src/ismcts/history.py: flatten_obs key order (OBS_FLAT_DIM=208); step T-1 is the decision being made and must be the pending step"
+  },
+  "action_features": {
+    "size": 84,
+    "layout": {
+      "[0:40]": "played card one-hot",
+      "[40:80]": "captured cards one-hot",
+      "[80]": "is_capture",
+      "[81]": "is_caida",
+      "[82]": "is_limpia",
+      "[83]": "unused"
+    }
+  },
+  "action_slots": 64,
+  "recurrent_state": null,
+  "value_target": "return",
+  "value_target_source": "flag",
+  "value_scale": 30.0,
+  "value_semantics": "shaped return-to-go for the mover's team, divided by RETURN_VALUE_SCALE (30); multiply by 30 for game points, and it is NOT bounded by 1",
+  "action_selection": "argmax(action_logits[:n_legal]); slot i == your i-th legal action",
+  "source_checkpoint": "checkpoints-return/best_heuristic.pt",
+  "source_checkpoint_sha256": "8a96e525f69c769c2eb5a451e1a96bddac7fff3d516d6c61e618cb01eebc8536",
+  "source_checkpoint_meta": {},
+  "exported_at": "2026-10-13T05:37:26+00:00",
+  "exporter": "scripts/pth2onnx_ismcts.py"
+}

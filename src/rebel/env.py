@@ -8,16 +8,17 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play
+from captures import CAIDA_POINTS, LIMPIA_POINTS, valid_captures, score_play
 from utils import PointsReasons, has_reason
 
 NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
 
-# Reward for winning the game. This is the one sparse term in an otherwise dense reward
-# (+1 per captured card, +2 caída, +2 limpia, + cartón). See the REWARD note in the module
-# docstring for why it is this size; it is a single knob on purpose.
+# Reward for winning the game: +1 per captured card, +2 caída, +2 limpia, WIN_BONUS for
+# the win. Measured with the trained net, the win bonus is
+# only ~15% of a game's return, so raise this if you want a win-first agent. It is a
+# single knob on purpose; see the REWARD note in src/ismcts/env.py for the full rationale.
 WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
@@ -395,11 +396,12 @@ class CuarentaEnv(gym.Env):
             reward += len(action.capture)
 
             # Bonus reward for a caída / limpia. (`reasons` is a list — see
-            # utils.has_reason for why `==` here was a bug.)
+            # utils.has_reason for why `==` here was a bug.) The amounts come from
+            # captures.py so the reward decomposition can be checked exactly.
             if has_reason(reasons, PointsReasons.CAIDA):
-                reward += 2 
+                reward += CAIDA_POINTS
             if has_reason(reasons, PointsReasons.LIMPIA):
-                reward += 2
+                reward += LIMPIA_POINTS
         else:
             # Place card on table
             s.table.append(action.card)
@@ -441,6 +443,9 @@ class CuarentaEnv(gym.Env):
 
                 current_team = TEAMS[player]
                 info["carton_points"] = team_carton[current_team]
+                # Cartón is PAID to the acting team, in sync with src/ismcts/env.py (see the
+                # REWARD note there) — all three pipelines pay the same dense reward so their
+                # `eval/*_return_*` curves stay comparable.
                 reward += team_carton[current_team]
 
                 self._new_round()

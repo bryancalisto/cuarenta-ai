@@ -1,6 +1,18 @@
 """
 Evaluate a trained CuarentaNet checkpoint in a head-to-head match.
 
+Same harness as the trainer's own gate: team 0 is the checkpoint, the opponent is
+HeuristicAgent, the search is greedy with no Dirichlet noise, and the per-game RNG follows
+`random.Random(seed)` like `train.py: _make_search`. With `--seed-base 50000` and
+`--value-target` matching the checkpoint, this reproduces the trainer's `eval/heuristic`
+number EXACTLY for the same snapshot and game count — which is what makes it useful for
+answering "why do my two numbers disagree?".
+
+The value target must be right (`--value-target`, else the checkpoint's sidecar): in return
+mode the search accumulates the dense reward, in win mode it ignores it and backs up ±1 game
+results. MEASURED on `checkpoints-return/best_heuristic.pt` over 100 games: 64% with the
+wrong (win) mode, 80% with the right one.
+
 The net plays team 0 (seats 0 and 2). Team 1 is either:
 
   --opponent heuristic  (default) the HeuristicAgent: the reference opponent used
@@ -36,9 +48,13 @@ from typing import List
 import numpy as np
 from tqdm import tqdm
 
+# Bare sibling import (this directory is a script directory, see AGENTS.md).
+from network import VALUE_TARGETS
+
 
 def play_one(args) -> dict:
     seed, ckpt_path, cfg, opponent = args
+    agent = cfg.get("agent", "search")
 
     import torch
     torch.set_num_threads(1)
@@ -46,14 +62,16 @@ def play_one(args) -> dict:
     from env import CuarentaEnv, TEAMS
     from heuristic_agent import HeuristicAgent
     from history import HistoryTracker
-    from network import CuarentaNet
+    from network import CuarentaNet, VALUE_TARGETS
     from network_ismcts_1 import NetworkISMCTS
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
 
-    net = CuarentaNet()
-    CuarentaNet.load_checkpoint(net, ckpt_path)   # clear error on old checkpoints
+    # The value target must match the weights, or the search runs as a different agent:
+    # `resolve_value_target` takes it from --value-target, else the checkpoint's sidecar,
+    # else 'win' with a warning. See CuarentaNet.from_checkpoint.
+    net = CuarentaNet.from_checkpoint(ckpt_path, value_target=cfg.get("value_target"))
     net.eval()
 
     tracker = HistoryTracker(env)
@@ -63,7 +81,12 @@ def play_one(args) -> dict:
         max_history_len=cfg["max_history_len"],
         leaf_value_mode=cfg["leaf_value_mode"],
         max_rollout_len=cfg["max_rollout_len"],
-        rng=random.Random(seed * 2 + 1),
+        # SAME per-game RNG convention as the trainer's evaluation workers
+        # (`train.py: _make_search(..., seed)` -> random.Random(seed)). The searcher's RNG
+        # drives the determinization sampling, so a different convention means different
+        # realized games even for the same environment seed — which is exactly why this
+        # script used to disagree with the trainer's own gate numbers.
+        rng=random.Random(seed),
         dirichlet_eps=0.0,        # no exploration noise at eval
         device="cpu",
     )
@@ -76,10 +99,19 @@ def play_one(args) -> dict:
         legal = env.legal_actions()
 
         if TEAMS[p] == 0:
-            # ---- our agent: search over visit counts ----
-            visits = searcher.search(root_player=p)
-            a = (max(visits, key=visits.get) if sum(visits.values()) > 0
-                 else random.randrange(len(legal)))
+            if agent == "raw":
+                # ---- our agent WITHOUT the search: argmax of the policy head ----
+                # This is exactly what the Go backend does (one ONNX forward pass, argmax
+                # over the legal logits), so it answers "what will the served AI feel
+                # like?" — and it is the same policy the trainer's `teacher_edge` metric
+                # measures the search against.
+                priors, _value = searcher._eval_root(p, legal)
+                a = int(np.argmax(priors))
+            else:
+                # ---- our agent: search over visit counts ----
+                visits = searcher.search(root_player=p)
+                a = (max(visits, key=visits.get) if sum(visits.values()) > 0
+                     else random.randrange(len(legal)))
         elif opponent == "heuristic":
             a = legal.index(heuristic.act(env, p))
         else:
@@ -121,10 +153,23 @@ def main():
     parser.add_argument("--leaf-value", type=str, default="net",
                         choices=["net", "rollout"],
                         help="How leaf values are computed (default: net value head)")
+    parser.add_argument("--agent", type=str, default="search",
+                        choices=["search", "raw"],
+                        help="how OUR side plays: 'search' = ISMCTS (what the training "
+                             "evaluations measure), 'raw' = argmax of the policy head with "
+                             "no search, which is exactly what the Go backend serves. The "
+                             "gap between the two is the value of searching.")
     parser.add_argument("--opponent", type=str, default="heuristic",
                         choices=["heuristic", "raw"],
                         help="heuristic = HeuristicAgent, raw = same net without search")
     parser.add_argument("--seed-base", type=int, default=50000)
+    parser.add_argument("--value-target", type=str, default=None,
+                        choices=list(VALUE_TARGETS),
+                        help="value target the checkpoint was trained with; defaults to the "
+                             "value recorded in its .json sidecar, else 'win'. Passing the "
+                             "wrong one evaluates a different agent: in return mode the "
+                             "search accumulates the dense reward, in win mode it ignores "
+                             "it and backs up ±1 game results")
     args = parser.parse_args()
 
     cfg = {
@@ -132,6 +177,8 @@ def main():
         "max_history_len": args.max_history_len,
         "leaf_value_mode": args.leaf_value,
         "max_rollout_len": args.max_rollout_len,
+        "value_target": args.value_target,
+        "agent": args.agent,
     }
 
     task_args = [(args.seed_base + i, args.checkpoint, cfg, args.opponent)
@@ -160,6 +207,7 @@ def main():
     print()
     print("=" * 60)
     print(f"Checkpoint: {args.checkpoint}")
+    print(f"agent: {args.agent}")
     print(f"Games: {args.n_games}   n_iter: {args.n_iter}   "
           f"leaf_value: {args.leaf_value}   opponent: {args.opponent}")
     print(f"Net (team 0) wins:       {wins_t0}/{args.n_games} = {p:.1%} (±{stderr:.1%} se)")

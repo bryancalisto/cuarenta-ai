@@ -52,7 +52,8 @@ import wandb
 from env import CuarentaEnv, TEAMS, NUM_PLAYERS
 from heuristic_agent import HeuristicAgent
 from history import HistoryTracker, flatten_obs, ACT_FEAT_DIM
-from network import CuarentaNet, N_ACTIONS, ACTION_FEAT_DIM
+from network import CuarentaNet, N_ACTIONS, ACTION_FEAT_DIM, VALUE_TARGETS
+from selfplay import backfill_value_targets
 from dataset import CuarentaDataset
 from selfplay import Decision
 
@@ -72,6 +73,10 @@ DEFAULT_VAL_FRACTION = 0.1
 # Randomly shorten histories during training so the net also works with no history
 # at all — which is what interior search nodes have (see dataset.py).
 HISTORY_DROPOUT = 0.3
+# Held-out value MSE above this is unusable: for ±1 targets it is exactly the MSE of
+# always predicting 0 ("no idea who wins"). See `evaluate` for what it means in return
+# mode (it errs toward discarding value heads, which is the safe direction).
+VALUE_MSE_BAR = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +95,20 @@ def _pick_device():
 # Data collection
 # ---------------------------------------------------------------------------
 
-def play_one_heuristic_game(seed: int) -> List[Decision]:
+def play_one_heuristic_game(seed: int, value_target: str = "win") -> List[Decision]:
     """
     Play a full game with HeuristicAgent at all four seats.
     Return one Decision per decision point (from the acting player's POV).
+
+    `value_target` decides what the value head is taught from this game, and it must match
+    the net's head (see network.py): ±1 for the game result, or the scaled shaped
+    return-to-go. The teacher's POLICY target is the same in both cases (its one-hot move);
+    only the value target changes.
+
+    The return target here is Monte-Carlo (lambda = 1) whatever the training run's
+    `--value-lambda` is: this function plays no search, so it has no value estimates to
+    bootstrap from (`bootstrap_values=None`). Both are estimates of the same quantity, so
+    the only difference is each label's variance.
     """
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
@@ -102,6 +117,8 @@ def play_one_heuristic_game(seed: int) -> List[Decision]:
     tracker = HistoryTracker(env)
     decisions: List[Decision] = []
     ply = 0
+    ply_rewards: List[float] = []
+    ply_actor_teams: List[int] = []
 
     while not env.state.done:
         p = env.state.current_player
@@ -135,32 +152,40 @@ def play_one_heuristic_game(seed: int) -> List[Decision]:
         ))
 
         tracker.record(p, obs, slot)
-        env.step(slot)
+        # env.step is (obs, reward, done, truncated, info): the reward is what the
+        # return-to-go target is built from, not just a byproduct to discard.
+        _, reward, _, _, _ = env.step(slot)
+        ply_rewards.append(float(reward))
+        ply_actor_teams.append(TEAMS[p])
         ply += 1
 
-    # Backfill outcome from the acting player's team POV.
-    winner_team = env.state.winner
-    for d in decisions:
-        d.outcome = 1.0 if d.team == winner_team else -1.0
+    # Value target from the acting player's team POV — the SAME function self-play uses,
+    # so a return-target dataset cannot silently mix in ±1 samples.
+    backfill_value_targets(decisions, ply_rewards, ply_actor_teams,
+                           env.state.winner, value_target)
 
     return decisions
 
 
-def _collect_worker(seed: int) -> List[Decision]:
+def _collect_worker(payload) -> List[Decision]:
+    """One game in a worker process. `payload` is (seed, value_target) — a tuple, because
+    a spawned worker only sees module defaults, never the parent's CLI values."""
+    seed, value_target = payload
     import torch
     torch.set_num_threads(1)
-    return play_one_heuristic_game(seed)
+    return play_one_heuristic_game(seed, value_target)
 
 
-def collect_heuristic_games(seeds: List[int]) -> List[List[Decision]]:
+def collect_heuristic_games(seeds: List[int], value_target: str = "win") -> List[List[Decision]]:
     """Parallel data collection. Returns one list of Decisions per game."""
     n_proc = os.cpu_count() or 1
-    print(f"Collecting {len(seeds)} heuristic games with {n_proc} workers...")
+    print(f"Collecting {len(seeds)} heuristic games with {n_proc} workers "
+          f"(value target: {value_target})...")
 
     t0 = time.perf_counter()
     with Pool(n_proc) as pool:
         results = list(tqdm(
-            pool.imap(_collect_worker, seeds),
+            pool.imap(_collect_worker, [(s, value_target) for s in seeds]),
             total=len(seeds),
             desc="games",
         ))
@@ -203,7 +228,8 @@ def train_one_epoch(net, loader, opt, device):
         w = pol_weight.clamp(min=0.0)
         policy_loss = (ce * w).sum() / w.sum().clamp(min=1e-6)
 
-        # Value loss: MSE against the ±1 outcome.
+        # Value loss: MSE against the value target -- ±1 game results in win mode, the
+        # scaled return-to-go in return mode (see `backfill_value_targets`).
         value_loss = ((value - v_target) ** 2).mean()
 
         loss = policy_loss + value_loss
@@ -237,9 +263,16 @@ def train_one_epoch(net, loader, opt, device):
 @torch.no_grad()
 def evaluate(net, loader, device):
     """
-    Held-out metrics. `value_mse` must be compared against 1.0: that is the MSE of
-    always predicting 0 for ±1 targets, i.e. "I have no idea who wins". A model
-    above 1.0 is worse than admitting ignorance (overconfident and wrong).
+    Held-out metrics. `value_mse` is compared against `VALUE_MSE_BAR` (1.0), which is the
+    MSE of always predicting 0 for ±1 targets, i.e. "I have no idea who wins". A model
+    above that is worse than admitting ignorance (overconfident and wrong).
+
+    The bar means the same thing in both modes, which is the point of
+    `RETURN_VALUE_SCALE`: for ±1 targets the variance is ~1 and for scaled return targets
+    it is ~1 by construction (the shaped return-to-go has mean ~0 and std ~35 points, and
+    the targets are divided by 30), so `mse > VALUE_MSE_BAR` is "worse than predicting the
+    mean" either way. Predicting exactly 0 is also the near-optimal constant in both modes,
+    since neither target has a large mean.
     """
     net.eval()
     total = 0
@@ -272,6 +305,7 @@ def train(
     device: str = "cpu",
     use_wandb: bool = True,
     patience: int = 3,
+    value_target: str = "win",
 ):
     print(f"\nTraining on {len(train_decisions)} samples "
           f"(val {len(val_decisions)}) for {epochs} epochs on {device}")
@@ -281,8 +315,10 @@ def train(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
 
-    net = CuarentaNet().to(device)
-    # Mild weight decay: the value head overfits quickly here (one ±1 label per game).
+    # The head must match the target the data carries: `tanh` (win) or linear (return).
+    net = CuarentaNet(value_target=value_target).to(device)
+    # Mild weight decay: the value head overfits quickly here (in win mode there is one
+    # ±1 label per game, and all decisions in a game share it).
     opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=1e-4)
 
     best_state = None
@@ -321,16 +357,17 @@ def train(
         #
         # The two heads want different stopping points: the policy keeps improving
         # with more epochs, while the value head starts overfitting (its train loss
-        # falls — one ±1 label per game is easy to memorise — while held-out MSE
-        # RISES, eventually above 1.0 = worse than always predicting 0).
+        # falls — in win mode one ±1 label per game is easy to memorise — while held-out
+        # MSE RISES, eventually above the VALUE_MSE_BAR = worse than predicting 0).
         #
         # Criterion, in order:
-        #   1. prefer epochs whose held-out value MSE is at most 1.0 (a usable value
+        #   1. prefer epochs whose held-out value MSE is at most VALUE_MSE_BAR (usable
         #      head — the search uses it to value leaves),
         #   2. among those, the highest held-out policy accuracy,
         #   3. tie-break on the lower value MSE.
         # Packed into a tuple because Python compares tuples left to right.
-        key = (val["value_mse"] <= 1.0, val["policy_acc"], -val["value_mse"])
+        key = (val["value_mse"] <= VALUE_MSE_BAR, val["policy_acc"],
+               -val["value_mse"])
         if best_key is None or key > best_key:
             best_key = key
             best_mse = val["value_mse"]
@@ -345,10 +382,10 @@ def train(
         net.load_state_dict(best_state)
         print(f"\nRestored weights from epoch {best_epoch} "
               f"(val_acc={best_acc:.3f}, val_value_mse={best_mse:.3f})")
-    if best_mse > 1.0:
-        print("WARNING: held-out value MSE is above 1.0 — the value head is worse "
-              "than always predicting 0 (overconfident). Generate more imitation "
-              "games (or regularise) before trusting it in the search.")
+    if best_mse > VALUE_MSE_BAR:
+        print(f"WARNING: held-out value MSE is above {VALUE_MSE_BAR} — the value head is "
+              "worse than always predicting the target's mean (overconfident). Generate "
+              "more imitation games (or regularise) before trusting it in the search.")
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     torch.save(net.state_dict(), out_path)
@@ -375,6 +412,14 @@ def main():
     parser.add_argument("--patience", type=int, default=3,
                         help="Stop if held-out value MSE does not improve for this "
                              "many epochs (0 = train the full budget)")
+    parser.add_argument("--value-target", type=str, default="win",
+                        choices=list(VALUE_TARGETS),
+                        help="what the value head predicts: the ±1 game result (win, "
+                             "default) or the env's dense reward as a scaled "
+                             "return-to-go (return). Must be the same mode the training "
+                             "run uses, and it changes the head's activation, so it is "
+                             "NOT interchangeable with an existing checkpoint. See the "
+                             "VALUE TARGET note in network.py.")
     parser.add_argument("--device", type=str, default=None,
                         help="cpu | mps | cuda. Defaults to auto.")
     parser.add_argument("--no-wandb", action="store_true",
@@ -407,6 +452,7 @@ def main():
                 "val_fraction": args.val_fraction,
                 "history_dropout": HISTORY_DROPOUT,
                 "device": device,
+                "value_target": args.value_target,
             },
         )
 
@@ -418,8 +464,8 @@ def main():
     n_val = max(1, int(len(seeds) * args.val_fraction))
     val_seeds, train_seeds = seeds[:n_val], seeds[n_val:]
 
-    games = collect_heuristic_games(train_seeds)
-    val_games = collect_heuristic_games(val_seeds)
+    games = collect_heuristic_games(train_seeds, args.value_target)
+    val_games = collect_heuristic_games(val_seeds, args.value_target)
 
     train_decisions = [d for g in games for d in g]
     val_decisions = [d for g in val_games for d in g]
@@ -434,6 +480,7 @@ def main():
         device=device,
         use_wandb=not args.no_wandb,
         patience=args.patience,
+        value_target=args.value_target,
     )
 
     if not args.no_wandb:

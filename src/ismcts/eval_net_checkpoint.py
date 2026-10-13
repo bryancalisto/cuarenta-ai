@@ -14,14 +14,23 @@ from history import HistoryTracker
 from network_ismcts_1 import NetworkISMCTS
 from ismcts import ISMCTS as RolloutISMCTS
 
+# Optional `--value-target win|return` anywhere on the command line; otherwise the
+# checkpoint's sidecar decides (and `resolve_value_target` warns if there is neither).
+VALUE_TARGET = None
+if "--value-target" in sys.argv:
+    VALUE_TARGET = sys.argv[sys.argv.index("--value-target") + 1]
+    del sys.argv[sys.argv.index("--value-target"):sys.argv.index("--value-target") + 2]
+
 
 def play_one(seed: int, ckpt_path: str, n_iter: int = 100) -> int:
     import torch
     torch.set_num_threads(1)
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
-    net = CuarentaNet()
-    net.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+    # `from_checkpoint` builds the head the weights were trained with (sidecar, or an
+    # explicit --value-target) and loads them; the mode decides how the search behaves, so
+    # getting it wrong evaluates a different agent (see CuarentaNet.resolve_value_target).
+    net = CuarentaNet.from_checkpoint(ckpt_path, value_target=VALUE_TARGET)
     net.eval()
     tracker = HistoryTracker(env)
 

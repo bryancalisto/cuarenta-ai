@@ -8,16 +8,49 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play
+from captures import CAIDA_POINTS, LIMPIA_POINTS, valid_captures, score_play
 from utils import PointsReasons, has_reason
 
 NUM_PLAYERS = 4
 HAND_SIZE = 5
 WIN_SCORE = 40
 
-# Reward for winning the game. This is the one sparse term in an otherwise dense reward
-# (+1 per captured card, +2 caída, +2 limpia, + cartón). See the REWARD note in the module
-# docstring for why it is this size; it is a single knob on purpose.
+# ---------------------------------------------------------------------------
+# REWARD — one turn pays, from the acting player's TEAM point of view:
+#
+#     +1 per card captured                the dense term
+#     +CAIDA_POINTS   (+2) for a caída
+#     +LIMPIA_POINTS  (+2) for a limpia
+#     +cartón points  (6..14) when the deal ends and this team has >= 20 cards
+#     +WIN_BONUS      (+20) for winning the game
+#
+# Capturing is why the reward is dense at all: it builds the cartón (>= 20 cards) and it
+# denies the opponent cards, so "+1 per card" is a proxy that is available at every ply
+# instead of only at the end.
+#
+# The CARTÓN IS PAID (it was off for a while, and is back on): it is the one large lump
+# whose timing the agent can influence, and paying it says "the deal you are 20+ cards
+# into is worth finishing". It is paid to the ACTING team on the ply that ends the deal,
+# from the same `team_carton` table that feeds `s.scores`.
+#
+# EVERY copy of this reward must agree, because the difference shows up as a search that
+# disagrees with its own training targets:
+#   * `src/ismcts/rules.py: step_state`  -- the transition the SEARCH steps through, and in
+#     return mode its rewards are what the search accumulates into the backup,
+#   * `src/ppo/env.py`, `src/rebel/env.py` and `src/rebel/rules.py` -- the other pipelines,
+#     which are also compared against this one. `test_reward_parity.py` pins the two
+#     ismcts copies against each other on real games.
+#
+# WIN_BONUS is the one knob that decides whether the agent optimises "win" or "collect
+# cards". The dense terms are NOT small: a game runs over several rounds (each round deals
+# a fresh 40-card deck) and MEASURED over 3 games with the trained net, the two teams'
+# combined return was ~137, of which captures were 46%, caídas/limpias 39% and the win
+# bonus 15%. So at 20 the win bonus is the SMALLEST term — raise it (to ~60-100) if you
+# want winning to dominate the objective. A larger bonus does not by itself destabilise
+# PPO, whose value targets are normalised by a running mean/std. It does not affect ISMCTS
+# in win mode either — the search backs up ±1 game outcomes and ignores this reward — but
+# in RETURN mode the search adds these terms up itself (see the VALUE TARGET note in
+# selfplay.py), so every term here has to be in `rules.py` too.
 WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
@@ -395,11 +428,12 @@ class CuarentaEnv(gym.Env):
             reward += len(action.capture)
 
             # Bonus reward for a caída / limpia. (`reasons` is a list — see
-            # utils.has_reason for why `==` here was a bug.)
+            # utils.has_reason for why `==` here was a bug.) The amounts come from
+            # captures.py so `GameResult.accounted_return` cannot drift from them.
             if has_reason(reasons, PointsReasons.CAIDA):
-                reward += 2 
+                reward += CAIDA_POINTS
             if has_reason(reasons, PointsReasons.LIMPIA):
-                reward += 2
+                reward += LIMPIA_POINTS
         else:
             # Place card on table
             s.table.append(action.card)
@@ -441,6 +475,9 @@ class CuarentaEnv(gym.Env):
 
                 current_team = TEAMS[player]
                 info["carton_points"] = team_carton[current_team]
+                # Paid to the acting team, on top of the same points that go into `s.scores`
+                # just above (see the REWARD note at the top of the file). `rules.step_state`
+                # must pay it too, or a return-mode search would be blind to it.
                 reward += team_carton[current_team]
 
                 self._new_round()

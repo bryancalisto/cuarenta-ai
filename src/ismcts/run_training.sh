@@ -7,6 +7,13 @@
 #   ./run_training.sh --bootstrap-only                    # just the imitation phase
 #   ./run_training.sh --iters 30 --games-per-iter 20 --n-search-iter 400
 #
+# VALUE TARGET: the net's value head (and therefore what the search optimizes) is the ±1
+# game result by default. `--value-target return` switches both to the env's dense reward
+# as a scaled return-to-go, so the search chases caídas/captures instead of win
+# probability. It changes the head's activation, so a return-mode run cannot warm-start
+# from a win-mode checkpoint (the script warns): pass --value-target return HERE and it
+# will also train the bootstrap in that mode.
+#
 # IMPORTANT: checkpoints saved before the history/feature fixes are INCOMPATIBLE
 # (the LSTM action-history input changed from a 64-slot one-hot to 84 action
 # features), so this script retrains the bootstrap from scratch by default. Pass
@@ -29,6 +36,7 @@ GAMES_PER_ITER="${GAMES_PER_ITER:-40}"
 IMITATION_GAMES="${IMITATION_GAMES:-5}"
 N_SEARCH_ITER="${N_SEARCH_ITER:-400}"
 EVAL_GAMES="${EVAL_GAMES:-60}"
+VALUE_TARGET="${VALUE_TARGET:-win}"
 BOOTSTRAP_ONLY=0
 SKIP_BOOTSTRAP=0
 
@@ -42,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --imitation-games)  IMITATION_GAMES="$2"; shift 2 ;;
         --n-search-iter)    N_SEARCH_ITER="$2"; shift 2 ;;
         --eval-games)       EVAL_GAMES="$2"; shift 2 ;;
+        --value-target)     VALUE_TARGET="$2"; shift 2 ;;
         --bootstrap-only)   BOOTSTRAP_ONLY=1; shift ;;
         --skip-bootstrap)   SKIP_BOOTSTRAP=1; shift ;;
         -h|--help)
@@ -54,6 +63,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --imitation-games N      teacher games mixed in (default: $IMITATION_GAMES)"
             echo "  --n-search-iter N        ISMCTS sims per move (default: $N_SEARCH_ITER)"
             echo "  --eval-games N           games per match (default: $EVAL_GAMES)"
+            echo "  --value-target win|return  what the value head learns and the search"
+            echo "                           optimizes (default: $VALUE_TARGET)"
             echo "  --bootstrap-only         only run the imitation phase"
             echo "  --skip-bootstrap         only run self-play (needs --bootstrap-ckpt)"
             exit 0
@@ -72,6 +83,7 @@ echo "  iterations:       $ITERS"
 echo "  games/iter:       $GAMES_PER_ITER self-play + $IMITATION_GAMES teacher"
 echo "  n_search_iter:    $N_SEARCH_ITER"
 echo "  eval games:       $EVAL_GAMES per match"
+echo "  value target:     $VALUE_TARGET"
 echo
 
 # Phase 1: imitate the heuristic agent to get a competent starting policy.
@@ -82,6 +94,7 @@ if [[ "$SKIP_BOOTSTRAP" -eq 0 ]]; then
     uv run src/ismcts/bootstrap.py \
         --games "$GAMES" \
         --epochs "$BOOTSTRAP_EPOCHS" \
+        --value-target "$VALUE_TARGET" \
         --out "$BOOTSTRAP_CKPT"
 fi
 
@@ -98,4 +111,5 @@ uv run src/ismcts/train.py \
     --games-per-iter "$GAMES_PER_ITER" \
     --imitation-games "$IMITATION_GAMES" \
     --n-search-iter "$N_SEARCH_ITER" \
+    --value-target "$VALUE_TARGET" \
     --eval-games "$EVAL_GAMES"

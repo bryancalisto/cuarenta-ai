@@ -4,7 +4,8 @@ Training loop for the Cuarenta net (expert iteration / AlphaZero style).
   for iteration in range(N_ITERATIONS):
       1. Generate self-play games with the current net (search = this net itself).
       2. Mix in a few imitation games from the heuristic teacher (value calibration).
-      3. Train the net to match (a) the search's visit distribution and (b) outcomes.
+      3. Train the net to match (a) the search's visit distribution and (b) the value
+        target (±1 game outcomes by default, --value-target return for the dense reward).
       4. Evaluate: vs the reference checkpoint (gating), vs the heuristic, vs the rest
          of the evaluation LEAGUE (initial / prev_checkpoint / random — the same
          members the PPO pipeline logs), plus two health metrics that predict failure
@@ -62,6 +63,9 @@ Under the hood:
 
 from __future__ import annotations
 
+import datetime
+import json
+
 import os
 import argparse
 import copy
@@ -78,7 +82,7 @@ import wandb
 import dotenv
 
 from env import CuarentaEnv, TEAMS
-from network import CuarentaNet
+from network import CuarentaNet, VALUE_TARGETS, RETURN_VALUE_SCALE
 from selfplay import play_one_game, Decision, GameResult
 from dataset import CuarentaDataset
 from network_ismcts_1 import NetworkISMCTS
@@ -105,16 +109,54 @@ BATCH_SIZE = 64
 LR = 1e-3
 T_MAX = 32
 HISTORY_DROPOUT = 0.3         # see dataset.py: makes history-free evals in-distribution
-REPLAY_ITERS = 5              # keep this many iterations of data in the buffer
+# REPLAY_ITERS = 5              # keep this many iterations of data in the buffer
+REPLAY_ITERS = 3              # keep this many iterations of data in the buffer
 EVAL_GAMES = 60               # games per match (60 => ~±6% standard error)
 EVAL_RAW_GAMES = 40           # games for the teacher-edge probe
 EVAL_EVERY = 2                # run evaluations every N iterations
+# Every evaluation this trainer can run, and the set it runs by default.
+#
+#   reference       the gated best-so-far -- REQUIRED, it is what the gate reads
+#   heuristic       the rule-based bot: the fixed external yardstick
+#   initial         the frozen starting weights: "has this run gained anything?"
+#   prev_checkpoint the previous snapshot: same net, small noisy difference
+#   random          the sanity floor (needs no weights, so it is always cheap)
+#   teacher_edge    search vs this net's own raw policy -- the expert-iteration health
+#                   check, i.e. "does the search still beat the policy?"
+#
+# `prev_checkpoint` is NOT in the default: it is the same net a few iterations earlier, so
+# the difference is small and noisy, and `reference` + `initial` already bracket the
+# trajectory. It costs `--league-games` games, so it is opt-in.
+ALL_MEMBERS = ("reference", "heuristic", "initial", "prev_checkpoint", "random",
+               "teacher_edge")
+DEFAULT_MEMBERS = ("reference", "heuristic", "initial", "random", "teacher_edge")
+NO_LEAGUE_MEMBERS = ("reference", "heuristic", "random", "teacher_edge")
+
 LEAGUE_GAMES = 30             # games per EXTRA league member (initial,
                               # prev_checkpoint, random): fewer than EVAL_GAMES
                               # because only `reference` gates acceptance
 ACCEPT_THRESHOLD = 0.55       # beat the reference by this much to be accepted
 LEAF_VALUE_MODE = "net"       # "net" (default) | "rollout"
 MAX_ROLLOUT_LEN = 512         # only used by leaf_value_mode="rollout"
+# What the value head predicts, and therefore what the SEARCH backs up: "win" = ±1 game
+# results (AlphaZero, zero-sum, plays to maximize win probability) or "return" = the env's
+# dense reward as a scaled return-to-go (the search then accumulates rewards down every
+# simulation; see the VALUE TARGET note in network.py). Changing it changes the head's
+# activation, so existing checkpoints are win-mode and cannot be reused in return mode.
+VALUE_TARGET = "win"
+VALUE_LAMBDA = 0.9            # RETURN mode only: TD(lambda) bootstrapping of the value
+                              # target (1.0 = pure Monte-Carlo returns, the old behaviour).
+                              # The MC target's spread is mostly captures in later rounds
+                              # that the state does not determine (std ~35 points measured),
+                              # and a head trained on it memorises the buffer instead
+                              # (in-sample R^2 0.77 vs held-out -0.27). See
+                              # selfplay.backfill_value_targets for the recursion.
+PROBE_EVERY = 1               # run the held-out head probe every N iterations. It is
+                              # cheap (no search) and it is the earliest warning that the
+                              # value head has stopped generalising; 0 = only with the
+                              # full evaluation (--eval-every).
+DROPOUT = 0.0                 # dropout on the shared embedding (0 = off). See network.py
+                              # for the placement and why it is not inside the LSTM.
 VALUE_ANCHOR_WEIGHT = 2.0     # keep the value head near the starting checkpoint's
                               # calibration (0 = off, 5+ = effectively frozen)
                               # Measured: at 0.5 the anchor loss still grew 0.03 -> 0.31
@@ -176,19 +218,24 @@ def collect_games(net: CuarentaNet, n_games: int, base_seed: int):
             leaf_value_mode=LEAF_VALUE_MODE,
             max_rollout_len=MAX_ROLLOUT_LEN,
             device=DEVICE,
+            value_lambda=VALUE_LAMBDA,
         )
         all_decisions.extend(decisions)
         game_results.append(result)
     return all_decisions, mean_game_metrics(game_results, prefix="selfplay")
 
 
-def _imitation_worker(seed: int) -> list[Decision]:
+def _imitation_worker(payload) -> list[Decision]:
+    """One teacher game. `payload` is (seed, value_target): a spawned worker gets module
+    defaults, so the run's value target has to travel with the job."""
+    seed, value_target = payload
     import torch
     torch.set_num_threads(1)
-    return play_one_heuristic_game(seed)
+    return play_one_heuristic_game(seed, value_target)
 
 
-def collect_imitation_games(n_games: int, base_seed: int) -> list[Decision]:
+def collect_imitation_games(n_games: int, base_seed: int,
+                            value_target: str = "win") -> list[Decision]:
     """
     A few heuristic-vs-heuristic games per iteration, marked as NOT self-play.
 
@@ -202,12 +249,18 @@ def collect_imitation_games(n_games: int, base_seed: int) -> list[Decision]:
 
     These samples are given policy weight 0 by default (IMITATION_POLICY_WEIGHT), so
     they do NOT drag the policy back toward the teacher; only the value loss uses them.
+
+    `value_target` must be the run's, because these samples carry a VALUE TARGET of their
+    own: teacher games labelled with ±1 in a return-target run would be a silent scale
+    error in the value loss (they are a small share of the batch, so the loss would just
+    look slightly worse than it is).
     """
     from multiprocessing import Pool
     seeds = [base_seed + i for i in range(n_games)]
     with Pool() as pool:
-        games = list(tqdm(pool.imap(_imitation_worker, seeds), total=n_games,
-                          desc="imitation games", leave=False))
+        games = list(tqdm(pool.imap(_imitation_worker,
+                                    [(s, value_target) for s in seeds]),
+                          total=n_games, desc="imitation games", leave=False))
     decisions = [d for g in games for d in g]
     for d in decisions:
         d.selfplay = False
@@ -302,6 +355,14 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
     net.train()
     total_loss = total_p = total_v = total_a = total_ent = 0.0
     n_batches = 0
+    # Moments of the value TARGET over this pass. They turn the raw value loss into an
+    # R^2 ("how much of the target's variance does the head explain IN SAMPLE?"), which is
+    # the only form of that number that means the same thing in both value targets: the
+    # ±1 target has variance ~1, the return target has variance ~1 too once divided by
+    # RETURN_VALUE_SCALE, but the win bonus / reward shape can move it, and a hard-coded
+    # `value_loss < 0.05` (the old warning) silently meant different things in each mode.
+    v_sum = v_sq = 0.0
+    v_n = 0
 
     use_anchor = anchor_net is not None and anchor_weight > 0
 
@@ -325,7 +386,9 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
         w = pol_weight.clamp(min=0.0)
         policy_loss = (ce * w).sum() / w.sum().clamp(min=1e-6)
 
-        # Value loss: MSE against the ±1 game outcome, from the acting team's POV.
+        # Value loss: MSE against the value target from the acting team's POV — ±1 game
+        # results in win mode, the scaled shaped return-to-go in return mode (the same
+        # quantity `NetworkISMCTS` backs up; see --value-target / the note in network.py).
         value_loss = ((value - v_target) ** 2).mean()
 
         loss = policy_loss + value_loss
@@ -361,9 +424,21 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
         total_v += value_loss.item()
         total_a += anchor_loss.item()
         n_batches += 1
+        with torch.no_grad():
+            vt = v_target.to(torch.float64)
+            v_sum += vt.sum().item()
+            v_sq += (vt ** 2).sum().item()
+            v_n += vt.numel()
 
     n = max(n_batches, 1)
-    return (total_loss / n, total_p / n, total_v / n, total_a / n, total_ent / n)
+    v_mean = v_sum / max(v_n, 1)
+    v_var = max(v_sq / max(v_n, 1) - v_mean ** 2, 0.0)
+    # R^2 = 1 - mse/variance. 0.0 means "explains nothing" (predicting the mean),
+    # negative means worse than the mean, and the caller compares it against the
+    # HELD-OUT version from the probe to spot memorisation.
+    v_r2 = 1.0 - (total_v / n) / v_var if v_var > 0 else 0.0
+    return (total_loss / n, total_p / n, total_v / n, total_a / n, total_ent / n,
+            v_r2, v_var)
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +453,16 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
 # evaluation runs in worker PROCESSES, and a spawned worker only sees the module
 # defaults, not the CLI overrides.
 
-def _make_search(env, net, tracker, seed, *, n_iter, leaf_value_mode, max_rollout_len):
-    """The exact search used for self-play, minus exploration noise."""
+def _make_search(env, net, tracker, seed, *, n_iter, leaf_value_mode, max_rollout_len,
+                 value_target=None):
+    """
+    The exact search used for self-play, minus exploration noise.
+
+    `value_target` is normally left None: the search takes it from the net, which is the
+    only way the search and the head it reads can stay in the same units. It is accepted
+    here because `search_cfg` carries the run's setting and passing it is a cheap way to
+    make an eval worker's configuration explicit.
+    """
     return NetworkISMCTS(
         env, net, tracker,
         n_iter=n_iter,
@@ -389,11 +472,19 @@ def _make_search(env, net, tracker, seed, *, n_iter, leaf_value_mode, max_rollou
         rng=random.Random(seed),
         dirichlet_eps=0.0,          # no noise at eval: deterministic given n_iter
         device="cpu",               # workers run on CPU
+        value_target=value_target,
     )
 
 
-def _load_net(state_dict):
-    net = CuarentaNet()
+def _load_net(state_dict, value_target="win"):
+    """
+    Build a net and load `state_dict` into it.
+
+    `value_target` picks the head's activation, which is NOT part of the state_dict, so
+    every evaluation worker has to be told it (they only see module defaults, never the
+    parent's CLI values — that is what `search_cfg` is for).
+    """
+    net = CuarentaNet(value_target=value_target)
     net.load_state_dict(state_dict)
     net.eval()
     return net
@@ -474,8 +565,8 @@ def _eval_reference_worker(args):
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
-    cur = _load_net(cur_sd)
-    ref = _load_net(ref_sd)
+    cur = _load_net(cur_sd, cfg.get("value_target", "win"))
+    ref = _load_net(ref_sd, cfg.get("value_target", "win"))
     tracker_cur = HistoryTracker(env)
     tracker_ref = HistoryTracker(env)
     searcher_cur = _make_search(env, cur, tracker_cur, seed, **cfg)
@@ -501,7 +592,7 @@ def _eval_heuristic_worker(args):
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
-    net = _load_net(state_dict)
+    net = _load_net(state_dict, cfg.get("value_target", "win"))
     tracker = HistoryTracker(env)
     searcher = _make_search(env, net, tracker, seed, **cfg)
     heuristic = HeuristicAgent(seed=seed * 2 + 2)
@@ -531,7 +622,7 @@ def _eval_random_worker(args):
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
-    net = _load_net(state_dict)
+    net = _load_net(state_dict, cfg.get("value_target", "win"))
     tracker = HistoryTracker(env)
     searcher = _make_search(env, net, tracker, seed, **cfg)
     # Seeded per game, so a given seed always produces the same opponent moves.
@@ -543,6 +634,36 @@ def _eval_random_worker(args):
         return rng.randrange(len(legal))
 
     return _play_match(env, actor, [tracker])
+
+
+def requested_members(args) -> tuple:
+    """
+    Which evaluation members this run asked for.
+
+    `--members a,b,c` names them; `--no-league` takes `NO_LEAGUE_MEMBERS`; neither takes
+    `DEFAULT_MEMBERS`. `reference` is mandatory because the acceptance gate reads it --
+    everything else can be dropped, which is the point: every member costs its own games.
+    """
+    resolved = getattr(args, "members_resolved", None)
+    if resolved is not None:
+        return resolved
+    explicit = getattr(args, "members", None)
+    if explicit and getattr(args, "no_league", False):
+        raise SystemExit("--members and --no-league are mutually exclusive: name the "
+                         "members you want, or take the --no-league set.")
+    if explicit:
+        names = tuple(n.strip() for n in explicit.split(",") if n.strip())
+        if not names:
+            raise SystemExit("--members was given but is empty")
+        unknown = [n for n in names if n not in ALL_MEMBERS]
+        if unknown:
+            raise SystemExit(f"unknown --members {unknown}; valid names are: "
+                             f"{', '.join(ALL_MEMBERS)}")
+        if "reference" not in names:
+            raise SystemExit("`reference` must be evaluated: it is the member the "
+                             "acceptance gate reads. Everything else can be dropped.")
+        return names
+    return NO_LEAGUE_MEMBERS if getattr(args, "no_league", False) else DEFAULT_MEMBERS
 
 
 def league_matches(args, cur_state, initial_state, prev_checkpoint_state, cfg):
@@ -573,20 +694,19 @@ def league_matches(args, cur_state, initial_state, prev_checkpoint_state, cfg):
     caller can hand it straight to a worker pool.
     """
     n = args.league_games if args.league_games > 0 else LEAGUE_GAMES
-    if args.no_league:
-        # `random` is not a checkpoint member: it is the floor every pipeline reports, so
-        # it survives --no-league and keeps `eval/random` present in every run. Returned in
-        # the caller's (name, worker, payloads) shape, which is what `out` holds below.
-        return [("random", _eval_random_worker,
-                 [(83000 + i, cur_state, cfg) for i in range(n)])]
+    wanted = set(requested_members(args))
+    if not ({"initial", "prev_checkpoint", "random"} & wanted):
+        return []
     specs = []
-    if initial_state is not None:
+    if "initial" in wanted and initial_state is not None:
         specs.append(("initial", _eval_reference_worker, initial_state, 81000))
-    if prev_checkpoint_state is not None:
+    if "prev_checkpoint" in wanted and prev_checkpoint_state is not None:
         specs.append(("prev_checkpoint", _eval_reference_worker,
                       prev_checkpoint_state, 82000))
-    # Always available: it needs no weights at all.
-    specs.append(("random", _eval_random_worker, None, 83000))
+    # Always available: it needs no weights at all. `random` is why --no-league still
+    # reports a floor -- it is the member every pipeline shares and it costs nothing extra.
+    if "random" in wanted:
+        specs.append(("random", _eval_random_worker, None, 83000))
 
     out = []
     for name, worker, state, seed_base in specs:
@@ -618,7 +738,7 @@ def _eval_raw_worker(args):
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
-    net = _load_net(state_dict)
+    net = _load_net(state_dict, cfg.get("value_target", "win"))
     tracker = HistoryTracker(env)
     searcher = _make_search(env, net, tracker, seed, **cfg)
 
@@ -648,21 +768,26 @@ def _probe_worker(args):
     from torch.utils.data import DataLoader
     from dataset import CuarentaDataset
 
-    decisions = play_one_heuristic_game(seed)
-    net = _load_net(state_dict)
+    decisions = play_one_heuristic_game(seed, cfg.get("value_target", "win"))
+    net = _load_net(state_dict, cfg.get("value_target", "win"))
     loader = DataLoader(CuarentaDataset(decisions, t_max=T_MAX, history_dropout=0.0),
                         batch_size=256)
     correct = v_se = v_sign = abs_v = 0.0
+    v_sum = v_sq = 0.0      # moments of the TARGET, for the scale-free MSE baseline
     n = 0
     with _torch.no_grad():
         for obs, act, am, feats, mask, pi, v, length, _pw in loader:
             logits, value = net(obs, act, am, feats, mask, lengths=length)
             correct += (logits.argmax(-1) == pi.argmax(-1)).sum().item()
-            v_se += ((value - v).to(_torch.float64) ** 2).sum().item()
+            v = v.to(_torch.float64)
+            v_se += ((value - v) ** 2).sum().item()
             v_sign += ((value > 0) == (v > 0)).sum().item()
             abs_v += value.abs().to(_torch.float64).sum().item()
+            v_sum += v.sum().item()
+            v_sq += (v ** 2).sum().item()
             n += v.shape[0]
-    return {"correct": correct, "v_se": v_se, "v_sign": v_sign, "abs_v": abs_v, "n": n}
+    return {"correct": correct, "v_se": v_se, "v_sign": v_sign, "abs_v": abs_v,
+            "v_sum": v_sum, "v_sq": v_sq, "n": n}
 
 
 def _pooled(worker, args, desc):
@@ -751,6 +876,94 @@ def _with_aliases(metrics: dict, canonical: str, legacy: str | None) -> dict:
     return metrics
 
 
+def head_probe_metrics(state_dict, cfg, desc: str = "eval head probe") -> dict:
+    """
+    Held-out head metrics on fixed, never-trained-on games (see `_probe_worker`).
+
+    Runs on its own so it can be called EVERY iteration, not only when the full league is
+    evaluated. That matters: the failure this measures (a value head that memorises the
+    replay buffer and is then worse than useless on fresh games, while the search — which
+    uses that head to value its leaves — quietly degrades) shows up in the held-out numbers
+    several iterations before it shows up in the win rate. MEASURED on a return-mode run:
+    at eval-every 5 the first alarm was at iteration 4, by which point the net had already
+    gone from 73% to 42% against the heuristic. The probe costs ~20 games of teacher play
+    and no search, i.e. seconds against a ~5 minute iteration.
+
+    Keys (all under `probe_*`): policy top-1 vs the teacher, value MSE/sign, mean |value|,
+    and the moments of the value TARGET, from which `probe_value_r2` is computed — the
+    scale-free statement of "does this head know anything on fresh games?" (0 = no better
+    than predicting the mean, negative = worse).
+    """
+    cur = state_dict
+    results = _pooled(_probe_worker, [(s, cur, cfg) for s in PROBE_SEEDS], desc)
+    n = sum(r["n"] for r in results)
+    v_mean = sum(r["v_sum"] for r in results) / max(n, 1)
+    v_var = max(sum(r["v_sq"] for r in results) / max(n, 1) - v_mean ** 2, 0.0)
+    mse = sum(r["v_se"] for r in results) / max(n, 1)
+    abs_v = sum(r["abs_v"] for r in results) / max(n, 1)
+    return {
+        "probe_policy_acc": sum(r["correct"] for r in results) / max(n, 1),
+        "probe_value_mse": mse,
+        "probe_value_sign": sum(r["v_sign"] for r in results) / max(n, 1),
+        "probe_mean_abs_value": abs_v,
+        "probe_target_mean": v_mean,
+        "probe_target_var": v_var,
+        # Held-out R^2 of the value head: the single number to watch. Scale-free, so it
+        # reads the same in both value targets (see network.RETURN_VALUE_SCALE).
+        "probe_value_r2": 1.0 - mse / v_var if v_var > 0 else 0.0,
+        # How LOUD the head is relative to the spread of what it is predicting. A head
+        # with no held-out skill that predicts at ~1x the target's spread is claiming a
+        # confidence the data does not support, and in return mode the search trusts it
+        # completely (a capture is worth 1/30 of a unit; the leaf value is worth ~1).
+        "probe_value_confidence": abs_v / (v_var ** 0.5) if v_var > 0 else 0.0,
+    }
+
+
+def save_checkpoint(net, path: str, *, iteration: int, value_target: str,
+                    return_value_scale: float, extra: dict | None = None) -> None:
+    """
+    Save `net` to `path` and write the provenance sidecar `path + ".json"` next to it.
+
+    WHY A SIDECAR: the value target and its scale are NOT in the weights — the head differs
+    only by an activation, so a return-mode checkpoint loads into a win-mode net (and vice
+    versa) without an error, and the head's units are then silently wrong. Everything
+    downstream that reads a checkpoint has to know: the trainer's own `--init-checkpoint`
+    (warm-starting across modes wastes iterations), and above all the ONNX export, which has
+    to build the same head the weights were trained with or the backend serves a squashed
+    value. Recording it here is what makes those paths able to check instead of guess.
+    """
+    torch.save(net.state_dict(), path)
+    meta = {
+        "architecture": f"cuarenta_net(value_target={value_target})",
+        "value_target": value_target,
+        "return_value_scale": float(return_value_scale),
+        "hidden": net.hidden,
+        "obs_dim": net.obs_dim,
+        "n_actions": net.n_actions,
+        "action_feat_dim": net.action_feat_dim,
+        "dropout": float(getattr(net, "dropout_p", 0.0)),
+        "iteration": int(iteration),
+        "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds"),
+    }
+    if extra:
+        meta.update(extra)
+    with open(path + ".json", "w") as fh:
+        json.dump(meta, fh, indent=2)
+
+
+def read_checkpoint_meta(path: str) -> dict:
+    """
+    Provenance of a checkpoint, or {} when it has none (every checkpoint trained before the
+    sidecar existed). Callers must treat an empty dict as "unknown", never as "win mode".
+    """
+    try:
+        with open(path + ".json") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
 def run_evaluation(net, reference_state, args, cfg, iteration,
                    initial_state=None, prev_checkpoint_state=None):
     """
@@ -761,6 +974,7 @@ def run_evaluation(net, reference_state, args, cfg, iteration,
     missing one simply removes that member from the league.
     """
     cur = _sd(net)
+    wanted = set(requested_members(args))
     metrics = {}
 
     # 1. Gating match vs the reference checkpoint (primary criterion). Logged under
@@ -775,13 +989,14 @@ def run_evaluation(net, reference_state, args, cfg, iteration,
                                  "reference", None))
 
     # 2. External reference: the heuristic agent (canonical `heuristic`)
-    results = _pooled(
-        _eval_heuristic_worker,
-        [(50000 + i, cur, cfg) for i in range(args.eval_games)],
-        "eval vs heuristic",
-    )
-    metrics.update(_with_aliases(match_metrics(results, "heuristic"),
-                                 "heuristic", None))
+    if "heuristic" in wanted:
+        results = _pooled(
+            _eval_heuristic_worker,
+            [(50000 + i, cur, cfg) for i in range(args.eval_games)],
+            "eval vs heuristic",
+        )
+        metrics.update(_with_aliases(match_metrics(results, "heuristic"),
+                                     "heuristic", None))
 
     # 2b. The rest of the league: `initial`, `prev_checkpoint`, `random` (each
     # `--league-games` games; `--no-league` skips them). They are cheap fillers for
@@ -793,61 +1008,81 @@ def run_evaluation(net, reference_state, args, cfg, iteration,
         metrics.update(match_metrics(results, name))
         league_names.append(name)
 
-    # 3. Health: teacher edge (search vs this net's own raw policy)
-    results = _pooled(
-        _eval_raw_worker,
-        [(70000 + i, cur, cfg) for i in range(args.eval_raw_games)],
-        "eval teacher edge",
-    )
-    metrics.update(match_metrics(results, "teacher_edge"))
+    # 3. Health: teacher edge (search vs this net's own raw policy). On by default: it is
+    # the expert-iteration health check, and the earliest warning that the search has
+    # stopped improving on the policy.
+    if "teacher_edge" in wanted:
+        results = _pooled(
+            _eval_raw_worker,
+            [(70000 + i, cur, cfg) for i in range(args.eval_raw_games)],
+            "eval teacher edge",
+        )
+        metrics.update(match_metrics(results, "teacher_edge"))
 
     # 4. Health: held-out head metrics on fixed, never-trained-on games
-    probe_results = _pooled(
-        _probe_worker,
-        [(s, cur, cfg) for s in PROBE_SEEDS],
-        "eval head probe",
-    )
-    n = sum(r["n"] for r in probe_results)
-    metrics["probe_policy_acc"] = sum(r["correct"] for r in probe_results) / max(n, 1)
-    metrics["probe_value_mse"] = sum(r["v_se"] for r in probe_results) / max(n, 1)
-    metrics["probe_value_sign"] = sum(r["v_sign"] for r in probe_results) / max(n, 1)
-    metrics["probe_mean_abs_value"] = sum(r["abs_v"] for r in probe_results) / max(n, 1)
+    metrics.update(head_probe_metrics(cur, cfg))
 
-    print(f"  eval: reference={metrics['reference']:.1%}  "
-          f"heuristic={metrics['heuristic']:.1%}  "
-          f"teacher_edge={metrics['teacher_edge']:.1%}"
-          + "")
+    # Only the members this run asked for are in `metrics`, so the summary names the ones
+    # that ran rather than assuming the default set.
+    shown = [f"reference={metrics['reference']:.1%}"]
+    for _name in ("heuristic", "teacher_edge"):
+        if _name in metrics:
+            shown.append(f"{_name}={metrics[_name]:.1%}")
+    print("  eval: " + "  ".join(shown))
     if league_names:
         print("        league: " + "  ".join(
             f"{name}={metrics[name]:.1%} (n={int(metrics[f'{name}_n_games'])})"
             for name in league_names))
+    # The detail line follows the same rule as the win-rate line above: it prints what the
+    # run actually evaluated. `heuristic` is optional (a trimmed `--members` set may not
+    # contain it), so its block is included only when those keys exist, and the reference
+    # numbers are then shown in its place instead of a KeyError.
+    has_heur = "heuristic" in metrics
+    detail_member = "heuristic" if has_heur else "reference"
+    label = "heur" if has_heur else "ref"
     print(f"        scores: vs_ref {metrics['reference_score_for']:.1f}-"
           f"{metrics['reference_score_against']:.1f}  "
-          f"heur {metrics['heuristic_score_for']:.1f}-"
-          f"{metrics['heuristic_score_against']:.1f}  "
-          f"returns: vs_heur {metrics['heuristic_return_for']:.1f}-"
-          f"{metrics['heuristic_return_against']:.1f}  "
-          f"caídas {metrics['heuristic_caidas_for']:.2f}-"
-          f"{metrics['heuristic_caidas_against']:.2f}  "
-          f"plies {metrics['heuristic_plies']:.0f}  "
-          f"n {int(metrics['reference_n_games'])}/{int(metrics['heuristic_n_games'])}")
+          f"{label} {metrics[f'{detail_member}_score_for']:.1f}-"
+          f"{metrics[f'{detail_member}_score_against']:.1f}  "
+          f"returns: vs_{label} {metrics[f'{detail_member}_return_for']:.1f}-"
+          f"{metrics[f'{detail_member}_return_against']:.1f}  "
+          f"caídas {metrics[f'{detail_member}_caidas_for']:.2f}-"
+          f"{metrics[f'{detail_member}_caidas_against']:.2f}  "
+          f"plies {metrics[f'{detail_member}_plies']:.0f}  "
+          f"n {int(metrics['reference_n_games'])}"
+          + (f"/{int(metrics['heuristic_n_games'])}" if has_heur else ""))
+    probe_mode = cfg.get("value_target", "win")
+    probe_scale = (RETURN_VALUE_SCALE if probe_mode == "return" else 1.0)
     print(f"        probe: policy_acc={metrics['probe_policy_acc']:.3f}  "
           f"value_mse={metrics['probe_value_mse']:.3f}  "
           f"value_sign={metrics['probe_value_sign']:.3f}  "
-          f"mean|v|={metrics['probe_mean_abs_value']:.3f}")
+          f"mean|v|={metrics['probe_mean_abs_value']:.3f}"
+          + (f"  [return mode, game-return units: mse="
+             f"{metrics['probe_value_mse'] * probe_scale ** 2:.1f}, "
+             f"mean_pred={metrics['probe_target_mean'] * probe_scale:.1f}]"
+             if probe_mode == "return" else ""))
 
-    if metrics["probe_value_mse"] > 1.0:
-        print("        WARNING: held-out value MSE > 1.0 — the value head is worse "
-              "than always predicting 0, and the search uses it to value leaves. "
-              "Raise --value-anchor-weight, cut --epochs-per-iter, or add games.")
-    if metrics["teacher_edge"] < 0.55:
+    # "Worse than always predicting the target's mean", stated scale-free. With ±1
+    # targets this IS the old hard-coded `mse > 1.0` (their variance is ~1.0); with return
+    # targets the variance is ~0.05-0.2, so a fixed threshold would never fire.
+    if metrics["probe_value_mse"] > max(metrics["probe_target_var"], 1e-6):
+        print("        WARNING: held-out value MSE is above the target's own variance — "
+              "the value head is worse than always predicting the mean, and the search "
+              "uses it to value leaves. Raise --value-anchor-weight, cut "
+              "--epochs-per-iter, or add games.")
+    if metrics.get("teacher_edge", 1.0) < 0.55:
         print("        WARNING: the search barely beats this net's own raw policy — "
               "the self-play targets are close to self-distillation, so expect the "
               "policy to stop improving.")
-    if metrics["probe_value_mse"] > 0 and metrics["probe_mean_abs_value"] > 0.7:
+    if probe_mode == "win" and metrics["probe_value_mse"] > 0 \
+            and metrics["probe_mean_abs_value"] > 0.7:
         print("        NOTE: mean |value| is high — the value head is confident. "
               "Compare it with the actual win rates; overconfidence shows up as a "
               "probe value MSE that creeps toward 1.0.")
+    elif probe_mode == "return" and metrics["probe_target_mean"] * probe_scale > probe_scale:
+        print("        NOTE: the value head predicts an expected return above "
+              "RETURN_VALUE_SCALE — higher than any game it has been shown. Compare "
+              "mean_pred above with the self-play returns.")
 
     if not args.no_wandb:
         # `iteration` is the x-axis shared by all three pipelines (PPO and ReBeL log
@@ -865,6 +1100,7 @@ def run_evaluation(net, reference_state, args, cfg, iteration,
 def main():
     # `global` must come before any use of these names in this function.
     global N_SEARCH_ITER, LEAF_VALUE_MODE, DIRICHLET_EPS, TARGET_TEMPERATURE, DEVICE
+    global VALUE_TARGET, REPLAY_ITERS, VALUE_LAMBDA
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--init-checkpoint", type=str, default=None,
@@ -885,7 +1121,15 @@ def main():
     parser.add_argument("--target-temperature", type=float, default=TARGET_TEMPERATURE,
                         help="Flatten the search's visit distribution before training "
                              "on it (1.0 = raw)")
-    parser.add_argument("--epochs-per-iter", type=int, default=EPOCHS_PER_ITER)
+    parser.add_argument("--epochs-per-iter", type=int, default=EPOCHS_PER_ITER,
+                        help="training epochs per iteration over the replay buffer. This "
+                             "× --replay-iters is how many times each sample is replayed, "
+                             "and THAT is what lets a 1.6M-parameter net memorise ~20k "
+                             "decisions (in-sample value R^2 0.77 while held-out R^2 was "
+                             "-0.27). Cut it before adding regularisation.")
+    parser.add_argument("--replay-iters", type=int, default=REPLAY_ITERS,
+                        help="how many iterations of data to keep in the replay buffer "
+                             "(default %(default)s)")
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--leaf-value-mode", type=str, default=LEAF_VALUE_MODE,
                         choices=["net", "rollout"])
@@ -898,21 +1142,59 @@ def main():
                         help="Games for each of the extra league members "
                              "(initial, prev_checkpoint, random). Cheaper than "
                              "--eval-games because they are for comparison, not gating")
+    parser.add_argument("--members", type=str, default=None,
+                        help="comma-separated evaluation members to run; any of "
+                             + ",".join(ALL_MEMBERS) + ". Default: "
+                             + ",".join(DEFAULT_MEMBERS) + ". `reference` is required "
+                             "(the gate reads it). Each member costs its own games, so "
+                             "this is the knob for cutting evaluation time. Mutually "
+                             "exclusive with --no-league.")
     parser.add_argument("--no-league", action="store_true",
                         help="Skip the extra league members entirely (initial, "
                              "prev_checkpoint, random) and only log reference/heuristic")
     parser.add_argument("--accept-threshold", type=float, default=ACCEPT_THRESHOLD,
                         help="Win rate vs the reference required to accept a new net")
+    parser.add_argument("--value-target", type=str, default=VALUE_TARGET,
+                        choices=list(VALUE_TARGETS),
+                        help="what the value head learns and what the search optimizes: "
+                             "`win` (default) = the ±1 game result, the AlphaZero "
+                             "contract where a terminal node is worth ±1 and per-step "
+                             "rewards are ignored; `return` = the env's dense reward as a "
+                             "scaled shaped return-to-go, which makes the search optimize "
+                             "the reward instead of the win rate. `return` changes the "
+                             "head's activation, and existing checkpoints are win-mode: "
+                             "do not warm-start it from one.")
     parser.add_argument("--value-anchor-weight", type=float, default=VALUE_ANCHOR_WEIGHT,
                         help="Keep the value head close to the starting checkpoint's "
                              "value output (0 = off, 5+ = almost frozen). Protects "
                              "the leaf values the search depends on.")
+    parser.add_argument("--dropout", type=float, default=DROPOUT,
+                        help="dropout on the shared state embedding of the training net "
+                             "(default %(default)s = off). Regularises the two heads "
+                             "against the replay buffer, which is replayed many times per "
+                             "iteration (see the value-R^2 warning). It is identity in "
+                             "eval mode, so the search, the evaluators and the ONNX "
+                             "export are unaffected.")
     parser.add_argument("--ckpt-dir", type=str, default=CKPT_DIR,
                         help="Where to write checkpoints (relative to the CWD)")
     parser.add_argument("--device", type=str, default="auto",
                         choices=["auto", "cpu", "cuda", "mps"],
                         help="auto = cuda if available else cpu (MPS is slower here)")
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--value-lambda", type=float, default=VALUE_LAMBDA,
+                        help="RETURN mode only: blend the Monte-Carlo value target with "
+                             "the net's own estimate using TD(lambda) "
+                             "(1.0 = pure Monte-Carlo, 0.0 = one-step TD). Lower values "
+                             "trade the target's noise for the head's bias, which is what "
+                             "stops the head from memorising the replay buffer. Ignored in "
+                             "win mode.")
+    parser.add_argument("--probe-every", type=int, default=PROBE_EVERY,
+                        help="Run the held-out head probe every N iterations "
+                             "(default %(default)s: every iteration). The probe is ~20 "
+                             "teacher games, no search, and it is the EARLIEST signal "
+                             "that the value head has stopped generalising — by the time "
+                             "the win rate moves it is late. Set to 0 to only run it "
+                             "inside the full evaluation (--eval-every).")
     parser.add_argument("--no-eval", action="store_true",
                         help="Skip the initial baseline evaluation")
     args = parser.parse_args()
@@ -921,6 +1203,9 @@ def main():
     # (worker processes would otherwise only see the module defaults).
     N_SEARCH_ITER = args.n_search_iter
     LEAF_VALUE_MODE = args.leaf_value_mode
+    VALUE_TARGET = args.value_target
+    REPLAY_ITERS = args.replay_iters
+    VALUE_LAMBDA = args.value_lambda
     DIRICHLET_EPS = args.dirichlet_eps
     TARGET_TEMPERATURE = args.target_temperature
     DEVICE = _pick_device(args.device)
@@ -933,11 +1218,13 @@ def main():
         "n_iter": N_SEARCH_ITER,
         "leaf_value_mode": LEAF_VALUE_MODE,
         "max_rollout_len": MAX_ROLLOUT_LEN,
+        "value_target": VALUE_TARGET,
     }
 
     if not args.no_wandb:
         wandb.init(
             project="cuarenta-ai",
+            name="ismcts",
             config={
                 "n_iterations": args.iterations,
                 "games_per_iter": args.games_per_iter,
@@ -948,19 +1235,27 @@ def main():
                 "target_temperature": TARGET_TEMPERATURE,
                 "leaf_value_mode": LEAF_VALUE_MODE,
                 "max_rollout_len": MAX_ROLLOUT_LEN,
+                "value_target": VALUE_TARGET,
                 "temperature_cutoff": TEMPERATURE_CUTOFF,
                 "epochs_per_iter": args.epochs_per_iter,
+                "replay_iters": args.replay_iters,
                 "batch_size": BATCH_SIZE,
                 "lr": args.lr,
                 "t_max": T_MAX,
                 "history_dropout": HISTORY_DROPOUT,
                 "eval_games": args.eval_games,
+                "eval_members": ",".join(requested_members(args)),
                 "league_games": args.league_games,
                 "no_league": args.no_league,
                 "eval_raw_games": args.eval_raw_games,
+                "probe_every": args.probe_every,
                 "accept_threshold": args.accept_threshold,
                 "value_anchor_weight": args.value_anchor_weight,
                 "init_checkpoint": args.init_checkpoint,
+                "value_target": VALUE_TARGET,
+                "value_lambda": VALUE_LAMBDA,
+                "return_value_scale": RETURN_VALUE_SCALE,
+                "dropout": args.dropout,
                 "device": DEVICE,
             },
         )
@@ -973,14 +1268,55 @@ def main():
         for group in ("train", "buffer", "selfplay", "eval", "time"):
             wandb.define_metric(f"{group}/*", step_metric="iteration")
 
-    net = CuarentaNet().to(DEVICE)
+    net = CuarentaNet(value_target=VALUE_TARGET, dropout=args.dropout).to(DEVICE)
 
     if args.init_checkpoint:
         # Loads with a clear error if the checkpoint predates the history fixes.
         CuarentaNet.load_checkpoint(net, args.init_checkpoint)
         print(f"Initialized net from {args.init_checkpoint}")
+
+        # The value target and its scale are NOT in the weights: the head differs only by
+        # an activation, so a checkpoint from the other mode loads without complaint and
+        # its output is then in the wrong units for the search. The sidecar this trainer
+        # writes next to every checkpoint is the only way to check, so use it when present
+        # and say plainly when it is not.
+        _meta = read_checkpoint_meta(args.init_checkpoint)
+        if not _meta:
+            print("  NOTE: no provenance sidecar beside this checkpoint (it predates them), "
+                  "so its value target and scale cannot be verified. If it was not trained "
+                  "with the SAME mode and scale as this run, the value head is in the wrong "
+                  "units and the first iterations will be wasted relearning it.")
+        elif (_meta.get("value_target") != VALUE_TARGET
+              or abs(float(_meta.get("return_value_scale", RETURN_VALUE_SCALE))
+                     - RETURN_VALUE_SCALE) > 1e-9):
+            print(f"  WARNING: {args.init_checkpoint} was trained with value_target="
+                  f"{_meta.get('value_target')!r} / scale={_meta.get('return_value_scale')!r}"
+                  f", this run uses {VALUE_TARGET!r} / {RETURN_VALUE_SCALE:g}. The weights "
+                  "load anyway (only the head's activation differs) and the value output is "
+                  "in the WRONG UNITS. Start fresh, or match both settings.")
+        else:
+            print(f"  provenance OK: value_target={_meta.get('value_target')!r} "
+                  f"scale={_meta.get('return_value_scale')!r} "
+                  f"(saved at iteration {_meta.get('iteration')})")
     else:
         print("Starting from random initialization")
+    print(f"Value target: {VALUE_TARGET} "
+          + (f"(search accumulates the dense reward; linear head; "
+             f"RETURN_VALUE_SCALE={RETURN_VALUE_SCALE:g} puts the targets at unit variance, "
+             f"so value loss is comparable to win mode)"
+             if VALUE_TARGET == "return" else
+             "(±1 game results; search ignores per-step rewards)"))
+    if VALUE_TARGET == "return":
+        print(f"Value targets: TD(lambda={VALUE_LAMBDA:g})"
+              + ("  [pure Monte-Carlo returns]" if VALUE_LAMBDA >= 1.0 else
+                 "  [bootstrapped by the net; less noise, inherits the head's bias]"))
+    elif VALUE_LAMBDA != 1.0:
+        print(f"--value-lambda {VALUE_LAMBDA:g} ignored: it only applies to "
+              "--value-target return")
+    if args.dropout > 0:
+        print(f"Dropout on the shared embedding: {args.dropout:g} (training only)")
+    print(f"Replay: {args.replay_iters} iterations x {args.epochs_per_iter} epochs = "
+          f"{args.replay_iters * args.epochs_per_iter} passes over each sample")
 
     # ---- Value anchor ----
     # Frozen copy of the starting net. Its value output is the calibration reference
@@ -1015,6 +1351,10 @@ def main():
     # than the current weights, which would just be another mirror match. `None` until
     # a checkpoint exists, and then the member is skipped.
     last_saved_state = None
+    # The last probe numbers, so the training-time value warning can quote the HELD-OUT
+    # value MSE next to the in-sample R^2 (the gap between the two is what identifies
+    # memorisation; an absolute value loss cannot).
+    last_probe: dict = {}
     best_heuristic = -1.0
     best_path = os.path.join(ckpt_dir, "best.pt")
     best_heur_path = os.path.join(ckpt_dir, "best_heuristic.pt")
@@ -1038,7 +1378,9 @@ def main():
     if args.init_checkpoint:
         # The reference IS the starting net until something beats it, so make sure it
         # exists on disk before training can touch the weights.
-        torch.save(net.state_dict(), best_path)
+        save_checkpoint(net, best_path, iteration=-1, value_target=VALUE_TARGET,
+                        return_value_scale=RETURN_VALUE_SCALE,
+                        extra={"role": "starting weights (reference until beaten)"})
         print(f"Saved starting weights as {best_path} (the reference until beaten)")
 
     # Mild weight decay: with only a few hundred self-play games in the buffer, the
@@ -1064,8 +1406,13 @@ def main():
         metrics = run_evaluation(net, reference_state, args, search_cfg, iteration=-1,
                                  initial_state=initial_state,
                                  prev_checkpoint_state=last_saved_state)
+        last_probe = {k: metrics[k] for k in
+                      ("probe_value_mse", "probe_target_var") if k in metrics}
         mirror_baseline = metrics["reference"]
-        best_heuristic = metrics["heuristic"]
+        # `heuristic` can be dropped with --members; without it there is nothing to keep a
+        # "best vs the bot" checkpoint against, so tracking is disabled rather than reading
+        # a key that is not there.
+        best_heuristic = metrics.get("heuristic")
         accept_needed = max(args.accept_threshold, mirror_baseline + 0.05)
         print(f"  mirror baseline (net vs itself) = {mirror_baseline:.1%}; "
               f"a new net must reach {accept_needed:.1%} vs the reference to be "
@@ -1098,7 +1445,14 @@ def main():
               f"{sp_metrics['selfplay/limpias_team1']:.2f}  "
               f"plies={sp_metrics['selfplay/plies']:.0f}  "
               f"root|v|={sp_metrics['selfplay/mean_root_value_team0']:+.2f}/"
-              f"{sp_metrics['selfplay/mean_root_value_team1']:+.2f}")
+              f"{sp_metrics['selfplay/mean_root_value_team1']:+.2f}  "
+              # The value LABELS' spread, in game points, next to what pure Monte-Carlo
+              # would have given. In return mode with lambda < 1 the first number is what
+              # the head actually trains on: it should be the SMALLER one, or the
+              # bootstrapped label is carrying more of the head's error than it removes of
+              # the far future's noise (see selfplay.backfill_value_targets).
+              f"value_std={sp_metrics['selfplay/value_target_std']:.1f}"
+              f"(mc {sp_metrics['selfplay/value_mc_std']:.1f})")
         if not args.no_wandb:
             # `iteration` is the shared x-axis (see wandb.define_metric above);
             # `iter` carries the same value under its old name.
@@ -1108,7 +1462,8 @@ def main():
         t0 = time.perf_counter()
         if args.imitation_games > 0:
             imitation = collect_imitation_games(args.imitation_games,
-                                                base_seed=500_000 + iteration * 1000)
+                                                base_seed=500_000 + iteration * 1000,
+                                                value_target=VALUE_TARGET)
             print(f"  collected {len(imitation)} imitation decisions "
                   f"(policy weight {args.imitation_policy_weight})")
             decisions = decisions + imitation
@@ -1140,19 +1495,22 @@ def main():
         loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
 
         for epoch in range(args.epochs_per_iter):
-            loss, pl, vl, al, tent = train_one_epoch(
+            loss, pl, vl, al, tent, v_r2, v_var = train_one_epoch(
                 net, loader, opt, DEVICE,
                 anchor_net=anchor_net, anchor_weight=anchor_weight,
             )
             excess = pl - tent
             print(f"  epoch {epoch}: loss={loss:.4f} policy={pl:.4f} value={vl:.4f}"
                   + (f" anchor={al:.4f}" if anchor_weight > 0 else "")
-                  + f" | target_ent={tent:.3f} excess_ce={excess:.3f}")
+                  + f" | value_r2={v_r2:+.2f}"
+                  + f" target_ent={tent:.3f} excess_ce={excess:.3f}")
             if not args.no_wandb:
                 wandb.log({"train/loss": loss, "train/policy_loss": pl,
                            "train/value_loss": vl, "train/anchor_loss": al,
                            "train/target_entropy": tent,
                            "train/excess_ce": excess,
+                           "train/value_r2": v_r2,
+                           "train/value_target_var": v_var,
                            "iteration": iteration, "iter": iteration})
         t_train = time.perf_counter() - t0
 
@@ -1171,15 +1529,39 @@ def main():
         # event (`last_saved_state`), i.e. the weights from before this iteration's
         # training — NOT the file we are about to write, which is just the current net.
         prev_ckpt_state = last_saved_state
-        torch.save(net.state_dict(), ckpt_path)
+        save_checkpoint(net, ckpt_path, iteration=iteration, value_target=VALUE_TARGET,
+                        return_value_scale=RETURN_VALUE_SCALE, extra={"role": "periodic"})
         last_saved_state = _sd(net)
         print(f"  saved {ckpt_path}")
 
-        # 5. Evaluate
-        if (iteration + 1) % args.eval_every == 0:
+        # 5. Held-out head probe — EVERY iteration by default, and deliberately BEFORE
+        # the (expensive) league evaluation so the training-time warning below always has a
+        # fresh held-out number to quote. It costs ~20 teacher games and no search.
+        will_evaluate = (iteration + 1) % args.eval_every == 0
+        if args.probe_every and (iteration + 1) % args.probe_every == 0 and not will_evaluate:
+            probe = head_probe_metrics(_sd(net), search_cfg)
+            last_probe = {k: probe[k] for k in
+                          ("probe_value_mse", "probe_target_var") if k in probe}
+            print(f"  probe: value_r2={probe['probe_value_r2']:+.2f}  "
+                  f"mse={probe['probe_value_mse']:.3f}  "
+                  f"conf={probe['probe_value_confidence']:.2f}  "
+                  f"policy_acc={probe['probe_policy_acc']:.3f}")
+            if probe["probe_value_r2"] < 0.0:
+                print("        WARNING: the value head has NO held-out skill (r2 < 0 means "
+                      "worse than predicting the target's mean) while the search values "
+                      "its leaves with it. Stop and fix the value head (fewer epochs, "
+                      "λ-returns, an anchor) before spending more iterations.")
+            if not args.no_wandb:
+                wandb.log(dict({f"eval/{k}": v for k, v in probe.items()},
+                               iteration=iteration, iter=iteration))
+
+        # 6. Full evaluation (league + gate + probe + the rest of the health metrics)
+        if will_evaluate:
             metrics = run_evaluation(net, reference_state, args, search_cfg, iteration,
                                      initial_state=initial_state,
                                      prev_checkpoint_state=prev_ckpt_state)
+            last_probe = {k: metrics[k] for k in
+                          ("probe_value_mse", "probe_target_var") if k in metrics}
 
             # Gating on the REFERENCE match (AlphaZero style). The bar is the mirror
             # calibration plus a margin, because a single 60-game match has a standard
@@ -1187,7 +1569,11 @@ def main():
             # unlikely while still moving fast enough to see progress.
             if metrics["reference"] >= accept_needed:
                 reference_state = _sd(net)
-                torch.save(net.state_dict(), best_path)
+                save_checkpoint(net, best_path, iteration=iteration,
+                                value_target=VALUE_TARGET,
+                                return_value_scale=RETURN_VALUE_SCALE,
+                                extra={"role": "reference (gated best-so-far)",
+                                       "reference_win_rate": float(metrics["reference"])})
                 print(f"  ACCEPTED: beats the reference {metrics['reference']:.1%} "
                       f"(bar {accept_needed:.1%}) -> {best_path} (new reference)")
             else:
@@ -1196,13 +1582,18 @@ def main():
 
             # Also keep the best-vs-heuristic net: it is what you would deploy today,
             # even though it is not the training criterion.
-            if metrics["heuristic"] > best_heuristic:
+            if (best_heuristic is not None and "heuristic" in metrics
+                    and metrics["heuristic"] > best_heuristic):
                 best_heuristic = metrics["heuristic"]
-                torch.save(net.state_dict(), best_heur_path)
+                save_checkpoint(net, best_heur_path, iteration=iteration,
+                                value_target=VALUE_TARGET,
+                                return_value_scale=RETURN_VALUE_SCALE,
+                                extra={"role": "best vs heuristic",
+                                       "heuristic_win_rate": float(best_heuristic)})
                 print(f"  new best vs heuristic ({best_heuristic:.1%}) -> "
                       f"{best_heur_path}")
 
-        # 6. Timing: how long each phase took, so you can see where a run's hours go.
+        # 7. Timing: how long each phase took, so you can see where a run's hours go.
         t_iter = time.perf_counter() - t_iter
         timing = {
             "time/iteration_s": t_iter,
@@ -1217,8 +1608,12 @@ def main():
             wandb.log(dict(timing, iteration=iteration, iter=iteration))
 
     print(f"\nTotal time: {timedelta(seconds=time.perf_counter() - start)}")
-    if best_heuristic >= 0:
+    # `best_heuristic` stays None when `heuristic` is not one of the requested members,
+    # so this is a `is not None` test rather than a numeric one.
+    if best_heuristic is not None:
         print(f"Best winrate vs heuristic: {best_heuristic:.2%}")
+    elif "heuristic" not in requested_members(args):
+        print("Best winrate vs heuristic: n/a (heuristic not in --members)")
     if not args.no_wandb:
         wandb.finish()
 

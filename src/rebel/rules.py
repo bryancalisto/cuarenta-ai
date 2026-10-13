@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import copy
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play
+from captures import CAIDA_POINTS, LIMPIA_POINTS, valid_captures, score_play
 from utils import PointsReasons, has_reason
 from env import (
     Action, CuarentaState,
@@ -140,9 +140,9 @@ def step_state(
         reward += len(action.capture)
 
         if has_reason(reasons, PointsReasons.CAIDA):
-            reward += 2
+            reward += CAIDA_POINTS
         if has_reason(reasons, PointsReasons.LIMPIA):
-            reward += 2
+            reward += LIMPIA_POINTS
     else:
         ns.table.append(action.card)
         ns.last_placed = action.card
@@ -169,8 +169,12 @@ def step_state(
                 ns.scores[t] = min(
                     ns.scores[t] + carton, MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS
                 )
+                # Cartón IS rewarded, matching env.py (see the REWARD note in
+                # src/ismcts/env.py). The ReBeL solver's utility is the game outcome, so this
+                # term only matters where rewards are accumulated (its own eval harness
+                # checks the return identity), but the two copies must still agree.
                 if t == team:
-                    reward += carton      # the acting team's carton, as env.py pays it
+                    reward += carton
             _new_round(ns, rng)
 
     return ns, reward, False, player

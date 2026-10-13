@@ -59,18 +59,20 @@ exactly the union of both teams' capture piles, which are public anyway.
 
 REWARD
 ------
-    +1 per captured card, +2 for a caída, +2 for a limpia, +4 for winning the game
-so a team's episode return is `cards_captured + 2*caidas + 2*limpias + 4*won`.
+    +1 per captured card, +2 for a caída, +2 for a limpia, WIN_BONUS for winning the game
+so a team's episode return is `cards_captured + 2*caidas + 2*limpias + WIN_BONUS*won`.
+The cartón is a reward term too (see the REWARD note in src/ismcts/env.py, where the same
+reward lives).
 
 This is a DENSE reward: taking cards pays immediately instead of only through the cartón
-majority at the end of the last deck, and the terminal bonus is small, so the return is
-dominated by card play rather than by the final result.
+majority at the end of the last deck.
 
 WHAT THIS MEANS FOR THE eval/ METRICS: the evaluation league's `_return_for` /
-`_return_against` report this same quantity, so their scale is tied to this formula. The
-ISMCTS and ReBeL pipelines still use `2*caidas + 2*limpias + 50*won`, which means
-`eval/*_return_*` is NOT directly comparable across pipelines -- compare win rates and
-scores across pipelines, and returns only within one pipeline.
+`_return_against` report this same quantity, so their scale is tied to this formula. All
+three pipelines (PPO, ISMCTS, ReBeL) pay the same dense reward now, so `eval/*_return_*`
+IS comparable across pipelines as long as their `WIN_BONUS` values match — check that
+before reading a return chart across two runs. Win rates and scores are comparable
+unconditionally.
 """
 
 from __future__ import annotations
@@ -81,7 +83,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, FrozenSet
 
 from card import Card, build_deck, shuffled_deck
-from captures import valid_captures, score_play
+from captures import CAIDA_POINTS, LIMPIA_POINTS, valid_captures, score_play
 from utils import PointsReasons, has_reason
 
 NUM_PLAYERS = 4
@@ -92,9 +94,10 @@ MAX_ACTIONS = 64
 ACTION_FEAT_DIM = 84
 WIN_SCORE = 40
 
-# Reward for winning the game. This is the one sparse term in an otherwise dense reward
-# (+1 per captured card, +2 caída, +2 limpia, + cartón). See the REWARD note in the module
-# docstring for why it is this size; it is a single knob on purpose.
+# Reward for winning the game: +1 per captured card, +2 caída, +2 limpia, WIN_BONUS for
+# the win. Measured with the trained net, the win bonus is
+# only ~15% of a game's return, so raise this if you want a win-first agent. It is a
+# single knob on purpose; see the REWARD note in src/ismcts/env.py for the full rationale.
 WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index
@@ -298,10 +301,10 @@ class CuarentaEnv:
             reward += len(action.capture)
 
             if has_reason(reasons, PointsReasons.CAIDA):
-                reward += 2
+                reward += CAIDA_POINTS
 
             if has_reason(reasons, PointsReasons.LIMPIA):
-                reward += 2
+                reward += LIMPIA_POINTS
         else:
             # Place card on table
             s.table.append(action.card)
@@ -342,6 +345,9 @@ class CuarentaEnv:
                     )
 
                 info["carton_points"] = team_carton[TEAMS[player]]
+                # Cartón is PAID to the acting team, in sync with src/ismcts/env.py (see the
+                # REWARD note there) — all three pipelines pay the same dense reward so their
+                # `eval/*_return_*` curves stay comparable.
                 reward += team_carton[TEAMS[player]]
                 info["new_round"] = True   # the deal that just ended is complete
                 self._new_round()
