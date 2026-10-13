@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type { Game } from './api';
+	import { t } from './i18n.svelte';
 
 	let { game, onReturnToLobby } = $props<{
 		game: Game;
@@ -31,30 +32,30 @@
 <div class="dialog-overlay">
 	<div class="dialog-content">
 		<div class="results-header">
-			<div class="winner-label">Winner</div>
-			<div class="winner-team">Team {winnerTeam}</div>
+			<div class="winner-label">{t('Winner')}</div>
+			<div class="winner-team">{t('Team {team}', { team: winnerTeam ?? '' })}</div>
 		</div>
 
 		<div class="scores-grid">
 			<div class="score-card">
-				<div class="team-label">Team 1</div>
+				<div class="team-label">{t('Team 1')}</div>
 				<div class="team-score">{game.scores?.[0] ?? 0}</div>
 			</div>
 			<div class="score-card">
-				<div class="team-label">Team 2</div>
+				<div class="team-label">{t('Team 2')}</div>
 				<div class="team-score">{game.scores?.[1] ?? 0}</div>
 			</div>
 		</div>
 
 		<div class="game-meta">
 			<div class="meta-item">
-				<span class="meta-label">Time played:</span>
+				<span class="meta-label">{t('Time played:')}</span>
 				<span class="meta-value">{duration}</span>
 			</div>
 		</div>
 
 		<button class="return-button" onclick={onReturnToLobby}>
-			Return to lobby
+			{t('Return to lobby')}
 		</button>
 	</div>
 </div>

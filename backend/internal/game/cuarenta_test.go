@@ -103,3 +103,79 @@ func TestCaptureCount(t *testing.T) {
 		t.Errorf("Expected 2 cards captured (played + table card), got %d", capturedCount)
 	}
 }
+
+// TestDealCounterAndRoundEndEvent pins the two events the web client animates.
+//
+// `DealsDealt` counts deals so the client can animate a deal whenever it changes (the
+// opening deal is 1, a redeal or a new round bumps it), and a deal-ending carton publishes
+// a `game.RoundEnd` in the step's info: the piles as they were counted, the cards still on
+// the table, and the points each team was paid. The client shows the counting from that
+// payload and the state clears the piles in the same step, so this is the last moment the
+// information exists.
+func TestDealCounterAndRoundEndEvent(t *testing.T) {
+	env := NewEnv(1234)
+	env.Reset()
+	if got := env.State().DealsDealt; got != 1 {
+		t.Fatalf("the opening deal should be deal 1, got %d", got)
+	}
+
+	seenDeal := map[int]bool{1: true}
+	var withRoundEnd int
+	plies := 0
+	for !env.State().Done {
+		before := env.State().DealsDealt
+		legal := env.LegalActions()
+		if len(legal) == 0 {
+			t.Fatalf("ply %d: no legal actions", plies)
+		}
+		_, _, info, err := env.Step(legal[plies%len(legal)])
+		if err != nil {
+			t.Fatalf("ply %d: %v", plies, err)
+		}
+
+		after := env.State().DealsDealt
+		if after < before || after > before+1 {
+			t.Fatalf("ply %d: deals went %d -> %d", plies, before, after)
+		}
+		if after == before+1 {
+			if seenDeal[after] {
+				t.Fatalf("deal %d was reported twice", after)
+			}
+			seenDeal[after] = true
+
+			// A deal boundary is either a plain redeal (deck left) or a carton.
+			if raw, ok := info["roundEnd"]; ok {
+				event, ok := raw.(RoundEnd)
+				if !ok {
+					t.Fatalf("ply %d: roundEnd has type %T", plies, raw)
+				}
+				withRoundEnd++
+				for team := 0; team < 2; team++ {
+					if event.Counted[team] != len(event.Captured[team]) {
+						t.Fatalf("ply %d: counted %d but sent %d cards for team %d", plies,
+							event.Counted[team], len(event.Captured[team]), team)
+					}
+					want := 0
+					if event.Counted[team] > 19 {
+						want = event.Counted[team] - 19 + 5
+						if want%2 != 0 {
+							want++
+						}
+					}
+					if event.Carton[team] != want {
+						t.Fatalf("ply %d: carton for team %d is %d, expected %d (%d cards)",
+							plies, team, event.Carton[team], want, event.Counted[team])
+					}
+				}
+			}
+		}
+		plies++
+		if plies > 600 {
+			t.Fatalf("game did not terminate")
+		}
+	}
+	if withRoundEnd == 0 {
+		t.Fatalf("no deal-ending carton event in a whole game")
+	}
+	t.Logf("deals: %d, carton events: %d, plies: %d", len(seenDeal), withRoundEnd, plies)
+}

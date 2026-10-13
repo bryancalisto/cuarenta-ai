@@ -533,3 +533,210 @@ func TestRecurrentStateIsDroppedWhenTheGameGoesAway(t *testing.T) {
 		}
 	})
 }
+
+// TestAITurnsWaitOutTheDealAnimation: the web UI animates a deal (five cards to one seat, then
+// the next), so the first AI move of a deal is held back until that animation is over --
+// otherwise a card flies across the table while the cards are still being dealt. The wait is
+// paid ONCE per deal: `playAITurns` runs after every human move and snapshot request, and
+// waiting every time would stall the game instead of pacing it.
+//
+// The pauses go through `handler.pause`, so this asserts the pacing without sleeping it out.
+func TestAITurnsWaitOutTheDealAnimation(t *testing.T) {
+	const graceMs = 6500
+
+	// The fixture hands the AI seat a single card, so every call needs the position re-armed
+	// (otherwise the second turn has no legal action at all).
+	armAITurn := func(session *gameSession) {
+		state := session.env.State()
+		state.CurrentPlayer = 0
+		state.Hands[0] = []game.Card{{Rank: game.Cinco, Suit: game.CorazonesRojos}}
+		state.Table = []game.Card{
+			{Rank: game.Cinco, Suit: game.Brillos},
+			{Rank: game.Cinco, Suit: game.Treboles},
+		}
+	}
+
+	newPacedHandler := func(t *testing.T) (*MainGameplay, models.Game, *gameSession, *[]time.Duration) {
+		t.Helper()
+		fake := &fakeInference{slot: 1}
+		handler, gameObj, session := aiTurnFixture(t, fake)
+		handler.dealGraceMs = graceMs
+		pauses := &[]time.Duration{}
+		handler.pause = func(d time.Duration) { *pauses = append(*pauses, d) }
+		return handler, gameObj, session, pauses
+	}
+
+	// assertThinkingPause checks a pause is one of the "AI thinks" beats (1.5-3 s).
+	assertThinkingPause := func(t *testing.T, pause time.Duration) {
+		t.Helper()
+		if pause < 1500*time.Millisecond || pause > 3000*time.Millisecond {
+			t.Errorf("thinking pause was %v, expected it in [1.5s, 3s]", pause)
+		}
+	}
+
+	t.Run("the first move of a deal waits for the animation", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if len(*pauses) != 2 {
+			t.Fatalf("expected a deal wait plus a thinking pause, got %v", *pauses)
+		}
+		// Before anything else: the deal animation, then the beat.
+		if (*pauses)[0] != graceMs*time.Millisecond {
+			t.Errorf("first pause was %v, expected the %d ms deal grace", (*pauses)[0], graceMs)
+		}
+		assertThinkingPause(t, (*pauses)[1])
+	})
+
+	t.Run("later calls in the same deal do not wait again", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		// Same deal, AI on turn again (the loop stops at the human seat otherwise).
+		*pauses = nil
+		deal := session.env.State().DealsDealt
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if session.env.State().DealsDealt != deal {
+			t.Fatalf("this test needs the deal to be unchanged, it went %d -> %d", deal, session.env.State().DealsDealt)
+		}
+		if len(*pauses) != 1 {
+			t.Fatalf("expected only the thinking pause once the deal has been waited out, got %v", *pauses)
+		}
+		assertThinkingPause(t, (*pauses)[0])
+	})
+
+	t.Run("a new deal waits again", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		// A redeal or the deal after a cartón: a fresh deal to animate.
+		*pauses = nil
+		armAITurn(session)
+		session.env.State().DealsDealt++
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if len(*pauses) != 2 || (*pauses)[0] != graceMs*time.Millisecond {
+			t.Errorf("expected the deal grace to be paid again for the new deal, got %v", *pauses)
+		}
+	})
+
+	t.Run("only the animation still running is waited for", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+
+		// The deal was dealt 2 s ago: the cards have been flying for 2 s of the 6.5 s animation,
+		// so the remaining 4.5 s is what holds the AI back -- not the whole grace.
+		session.Mu.Lock()
+		session.dealDealtAt = handler.clock.Now().Add(-2 * time.Second)
+		session.Mu.Unlock()
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if len(*pauses) != 2 {
+			t.Fatalf("expected a shortened deal wait plus a thinking pause, got %v", *pauses)
+		}
+		if expected := 4500 * time.Millisecond; (*pauses)[0] != expected {
+			t.Errorf("deal wait was %v, expected the remaining %v of the animation", (*pauses)[0], expected)
+		}
+	})
+
+	t.Run("a deal dealt long ago does not wait at all", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+
+		// The human was on turn first and played 30 s later: the animation is long over, so the
+		// AI must not sit through it again.
+		session.Mu.Lock()
+		session.dealDealtAt = handler.clock.Now().Add(-30 * time.Second)
+		session.Mu.Unlock()
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if len(*pauses) != 1 {
+			t.Fatalf("expected only the thinking pause for a long-finished deal, got %v", *pauses)
+		}
+		assertThinkingPause(t, (*pauses)[0])
+	})
+
+	t.Run("a zero grace disables the wait", func(t *testing.T) {
+		handler, gameObj, session, pauses := newPacedHandler(t)
+		handler.dealGraceMs = 0
+		armAITurn(session)
+
+		if err := handler.playAITurns(gameObj.Id); err != nil {
+			t.Fatalf("playAITurns failed: %v", err)
+		}
+
+		if len(*pauses) != 1 {
+			t.Errorf("expected only the thinking pause with the grace disabled, got %v", *pauses)
+		}
+		assertThinkingPause(t, (*pauses)[0])
+	})
+}
+
+// TestADealStampsWhenItWasDealt closes the loop on the deal grace: the AI waits out the client's
+// deal animation, and it can only wait out "what is left of it" because the deal is stamped at
+// the moment it happens (inside the move that dealt it). This plays the last card of a deal with
+// a full deck left, which is the redeal the UI animates.
+func TestADealStampsWhenItWasDealt(t *testing.T) {
+	fake := &fakeInference{}
+	handler, gameObj, session := humanTurnFixture(t, fake)
+
+	state := session.env.State()
+	for p := 0; p < 4; p++ {
+		if p != 1 {
+			state.Hands[p] = nil // everyone else is out of cards
+		}
+	}
+	if len(state.Deck) < 4*game.HandSize {
+		t.Fatalf("the fixture needs a full deck for the redeal, it has %d cards", len(state.Deck))
+	}
+	dealBefore := state.DealsDealt
+	if !session.dealDealtAt.IsZero() {
+		t.Fatal("the fixture should start with no deal stamped")
+	}
+
+	// The human plays their last card (a capture), which empties every hand.
+	if _, err := handler.playHumanTurnAndAdvanceAI(gameObj.Id, "creator-1", PlayGameDTO{CardIndex: 14, CaptureIndices: []int{4}}); err != nil {
+		t.Fatalf("playHumanTurnAndAdvanceAI failed: %v", err)
+	}
+
+	if got := session.env.State().DealsDealt; got != dealBefore+1 {
+		t.Fatalf("expected the last cards to trigger a redeal (%d -> %d), got %d", dealBefore, dealBefore+1, got)
+	}
+
+	session.Mu.Lock()
+	stamped := session.dealDealtAt
+	session.Mu.Unlock()
+
+	if stamped.IsZero() {
+		t.Fatal("a deal was handed out but nothing stamped when: the AI grace would then always wait the full animation")
+	}
+	if !stamped.Equal(handler.clock.Now()) {
+		t.Errorf("the deal was stamped at %v, expected the current time %v", stamped, handler.clock.Now())
+	}
+}

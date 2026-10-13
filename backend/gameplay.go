@@ -32,10 +32,24 @@ type MainGameplay struct {
 	clock        clock.Clock
 	db           Database
 	inferService InferenceService
+
+	// pause is what the AI's pacing goes through (time.Sleep in production). It is a field so
+	// tests can assert the pacing instead of waiting it out.
+	pause func(time.Duration)
+
+	// dealGraceMs is how long the first AI move of a deal waits, so the cards have finished
+	// flying to the four seats before anyone plays. Derived from AI_DEAL_GRACE_MS; 0 disables it.
+	dealGraceMs int
 }
 
 func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService) *MainGameplay {
-	return &MainGameplay{db: db, clock: clock, inferService: inferService}
+	return &MainGameplay{
+		db:           db,
+		clock:        clock,
+		inferService: inferService,
+		pause:        time.Sleep,
+		dealGraceMs:  config.GetEnv().AiDealGraceMs,
+	}
 }
 
 type PlayGameDTO struct {
@@ -48,6 +62,16 @@ type gameSession struct {
 	env        *game.Env
 	stepCount  int
 	humanSeats map[int]string
+
+	// pendingRoundEnd is the carton event of the move just played, waiting to ride along
+	// with the next snapshot and then be cleared: the client animates it exactly once.
+	pendingRoundEnd *models.RoundEnd
+
+	// dealGraceDeal is the deal whose animation has already been waited out (see dealGrace),
+	// and dealDealtAt is when that deal was handed out, so only the animation still running
+	// is waited for.
+	dealGraceDeal int
+	dealDealtAt   time.Time
 }
 
 var Sessions = struct {
@@ -174,6 +198,13 @@ func sessionSnapshot(base models.Game, session *gameSession, move *models.Move) 
 	snapshot.CardsCaptured[1] = cardIndices(state.CardsCaptured[1])
 	snapshot.CurrentPlayer = state.CurrentPlayer
 	snapshot.DeckRemaining = len(state.Deck)
+	snapshot.DealId = state.DealsDealt
+	if session.pendingRoundEnd != nil {
+		snapshot.RoundEnd = session.pendingRoundEnd
+		session.pendingRoundEnd = nil
+	} else {
+		snapshot.RoundEnd = nil
+	}
 	snapshot.NewRoundStart = state.DecksConsumed > 0 && len(state.CardsCaptured[0]) == 0 && len(state.CardsCaptured[1]) == 0
 	snapshot.Done = state.Done
 	if state.LastPlaced != nil {
@@ -445,7 +476,10 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	// action it is about to play are appended here (see InferenceService.RecordHistory).
 	g.inferService.RecordHistory(gameId, currentSeat, obs, game.ActionFeatures(action, state))
 
+	dealsBefore := state.DealsDealt
 	_, done, info, err := session.env.Step(action)
+	g.noteDeal(session, dealsBefore)
+	session.pendingRoundEnd = roundEndFromInfo(info)
 
 	if done {
 		base.DurationSeconds = g.getGameDurationSeconds(base)
@@ -503,6 +537,28 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 // `seat` is the acting player, whose point of view the observation is built from; while
 // the turn is being played it is the current player. A net that cannot run is logged and
 // ignored: a human's move must never fail because inference was unavailable.
+// roundEndFromInfo pulls the engine's carton event out of a step's info map, or nil when
+// that move did not end a deal. The engine only sets it on the move that paid the carton.
+func roundEndFromInfo(info map[string]any) *models.RoundEnd {
+	if info == nil {
+		return nil
+	}
+	raw, ok := info["roundEnd"]
+	if !ok {
+		return nil
+	}
+	engineEvent, ok := raw.(game.RoundEnd)
+	if !ok {
+		return nil
+	}
+	return &models.RoundEnd{
+		Captured:   [][]int{append([]int(nil), engineEvent.Captured[0]...), append([]int(nil), engineEvent.Captured[1]...)},
+		Counted:    []int{engineEvent.Counted[0], engineEvent.Counted[1]},
+		Carton:     []int{engineEvent.Carton[0], engineEvent.Carton[1]},
+		TableCards: append([]int(nil), engineEvent.TableCards...),
+	}
+}
+
 func (g *MainGameplay) advanceRecurrentState(gameId string, session *gameSession, seat int) {
 	state := session.env.State()
 	if state == nil {
@@ -542,10 +598,52 @@ func (g *MainGameplay) cancelRunningGames() int {
 	return count
 }
 
-// Return random milliseconds for slee[1, 3]
-func randomSleep() {
+// randomPause is how long the AI "thinks" between two moves: [1.5, 3] seconds, so the humans
+// can follow what is happening.
+func randomPause() time.Duration {
 	millis := []int{1500, 1800, 2000, 2400, 3000}
-	time.Sleep(time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond)
+	return time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond
+}
+
+// noteDeal records when a deal was handed out. Call it with the session lock held, right after
+// `env.Step`: the deal happens inside that step, and noticing it here -- rather than when the AI
+// loop next looks at the state -- is what lets `dealGrace` wait only for the part of the deal
+// animation that is still running. An AI turn that comes round 20 seconds after the deal (the
+// human was on turn first) must not wait for an animation that is long over.
+func (g *MainGameplay) noteDeal(session *gameSession, dealsBefore int) {
+	if session.env.State().DealsDealt != dealsBefore {
+		session.dealDealtAt = g.clock.Now()
+	}
+}
+
+// dealGrace is how long to wait before the first AI move of a deal, so the deal animation has
+// finished. It is paid ONCE per deal, not once per call: `playAITurns` runs after every human
+// move and snapshot request, and waiting every time would stall the game instead of pacing it.
+// Zero when the deal has already been waited out, or when the animation it protects has ended.
+func (g *MainGameplay) dealGrace(session *gameSession, dealsDealt int) time.Duration {
+	if g.dealGraceMs <= 0 || session == nil {
+		return 0
+	}
+	grace := time.Duration(g.dealGraceMs) * time.Millisecond
+
+	session.Mu.Lock()
+	defer session.Mu.Unlock()
+
+	if session.dealGraceDeal == dealsDealt {
+		return 0
+	}
+	session.dealGraceDeal = dealsDealt
+
+	// An animated deal always rides along with the move that dealt it, so `dealDealtAt` is set;
+	// the fallback (a deal nobody stepped into) waits the whole grace.
+	if !session.dealDealtAt.IsZero() {
+		if remaining := grace - g.clock.Now().Sub(session.dealDealtAt); remaining > 0 {
+			return remaining
+		}
+		return 0
+	}
+
+	return grace
 }
 
 func (g *MainGameplay) playAITurns(gameId string) error {
@@ -585,7 +683,13 @@ func (g *MainGameplay) playAITurns(gameId string) error {
 			break
 		}
 
-		randomSleep()
+		// A deal was just handed out: the client is animating it (five cards to each seat), so
+		// hold this move back rather than flying a card across a deal that is still in progress.
+		if grace := g.dealGrace(session, state.DealsDealt); grace > 0 {
+			g.pause(grace)
+		}
+
+		g.pause(randomPause())
 
 		if err := g.playAITurn(gameId); err != nil {
 			log.Fatalf("ERROR while playing AI turn: %v", err)
@@ -684,7 +788,10 @@ func (g *MainGameplay) playHumanTurnAndAdvanceAI(gameId string, userID string, d
 	// the AI turns do, and only then apply the action.
 	g.advanceRecurrentState(gameId, session, currentSeat)
 
-	_, done, _, err := session.env.Step(action)
+	dealsBefore := state.DealsDealt
+	_, done, info, err := session.env.Step(action)
+	g.noteDeal(session, dealsBefore)
+	session.pendingRoundEnd = roundEndFromInfo(info)
 
 	if done {
 		base.DurationSeconds = g.getGameDurationSeconds(base)

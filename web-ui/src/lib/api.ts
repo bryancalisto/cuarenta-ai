@@ -2,7 +2,7 @@ import axios from 'axios';
 
 export type PublicUser = {
 	id: string;
-	email: string;
+	username: string;
 };
 
 export type HumanPlayer = {
@@ -22,6 +22,20 @@ export type CaptureOption = {
 	captureIndices: number[];
 };
 
+/**
+ * Sent with the ONE snapshot published by the move that ended a deal and paid the cartón:
+ * the piles as they were counted (`captured`/`counted`), the points each team was paid
+ * (`carton`, index 0/1), and the cards still on the table when the deal ended. The state
+ * clears the piles in that same step, so this payload is what lets the UI *show* the
+ * counting instead of just jumping to the new scores.
+ */
+export type RoundEnd = {
+	captured: number[][];
+	counted: number[];
+	carton: number[];
+	tableCards?: number[];
+};
+
 export type Game = {
 	id: string;
 	humanPlayers: HumanPlayer[];
@@ -36,6 +50,11 @@ export type Game = {
 	done?: boolean;
 	deckRemaining?: number;
 	newRoundStart?: boolean;
+	/** Counts the deals of this match (1 = the opening deal). It changes exactly when every
+	 *  seat has been dealt a fresh hand, which is what the deal animation triggers on. */
+	dealId?: number;
+	/** Present only on the snapshot of the move that ended a deal (see RoundEnd). */
+	roundEnd?: RoundEnd;
 	durationSeconds?: number;
 	createdBy: string;
 	createdAt: string;
@@ -96,12 +115,14 @@ async function postJson<T>(path: string, token: string | null, body: unknown): P
 	return response.data as T;
 }
 
-export async function signUp(email: string, password: string): Promise<AuthResponse> {
-	return postJson<AuthResponse>('/auth/sign-up', null, { email, password });
+// Sign-in identity is a username, not an email (see backend/db.go: UsernameProblem pins the
+// allowed shape). Lookups are case-insensitive server-side.
+export async function signUp(username: string, password: string): Promise<AuthResponse> {
+	return postJson<AuthResponse>('/auth/sign-up', null, { username, password });
 }
 
-export async function signIn(email: string, password: string): Promise<AuthResponse> {
-	return postJson<AuthResponse>('/auth/sign-in', null, { email, password });
+export async function signIn(username: string, password: string): Promise<AuthResponse> {
+	return postJson<AuthResponse>('/auth/sign-in', null, { username, password });
 }
 
 export async function refreshToken(): Promise<string> {

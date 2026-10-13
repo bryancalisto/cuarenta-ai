@@ -19,6 +19,7 @@
 		type WsMessage
 	} from '$lib/api';
 	import GameBoard from '$lib/GameBoard.svelte';
+	import { LOCALES, initLocale, locale, setLocale, t, type Locale } from '$lib/i18n.svelte';
 
 	type AuthTab = 'signin' | 'signup';
 	type Screen = 'auth' | 'menu' | 'create' | 'join' | 'lobby' | 'game';
@@ -26,14 +27,15 @@
 	const sessionKey = 'cuarenta-session';
 	const lastGameKey = 'cuarenta-last-game';
 	const seats = [1, 2, 3, 4];
-	const teams = [
-		{ value: 1, label: 'Team 1' },
-		{ value: 2, label: 'Team 2' }
-	];
+	// Localised labels: rebuilt from `t()` so they follow the language dropdown.
+	const teams = $derived([
+		{ value: 1, label: t('Team 1') },
+		{ value: 2, label: t('Team 2') }
+	]);
 
 	let authTab = $state<AuthTab>('signin');
 	let screen = $state<Screen>('auth');
-	let email = $state('');
+	let username = $state('');
 	let password = $state('');
 	let authLoading = $state(false);
 	let authError = $state('');
@@ -145,7 +147,7 @@
 					activeGame = null;
 					pendingGameId = '';
 					screen = 'menu';
-					setNotice('Game was canceled');
+					setNotice(t('Game was canceled'));
 					persistSession();
 					return;
 				}
@@ -155,7 +157,7 @@
 					mainMessage = '';
 				} else {
 					screen = 'lobby';
-					mainMessage = `Connected to game ${payload.game.id}`;
+					mainMessage = t('Connected to game {id}', { id: payload.game.id });
 				}
 				pendingGameId = payload.game.id;
 				socketError = '';
@@ -233,11 +235,11 @@
 
 		try {
 			const result: AuthResponse =
-				authTab === 'signin' ? await signIn(email, password) : await signUp(email, password);
+				authTab === 'signin' ? await signIn(username, password) : await signUp(username, password);
 			token = result.accessToken;
 			currentUser = result.user;
 			screen = 'menu';
-			setNotice(authTab === 'signin' ? 'Signed in' : 'Account created');
+			setNotice(t(authTab === 'signin' ? 'Signed in' : 'Account created'));
 			persistSession();
 			openSocket();
 			await loadMyGames();
@@ -245,7 +247,7 @@
 				await subscribeToGame(pendingGameId);
 			}
 		} catch (error) {
-			authError = error instanceof Error ? error.message : 'Authentication failed';
+			authError = error instanceof Error ? error.message : t('Authentication failed');
 		} finally {
 			authLoading = false;
 		}
@@ -272,7 +274,7 @@
 
 		pendingGameId = activeGame.id;
 		screen = 'lobby';
-		setNotice(`Opened lobby ${activeGame.id}`);
+		setNotice(t('Opened lobby {id}', { id: activeGame.id }));
 		persistSession();
 		subscribeToGame(activeGame.id);
 	}
@@ -292,12 +294,12 @@
 			activeGame = game;
 			pendingGameId = game.id;
 			screen = 'lobby';
-			setNotice(`Game ${game.id} created`);
+			setNotice(t('Game {id} created', { id: game.id }));
 			persistSession();
 			await loadMyGames();
 			subscribeToGame(game.id);
 		} catch (error) {
-			createMessage = error instanceof Error ? error.message : 'Could not create game';
+			createMessage = error instanceof Error ? error.message : t('Could not create game');
 		} finally {
 			createLoading = false;
 		}
@@ -307,7 +309,7 @@
 		activeGame = game;
 		pendingGameId = game.id;
 		screen = 'lobby';
-		setNotice(`Opened game ${game.id}`);
+		setNotice(t('Opened game {id}', { id: game.id }));
 		persistSession();
 		subscribeToGame(game.id);
 	}
@@ -315,15 +317,15 @@
 	async function handleCancelGameFromList(game: Game, event: Event) {
 		event.stopPropagation();
 
-		const confirmed = confirm("Are you sure you want to cancel this game? It will be deleted immediately for all players.");
+		const confirmed = confirm(t('Are you sure you want to cancel this game? It will be deleted immediately for all players.'));
 		if (!confirmed) return;
 
 		try {
 			await cancelGame(token ?? '', game.id);
 			await loadMyGames();
-			setNotice('Game canceled successfully');
+			setNotice(t('Game canceled successfully'));
 		} catch (error) {
-			setNotice(error instanceof Error ? error.message : 'Could not cancel game');
+			setNotice(error instanceof Error ? error.message : t('Could not cancel game'));
 		}
 	}
 
@@ -361,7 +363,7 @@
 		} catch (error) {
 			joinPreview = null;
 			joinPreviewCode = code;
-			joinMessage = error instanceof Error ? error.message : 'Could not load game';
+			joinMessage = error instanceof Error ? error.message : t('Could not load game');
 		}
 	}
 
@@ -380,11 +382,11 @@
 			activeGame = game;
 			pendingGameId = game.id;
 			screen = 'lobby';
-			setNotice(`Joined game ${game.id}`);
+			setNotice(t('Joined game {id}', { id: game.id }));
 			persistSession();
 			subscribeToGame(game.id);
 		} catch (error) {
-			joinMessage = error instanceof Error ? error.message : 'Could not join game';
+			joinMessage = error instanceof Error ? error.message : t('Could not join game');
 		} finally {
 			joinLoading = false;
 		}
@@ -404,11 +406,11 @@
 				screen = 'game';
 			}
 			await loadMyGames();
-			setNotice(`Game ${game.id} started`);
+			setNotice(t('Game {id} started', { id: game.id }));
 			persistSession();
 			subscribeToGame(game.id);
 		} catch (error) {
-			mainMessage = error instanceof Error ? error.message : 'Could not start game';
+			mainMessage = error instanceof Error ? error.message : t('Could not start game');
 		} finally {
 			startLoading = false;
 		}
@@ -417,7 +419,7 @@
 	async function handleCancelGame() {
 		if (!activeGame) return;
 
-		const confirmed = confirm("Are you sure you want to cancel this game? It will be deleted immediately for all players.");
+		const confirmed = confirm(t('Are you sure you want to cancel this game? It will be deleted immediately for all players.'));
 		if (!confirmed) return;
 
 		cancelLoading = true;
@@ -429,10 +431,10 @@
 			pendingGameId = '';
 			screen = 'menu';
 			await loadMyGames();
-			setNotice('Game canceled successfully');
+			setNotice(t('Game canceled successfully'));
 			persistSession();
 		} catch (error) {
-			mainMessage = error instanceof Error ? error.message : 'Could not cancel game';
+			mainMessage = error instanceof Error ? error.message : t('Could not cancel game');
 		} finally {
 			cancelLoading = false;
 		}
@@ -461,16 +463,39 @@
 		mainMessage = '';
 	}
 
+	// ONE back button for the whole app, in the header next to the language dropdown, instead of
+	// one per screen. The game screen used to carry its own ⬅️ in a column that was `hidden
+	// lg:flex`, which left phones with no way back at all.
+	const canGoBack = $derived(
+		screen === 'create' || screen === 'join' || screen === 'lobby' || screen === 'game'
+	);
+	// Reuses the results dialog's wording for the game screen: the same trip back, already
+	// translated, and no near-duplicate key to keep in step.
+	const backLabel = $derived(screen === 'game' ? t('Return to lobby') : t('Back to menu'));
+
+	function goBack() {
+		if (screen === 'game') {
+			returnToLobby();
+			return;
+		}
+		// Leaving a screen also drops the notice it was showing: a message about the game you just
+		// left has no business following you to the menu.
+		mainMessage = '';
+		createMessage = '';
+		joinMessage = '';
+		screen = 'menu';
+	}
+
 	function isOccupied(game: Game | null, index: number) {
 		return Boolean(game?.humanPlayers.some((player) => player.index === index));
 	}
 
 	function seatLabel(index: number) {
-		return `Seat ${index}`;
+		return t('Seat {seat}', { seat: index });
 	}
 
 	function playerSummary(player: HumanPlayer) {
-		return `${seatLabel(player.index)} · Team ${player.team}`;
+		return `${seatLabel(player.index)} · ${t('Team {team}', { team: player.team })}`;
 	}
 
 	function allowedSeatsForTeam(team: number) {
@@ -511,13 +536,13 @@
 	function formatGameStatus(game: Game) {
 		switch (game.status) {
 			case 'finished':
-				return 'Finished';
+				return t('Finished');
 			case 'running':
-				return 'In progress';
+				return t('In progress');
 			case 'canceled':
-				return 'Canceled'
+				return t('Canceled');
 			default:
-				return 'Lobby'
+				return t('Lobby');
 		}
 	}
 
@@ -528,6 +553,7 @@
 	}
 
 	onMount(() => {
+		initLocale();
 		loadStoredSession();
 	});
 
@@ -537,7 +563,7 @@
 </script>
 
 <svelte:head>
-	<title>Cuarenta Multiplayer</title>
+	<title>{t('Cuarenta Multiplayer')}</title>
 </svelte:head>
 
 <div class="min-h-screen flex px-3 py-4 sm:px-4 sm:py-6 md:px-6 lg:px-8 text-slate-100">
@@ -545,7 +571,53 @@
 		<header class="rounded-xl sm:rounded-2xl lg:rounded-[2rem] border border-white/10 bg-white/5 p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 			<div class="flex flex-col gap-3 sm:gap-4 lg:flex-row lg:items-end lg:justify-between">
 				<div class="max-w-2xl">
-					<p class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">Cuarenta Multiplayer</p>
+					<div class="culture-mark" title={t('Cuarenta, the Ecuadorian card game')}>
+						<!-- The Ecuador/Quito landmark mark: the game is Ecuadorian, and this is
+						     the one piece of the UI that says so. -->
+						<span class="culture-icon lg" role="img" aria-label={t('Ecuador')}></span>
+						<div>
+							<p class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">{t('Cuarenta Multiplayer')}</p>
+							<p class="mt-1 text-[0.7rem] sm:text-xs text-slate-400">{t('Ecuador · 40 · caídas & limpias')}</p>
+						</div>
+					</div>
+				</div>
+
+				<!-- Top-right cluster: back, then the language picker. The picker keeps the corner,
+				     the back button sits beside it, and on a phone the two wrap rather than squeeze. -->
+				<div class="header-actions">
+					{#if canGoBack}
+						<button class="back-button" onclick={goBack} aria-label={backLabel} title={backLabel}>
+							<!-- Arrow drawn inline: one glyph is not worth an icon dependency, and it
+							     inherits the button's colour. -->
+							<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path
+									d="M15 5l-7 7 7 7"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2.2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								/>
+							</svg>
+							<span class="back-label">{backLabel}</span>
+						</button>
+					{/if}
+
+					<!-- Language picker: always present, top right, on every screen. A native
+					     <select> because it is keyboard- and screen-reader-friendly for free. -->
+					<label class="language-picker">
+						<span class="sr-only">{t('Language')}</span>
+						<select
+							class="language-select"
+							aria-label={t('Language')}
+							value={locale()}
+							onchange={(event) => setLocale((event.currentTarget as HTMLSelectElement).value as Locale)}
+						>
+							{#each LOCALES as option (option.value)}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+					</label>
 				</div>
 			</div>
 		</header>
@@ -563,7 +635,7 @@
 								authError = '';
 							}}
 						>
-							Sign in
+							{t('Sign in')}
 						</button>
 						<button
 							class={`flex-1 rounded-full px-4 py-2 text-sm font-medium transition ${
@@ -574,24 +646,29 @@
 								authError = '';
 							}}
 						>
-							Sign up
+							{t('Sign up')}
 						</button>
 					</div>
 
 					<div class="mt-6 space-y-4">
 						<label class="block">
-							<span class="mb-2 block text-sm font-medium text-slate-300">Email</span>
+							<span class="mb-2 block text-sm font-medium text-slate-300">{t('Username')}</span>
 							<input
-								bind:value={email}
-								autocomplete="email"
-								type="email"
+								bind:value={username}
+								autocomplete="username"
+								type="text"
+								spellcheck="false"
+								autocapitalize="none"
 								class="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-white outline-none ring-0 transition placeholder:text-slate-500 focus:border-amber-400/60 focus:bg-slate-900"
-								placeholder="you@example.com"
+								placeholder={t('yourname')}
 							/>
+							<span class="mt-1.5 block text-xs text-slate-500">
+								{t('3-20 characters: letters, digits, . _ -')}
+							</span>
 						</label>
 
 						<label class="block">
-							<span class="mb-2 block text-sm font-medium text-slate-300">Password</span>
+							<span class="mb-2 block text-sm font-medium text-slate-300">{t('Password')}</span>
 							<input
 								bind:value={password}
 								autocomplete={authTab === 'signin' ? 'current-password' : 'new-password'}
@@ -602,7 +679,7 @@
 						</label>
 
 						{#if authError}
-							<div class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+							<div role="alert" aria-live="assertive" class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
 								{authError}
 							</div>
 						{/if}
@@ -612,7 +689,11 @@
 							disabled={authLoading}
 							onclick={() => void submitAuth()}
 						>
-							{authLoading ? 'Working...' : authTab === 'signin' ? 'Sign in' : 'Create account'}
+							{authLoading
+								? t('Working...')
+								: authTab === 'signin'
+									? t('Sign in')
+									: t('Create account')}
 						</button>
 					</div>
 				</div>
@@ -620,9 +701,11 @@
 		{:else if screen === 'menu'}
 			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.9fr_1.1fr] flex-1">
 				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">Menu</div>
+					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-amber-300">{t('Menu')}</div>
 					<p class="mt-2 sm:mt-3 text-xs sm:text-sm leading-6 text-slate-300">
-						You are signed in as {currentUser?.email}. Create a new game or join an existing game.
+						{t('You are signed in as {username}. Create a new game or join an existing game.', {
+							username: currentUser?.username ?? ''
+						})}
 					</p>
 
 					<div class="mt-4 sm:mt-6 grid gap-2 sm:gap-3">
@@ -634,7 +717,7 @@
 								createMessage = '';
 							}}
 						>
-							New game
+							{t('New game')}
 						</button>
 						<button
 							class="rounded-lg sm:rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-white transition hover:border-sky-400/60 hover:bg-sky-400/10 active:scale-95"
@@ -644,24 +727,24 @@
 								joinMessage = '';
 							}}
 						>
-							Join game
+							{t('Join game')}
 						</button>
 						<button
 							class="rounded-lg sm:rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-2.5 sm:py-3 font-semibold text-sm sm:text-base text-slate-200 transition hover:bg-white/5 active:scale-95"
 							onclick={() => signOut()}
 						>
-							Sign out
+							{t('Sign out')}
 						</button>
 					</div>
 				</div>
 
 				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] flex flex-col max-h-96 sm:max-h-none lg:h-[60%] border border-white/10 bg-white/5 p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-sky-300">My games</div>
+					<div class="text-xs sm:text-sm font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-sky-300">{t('My games')}</div>
 					{#if myGamesLoading}
-						<div class="mt-3 sm:mt-4 text-xs sm:text-sm text-slate-400">Loading games...</div>
+						<div class="mt-3 sm:mt-4 text-xs sm:text-sm text-slate-400">{t('Loading games...')}</div>
 					{:else if myGames.length === 0}
 						<div class="mt-3 sm:mt-4 rounded-2xl sm:rounded-3xl border border-dashed border-white/15 bg-slate-950/30 p-3 sm:p-5 text-xs sm:text-sm text-slate-400">
-							No games created yet.
+							{t('No games created yet.')}
 						</div>
 					{:else}
 						<div class="mt-3 sm:mt-4 space-y-2 sm:space-y-3 overflow-y-auto">
@@ -677,7 +760,7 @@
 													<div class="text-xs sm:text-sm text-slate-400 font-mono">{game.id}</div>
 													{#if game.createdBy === currentUser?.id}
 														<div class="rounded-full border border-orange-400/30 bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-200">
-															Owner
+															{t('Owner')}
 														</div>
 													{/if}
 												</div>
@@ -685,7 +768,7 @@
 													{#if game.startedAt}
 														{new Date(game.startedAt).toLocaleDateString()}
 													{:else}
-														Created
+														{t('Created')}
 													{/if}
 												</div>
 											</div>
@@ -699,9 +782,9 @@
 											</div>
 										</div>
 										<div class="mt-2 sm:mt-3 flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm text-slate-400">
-											<div class="whitespace-nowrap">Players: {game.humanPlayers.length}/4</div>
+											<div class="whitespace-nowrap">{t('Players: {count}/4', { count: game.humanPlayers.length })}</div>
 											{#if game.durationSeconds}
-												<div class="whitespace-nowrap">Duration: {Math.floor(game.durationSeconds / 60)}m</div>
+												<div class="whitespace-nowrap">{t('Duration: {minutes}m', { minutes: Math.floor(game.durationSeconds / 60) })}</div>
 											{/if}
 										</div>
 									</button>
@@ -709,7 +792,7 @@
 										<button
 											class="absolute top-2 right-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 px-2 py-1 text-xs font-medium transition cursor-pointer"
 											onclick={(e) => void handleCancelGameFromList(game, e)}
-											title="Delete game"
+											title={t('Delete game')}
 										>
 											✕
 										</button>
@@ -719,7 +802,7 @@
 						</div>
 					{/if}
 					{#if mainMessage}
-						<div class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+						<div role="status" aria-live="polite" class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
 							{mainMessage}
 						</div>
 					{/if}
@@ -728,15 +811,15 @@
 		{:else if screen === 'create'}
 			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
 				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">New game</div>
-					<h2 class="mt-3 text-2xl font-semibold text-white">Pick your seat</h2>
+					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">{t('New game')}</div>
+					<h2 class="mt-3 text-2xl font-semibold text-white">{t('Pick your seat')}</h2>
 					<p class="mt-3 text-sm leading-6 text-slate-300">
-						Choose a team and spot index, then create the game.
+						{t('Choose a team and spot index, then create the game.')}
 					</p>
 
 					<div class="mt-6 space-y-4">
 						<div>
-							<div class="mb-2 text-sm font-medium text-slate-300">Team</div>
+							<div class="mb-2 text-sm font-medium text-slate-300">{t('Team')}</div>
 							<div class="grid grid-cols-2 gap-2">
 								{#each teams as team}
 									<button
@@ -754,7 +837,7 @@
 						</div>
 
 						<div>
-							<div class="mb-2 text-sm font-medium text-slate-300">Spot index</div>
+							<div class="mb-2 text-sm font-medium text-slate-300">{t('Spot index')}</div>
 							<div class="grid grid-cols-2 gap-2">
 								{#each seats as seat}
 										<button
@@ -773,7 +856,7 @@
 							</div>
 
 						{#if createMessage}
-							<div class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+							<div role="status" aria-live="polite" class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
 								{createMessage}
 							</div>
 						{/if}
@@ -784,13 +867,7 @@
 								disabled={createLoading}
 								onclick={() => void createLobbyGame()}
 							>
-								{createLoading ? 'Creating...' : 'Create game'}
-							</button>
-							<button
-								class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"
-								onclick={() => (screen = 'menu')}
-							>
-								Back
+								{createLoading ? t('Creating...') : t('Create game')}
 							</button>
 						</div>
 					</div>
@@ -799,24 +876,24 @@
 		{:else if screen === 'join'}
 			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[0.95fr_1.05fr] flex-1">
 				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
-					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Join game</div>
-					<h2 class="mt-3 text-2xl font-semibold text-white">Enter the game 4-character code</h2>
+					<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">{t('Join game')}</div>
+					<h2 class="mt-3 text-2xl font-semibold text-white">{t('Enter the game 4-character code')}</h2>
 
 					<div class="mt-6 space-y-4">
 						<label class="block">
-							<span class="mb-2 block text-sm font-medium text-slate-300">Game code</span>
+							<span class="mb-2 block text-sm font-medium text-slate-300">{t('Game code')}</span>
 							<input
 								value={joinCode}
 								oninput={joinCodeInput}
 								maxlength="4"
 								autocomplete="off"
 								class="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-center text-2xl font-semibold tracking-[0.45em] uppercase text-white outline-none transition placeholder:text-slate-500 focus:border-sky-400/60 focus:bg-slate-900"
-								placeholder="AB12"
+								placeholder={t('Game code')}
 							/>
 						</label>
 
 						{#if joinMessage}
-							<div class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+							<div role="status" aria-live="polite" class="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
 								{joinMessage}
 							</div>
 						{/if}
@@ -825,7 +902,7 @@
 							<div class="rounded-3xl border border-white/10 bg-slate-950/40 p-5">
 								<div class="flex flex-wrap items-center justify-between gap-3">
 									<div>
-										<div class="text-sm text-slate-400">Lobby preview</div>
+										<div class="text-sm text-slate-400">{t('Lobby preview')}</div>
 										<div class="mt-1 text-3xl font-semibold tracking-[0.35em] text-white">{joinPreview.id}</div>
 									</div>
 									<div class="rounded-full border border-sky-400/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-200">
@@ -834,11 +911,11 @@
 								</div>
 
 								<div class="mt-4 text-sm text-slate-300">
-									Human Players: {joinPreview.humanPlayers.length}/4
+									{t('Human Players: {count}/4', { count: joinPreview.humanPlayers.length })}
 								</div>
 
 								<div class="mt-5">
-									<div class="mb-2 text-sm font-medium text-slate-300">Team</div>
+									<div class="mb-2 text-sm font-medium text-slate-300">{t('Team')}</div>
 									<div class="grid grid-cols-2 gap-2">
 										{#each teams as team}
 											<button
@@ -856,7 +933,7 @@
 								</div>
 
 								<div class="mt-5">
-									<div class="mb-2 text-sm font-medium text-slate-300">Spot index</div>
+									<div class="mb-2 text-sm font-medium text-slate-300">{t('Spot index')}</div>
 									<div class="grid grid-cols-2 gap-2">
 										{#each seats as seat}
 											<button
@@ -879,70 +956,56 @@
 									disabled={joinLoading}
 									onclick={() => void enterGame()}
 								>
-									{joinLoading ? 'Entering...' : 'Enter game'}
+									{joinLoading ? t('Entering...') : t('Enter game')}
 								</button>
 							</div>
 						{:else}
 							<div class="rounded-3xl border border-dashed border-white/15 bg-slate-950/30 p-5 text-sm text-slate-400">
-								Type the game code to enter its lobby.
+								{t('Type the game code to enter its lobby.')}
 							</div>
 						{/if}
 
 						<div class="flex gap-3">
-							<button
-								class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"
-								onclick={() => (screen = 'menu')}
-							>
-								Back
-							</button>
 						</div>
 					</div>
 				</div>
 
 			</section>
 		{:else if screen === 'game'}
-			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[1fr_120px] flex-1">
-				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
+			<section class="flex flex-1 flex-col gap-3 sm:gap-4 md:gap-6">
+				<!-- `min-w-0`: a flex child defaults to `min-width: auto`, so without it the board's
+				     content can size this column wider than the screen. -->
+				<div class="min-w-0 rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					{#if activeGame}
 						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} onReturnToLobby={returnToLobby} />
 					{/if}
 					{#if mainMessage}
-						<div class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+						<div role="status" aria-live="polite" class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
 							{mainMessage}
 						</div>
 					{/if}
 					{#if socketError}
-						<div class="mt-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+						<div role="alert" aria-live="assertive" class="mt-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
 							{socketError}
 						</div>
 					{/if}
 				</div>
 
-				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-white/5 p-2 sm:p-3 shadow-2xl shadow-black/30 backdrop-blur-xl hidden lg:flex flex-col">
-					<div class="mt-4 grid gap-3">
-						<button
-							class="rounded-2xl hover:cursor-pointer p-1 font-semibold text-2xl transition hover:bg-white/10"
-							onclick={() => returnToLobby()}
-						>
-							⬅️
-						</button>
-					</div>
-				</div>
 			</section>
 		{:else if screen === 'lobby'}
 			<section class="grid gap-3 sm:gap-4 md:gap-6 lg:grid-cols-[1.05fr_0.95fr] flex-1">
 				<div class="rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					<div class="flex flex-wrap items-start justify-between gap-4">
 						<div>
-							<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">Lobby</div>
-							<h2 class="mt-3 text-2xl font-semibold text-white">Game {activeGame?.id}</h2>
+							<div class="text-xs font-semibold uppercase tracking-[0.3em] text-amber-300">{t('Lobby')}</div>
+							<h2 class="mt-3 text-2xl font-semibold text-white">{t('Game {id}', { id: activeGame?.id ?? '' })}</h2>
 							<p class="mt-3 text-sm leading-6 text-slate-300">
-								Players can join until the creator starts the game.
+								{t('Players can join until the creator starts the game.')}
 							</p>
 						</div>
 						<div class="rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
-							<div class="text-xs uppercase tracking-[0.25em] text-slate-500">Status</div>
-							<div class="mt-1 font-medium text-white">{activeGame ? formatGameStatus(activeGame) : 'Unknown'}</div>
+							<div class="text-xs uppercase tracking-[0.25em] text-slate-500">{t('Status')}</div>
+							<div class="mt-1 font-medium text-white">{activeGame ? formatGameStatus(activeGame) : t('Unknown')}</div>
 						</div>
 					</div>
 
@@ -950,11 +1013,11 @@
 						<div class="mt-6 rounded-3xl border border-white/10 bg-slate-950/40 p-5">
 							<div class="flex flex-wrap items-center justify-between gap-3">
 								<div>
-									<div class="text-sm text-slate-400">Game code</div>
+									<div class="text-sm text-slate-400">{t('Game code')}</div>
 									<div class="mt-1 text-4xl font-semibold tracking-[0.45em] text-white">{activeGame.id}</div>
 								</div>
 								<div class="text-sm text-slate-400">
-									Created by {activeGame.createdBy === currentUser?.id ? 'you' : activeGame.createdBy}
+									{t('Created by {who}', { who: activeGame.createdBy === currentUser?.id ? t('you') : activeGame.createdBy })}
 								</div>
 							</div>
 
@@ -966,7 +1029,7 @@
 											{#if playerForSeat(activeGame, seat)}
 												{playerSummaryForSeat(activeGame, seat)}
 											{:else}
-												Open
+												{t('Open')}
 											{/if}
 										</div>
 									</div>
@@ -974,7 +1037,7 @@
 							</div>
 
 							<div class="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-								Human Players: {activeGame.humanPlayers.length}/4
+								{t('Human Players: {count}/4', { count: activeGame.humanPlayers.length })}
 							</div>
 						</div>
 
@@ -984,7 +1047,7 @@
 							</div>
 						{/if}
 						{#if socketError}
-							<div class="mt-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+							<div role="alert" aria-live="assertive" class="mt-4 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
 								{socketError}
 							</div>
 						{/if}
@@ -1004,7 +1067,11 @@
 								}
 							}}
 						>
-							{startLoading ? 'Starting...' : (activeGame?.status === 'running' || activeGame?.status === 'finished') ? 'Show table' : 'Start game'}
+							{startLoading
+						? t('Starting...')
+						: activeGame?.status === 'running' || activeGame?.status === 'finished'
+							? t('Show table')
+							: t('Start game')}
 						</button>
 						{#if activeGame?.createdBy === currentUser?.id}
 							<button
@@ -1012,23 +1079,14 @@
 								disabled={cancelLoading}
 								onclick={() => handleCancelGame()}
 							>
-								{cancelLoading ? 'Canceling...' : 'Cancel game'}
+								{cancelLoading ? t('Canceling...') : t('Cancel game')}
 							</button>
 						{/if}
-						<button
-							class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-white transition hover:bg-white/10"
-							onclick={() => {
-								screen = 'menu';
-								mainMessage = '';
-							}}
-						>
-							Back to menu
-						</button>
 						<button
 							class="rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 font-semibold text-slate-200 transition hover:bg-white/5"
 							onclick={() => signOut()}
 						>
-							Sign out
+							{t('Sign out')}
 						</button>
 					</div>
 				</div>

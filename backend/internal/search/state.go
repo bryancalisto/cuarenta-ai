@@ -52,6 +52,7 @@ func Clone(s *game.State) *game.State {
 		CurrentPlayer: s.CurrentPlayer,
 		Done:          s.Done,
 		PlaysThisDeal: s.PlaysThisDeal,
+		DealsDealt:    s.DealsDealt,
 	}
 	for seat, hand := range s.Hands {
 		out.Hands[seat] = append([]game.Card(nil), hand...)
@@ -230,6 +231,7 @@ func redeal(s *game.State) {
 		s.Deck = s.Deck[game.HandSize:]
 	}
 	s.PlaysThisDeal = [game.NumPlayers]int{}
+	s.DealsDealt++
 }
 
 func newRound(s *game.State, rng *rand.Rand) {
@@ -247,6 +249,7 @@ func newRound(s *game.State, rng *rand.Rand) {
 	s.LastPlaced = nil
 	s.CurrentPlayer = (s.CurrentPlayer + 1) % game.NumPlayers
 	s.PlaysThisDeal = [game.NumPlayers]int{}
+	s.DealsDealt++
 }
 
 // legalActionsFromState is `game.Env.legalActions` for a bare state (the game package's

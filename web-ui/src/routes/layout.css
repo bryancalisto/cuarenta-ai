@@ -37,3 +37,148 @@
 :global(*) {
 	box-sizing: border-box;
 }
+
+/* ---------------------------------------------------------------------------
+ * The Ecuador / Quito mark: the game is Ecuadorian, so the header carries the
+ * country's landmark icon as a small cultural mark. The asset is a flat black
+ * SVG, so it is used as a MASK and painted with the theme's amber: that keeps it
+ * crisp at any size and lets it follow the palette instead of shipping a
+ * recoloured copy.
+ * ------------------------------------------------------------------------- */
+.culture-mark {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.culture-icon {
+	display: inline-block;
+	width: 1.35rem;
+	height: 1.35rem;
+	flex: none;
+	background-color: var(--accent);
+	-webkit-mask: url('/images/ecuador-quito-svgrepo-com.svg') center / contain no-repeat;
+	mask: url('/images/ecuador-quito-svgrepo-com.svg') center / contain no-repeat;
+}
+
+.culture-icon.lg {
+	width: 2rem;
+	height: 2rem;
+}
+
+.culture-icon.sm {
+	width: 1.05rem;
+	height: 1.05rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Language picker: a native <select> styled to match the glass header. It is
+ * deliberately always visible (every screen renders the header) because a player
+ * who cannot read the UI needs to find it without exploring.
+ * ------------------------------------------------------------------------- */
+/* Back button + language picker, as one top-right cluster. `margin-left: auto` right-aligns
+   the cluster in BOTH header layouts (the header is a row on wide screens, a column on narrow
+   ones), and it wraps instead of squeezing on a phone. */
+.header-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-left: auto;
+}
+
+.language-picker {
+	display: inline-flex;
+	align-items: center;
+	flex: none;
+}
+
+/* The one way back, next to the language picker. Same pill and palette as the picker so the
+   two read as one control group. */
+.back-button {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	/* 2.4rem keeps it a comfortable touch target on a phone, where the label is hidden. */
+	min-height: 2.4rem;
+	padding: 0.35rem 0.85rem 0.35rem 0.6rem;
+	border-radius: 999px;
+	border: 1px solid var(--card-border);
+	background-color: rgba(9, 18, 33, 0.85);
+	color: var(--text-main);
+	font-size: 0.8rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	cursor: pointer;
+	transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.15s ease;
+}
+
+.back-button svg {
+	width: 1rem;
+	height: 1rem;
+	flex: none;
+	color: var(--accent);
+	transition: transform 0.15s ease;
+}
+
+.back-button:hover,
+.back-button:focus-visible {
+	border-color: rgba(245, 158, 11, 0.6);
+	background-color: rgba(15, 23, 42, 0.95);
+	outline: none;
+}
+
+/* The arrow leans into the direction it will take you. */
+.back-button:hover svg,
+.back-button:focus-visible svg {
+	transform: translateX(-2px);
+}
+
+.back-button:active {
+	transform: scale(0.97);
+}
+
+/* The label is a nicety; the arrow and the aria-label carry the button. On a phone it goes, so
+   the header stays a single tidy row. */
+.back-label {
+	white-space: nowrap;
+}
+
+@media (max-width: 420px) {
+	.back-label {
+		display: none;
+	}
+}
+
+.language-select {
+	appearance: none;
+	padding: 0.4rem 1.6rem 0.4rem 0.7rem;
+	border-radius: 999px;
+	border: 1px solid var(--card-border);
+	background-color: rgba(9, 18, 33, 0.85);
+	color: var(--text-main);
+	font-size: 0.8rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	cursor: pointer;
+	transition: border-color 0.2s ease, background-color 0.2s ease;
+	/* caret drawn with a gradient so no icon asset is needed */
+	background-image: linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+		linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+	background-position: calc(100% - 0.95rem) center, calc(100% - 0.7rem) center;
+	background-size: 0.28rem 0.28rem, 0.28rem 0.28rem;
+	background-repeat: no-repeat;
+}
+
+.language-select:hover,
+.language-select:focus-visible {
+	border-color: rgba(245, 158, 11, 0.6);
+	background-color: rgba(15, 23, 42, 0.95);
+	outline: none;
+}
+
+.language-select option {
+	color: #0b1220;
+	background: #f8fafc;
+}

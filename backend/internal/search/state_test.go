@@ -243,6 +243,9 @@ func diffStates(a, b *game.State) string {
 	if a.PlaysThisDeal != b.PlaysThisDeal {
 		return "plays_this_deal"
 	}
+	if a.DealsDealt != b.DealsDealt {
+		return "deals_dealt"
+	}
 	if (a.LastPlaced == nil) != (b.LastPlaced == nil) ||
 		(a.LastPlaced != nil && *a.LastPlaced != *b.LastPlaced) {
 		return "last placed"

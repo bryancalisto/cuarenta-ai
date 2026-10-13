@@ -32,6 +32,12 @@ type Environ struct {
 	// 0.15-0.4 s of "thinking" per turn.
 	AiSearchIterations int     `env:"AI_SEARCH_ITERATIONS" envDefault:"128"`
 	AiSearchCPuct      float64 `env:"AI_SEARCH_CPUCT" envDefault:"1.5"`
+
+	// AiDealGraceMs is how long the FIRST AI move of a deal is held back, so the client's deal
+	// animation (five cards to one seat, then the next) has finished before a card flies across
+	// the board. Keep it in step with the web UI: it is DEAL_TOTAL_MS + DEAL_HOLD_MS in
+	// web-ui/src/lib/GameBoard.svelte, which the deal timings there define. 0 disables the wait.
+	AiDealGraceMs int `env:"AI_DEAL_GRACE_MS" envDefault:"6500"`
 }
 
 var env Environ

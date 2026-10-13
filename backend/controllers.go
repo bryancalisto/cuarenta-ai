@@ -16,12 +16,12 @@ import (
 )
 
 type SignUpDTO struct {
-	Email    string `json:"email" binding:"required"`
+	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 
 type SignInDTO struct {
-	Email    string `json:"email" binding:"required"`
+	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 
@@ -167,7 +167,7 @@ func bindJSONDTO[T any](c *gin.Context, dto *T) error {
 func mapErrorToStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrUserExists):
-		return http.StatusConflict, "A user with that email already exists"
+		return http.StatusConflict, "A user with that username already exists"
 	case errors.Is(err, ErrInvalidConnectionTicket):
 		return http.StatusUnauthorized, "invalid connection ticket"
 	case errors.Is(err, ErrGameNotFound):
@@ -199,8 +199,8 @@ func mapErrorToStatus(err error) (int, string) {
 
 func publicUser(user models.User) gin.H {
 	return gin.H{
-		"id":    user.Id,
-		"email": user.Email,
+		"id":       user.Id,
+		"username": user.Username,
 	}
 }
 
@@ -231,14 +231,20 @@ func (s *Server) SignUpCtl(c *gin.Context) {
 		return
 	}
 
-	email := normalizeEmail(dto.Email)
-	if email == "" || strings.TrimSpace(dto.Password) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
+	username := strings.TrimSpace(dto.Username)
+	if problem := UsernameProblem(username); problem != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": problem})
+		return
+	}
+	if strings.TrimSpace(dto.Password) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
 		return
 	}
 
-	if _, exists := s.DB.FindUserByEmail(email); exists {
-		c.JSON(http.StatusConflict, gin.H{"error": "A user with that email already exists"})
+	// Lookups are case-insensitive (`normalizeLogin`), so "Alice" cannot be taken twice as
+	// "alice"; the stored spelling is the one the player typed, and that is what is displayed.
+	if _, exists := s.DB.FindUserByUsername(username); exists {
+		c.JSON(http.StatusConflict, gin.H{"error": "A user with that username already exists"})
 		return
 	}
 
@@ -250,7 +256,7 @@ func (s *Server) SignUpCtl(c *gin.Context) {
 
 	user := models.User{
 		Id:       getUid(),
-		Email:    email,
+		Username: username,
 		Password: hash,
 	}
 
@@ -278,10 +284,10 @@ func (s *Server) SignInCtl(c *gin.Context) {
 		return
 	}
 
-	email := normalizeEmail(dto.Email)
-	user, exists := s.DB.FindUserByEmail(email)
+	username := strings.TrimSpace(dto.Username)
+	user, exists := s.DB.FindUserByUsername(username)
 	if !exists || !s.AuthService.CheckPasswordHash(dto.Password, user.Password) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
 

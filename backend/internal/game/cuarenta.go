@@ -481,6 +481,37 @@ type State struct {
 	// advances on every step and resets when a new deal starts (redeal / newRound),
 	// mirroring `state.plays_this_deal` in src/ppo/env.py.
 	PlaysThisDeal [NumPlayers]int
+
+	// DealsDealt counts the deals handed out in this match (the opening deal is 1). The
+	// web client animates a deal whenever it changes, so it must survive a restart of the
+	// deal's own bookkeeping — it is a match counter, not a per-deal one.
+	DealsDealt int
+}
+
+// RoundEnd describes a deal that ended and paid the carton, so a client can SHOW what
+// happened before the state moves on: the piles that were counted, the cards left on the
+// table when the deal ended, and the points each team was paid. Everything here is public
+// information by the time it is sent (the deal is over and the scores are updated).
+type RoundEnd struct {
+	// Captured holds the two piles that were counted, card by card, so a client can show
+	// the counting rather than just its result.
+	Captured [2][]int
+	// Counted is len(Captured[t]) — the number actually counted.
+	Counted [2]int
+	// Carton is the points the carton paid each team (0 for a team under 20 cards).
+	Carton [2]int
+	// TableCards is what was still on the table when the deal ended, i.e. the cards the
+	// new round clears. Sent so a client can show them being swept without having to
+	// remember the previous snapshot.
+	TableCards []int
+}
+
+func (r RoundEnd) tableString() string {
+	parts := make([]string, 0, len(r.TableCards))
+	for _, card := range r.TableCards {
+		parts = append(parts, fmt.Sprintf("%d", card))
+	}
+	return strings.Join(parts, ",")
 }
 
 type Env struct {
@@ -519,6 +550,7 @@ func (e *Env) Reset() Observation {
 		Done:          false,
 		Winner:        nil,
 		PlaysThisDeal: [NumPlayers]int{},
+		DealsDealt:    1,
 	}
 	return e.Observe(0)
 }
@@ -544,6 +576,7 @@ func (e *Env) redeal() {
 	}
 	// The observation reports the turns of the CURRENT deal.
 	s.PlaysThisDeal = [NumPlayers]int{}
+	s.DealsDealt++
 }
 
 func (e *Env) newRound() {
@@ -555,6 +588,17 @@ func (e *Env) newRound() {
 	s.LastPlaced = nil
 	s.CurrentPlayer = (s.CurrentPlayer + 1) % NumPlayers
 	s.PlaysThisDeal = [NumPlayers]int{}
+	s.DealsDealt++
+}
+
+// CardIndices maps cards to their 0-39 index, in order (the wire format for hands, the
+// table and the captured piles).
+func CardIndices(cards []Card) []int {
+	out := make([]int, len(cards))
+	for i, card := range cards {
+		out[i] = card.Index()
+	}
+	return out
 }
 
 func cardsToBitVec(cards []Card) []float32 {
@@ -903,8 +947,14 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 		if len(s.Deck) >= NumPlayers*HandSize {
 			e.redeal()
 		} else {
-			// count carton
+			// Count the carton, and publish what happened so a client can show it: the
+			// piles are about to be cleared for the next round, and this is the last
+			// moment they exist.
+			roundEnd := RoundEnd{TableCards: CardIndices(s.Table)}
 			for teamIdx := 0; teamIdx < 2; teamIdx++ {
+				roundEnd.Captured[teamIdx] = CardIndices(s.CardsCaptured[teamIdx])
+				roundEnd.Counted[teamIdx] = len(s.CardsCaptured[teamIdx])
+
 				cartonPoints := len(s.CardsCaptured[teamIdx]) - 19
 				if cartonPoints <= 0 {
 					continue
@@ -913,9 +963,11 @@ func (e *Env) step(action Action) (Observation, bool, map[string]any, error) {
 				if cartonPoints%2 != 0 {
 					cartonPoints++
 				}
+				roundEnd.Carton[teamIdx] = cartonPoints
 
 				s.Scores[teamIdx] = min(s.Scores[teamIdx]+cartonPoints, MaxAchievablePointsByNonCaidaActions)
 			}
+			info["roundEnd"] = roundEnd
 
 			if s.Scores[0] >= WinScore || s.Scores[1] >= WinScore {
 				s.Done = true

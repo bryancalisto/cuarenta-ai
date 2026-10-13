@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ type Database interface {
 	WriteToDisk() error
 	LoadFromDisk(path ...string) error
 	AddUser(user models.User) error
-	FindUserByEmail(email string) (models.User, bool)
+	FindUserByUsername(username string) (models.User, bool)
 	GetUser(userId string) (models.User, bool)
 	Users() []models.User
 	GetGame(gameId string) (models.Game, bool)
@@ -108,6 +109,9 @@ func (d *MemDatabase) LoadFromDisk(path ...string) error {
 	d.games = serDb.Games
 	d.tickets = serDb.Tickets
 	d.users = serDb.Users
+	if migrated := d.migrateLegacyLogins(); migrated > 0 {
+		log.Printf("Migrated %d account(s) from email logins to usernames", migrated)
+	}
 
 	return nil
 }
@@ -156,8 +160,25 @@ func (d *MemDatabase) Setup() error {
 	return nil
 }
 
-func normalizeEmail(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
+func normalizeLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
+}
+
+// Usernames are how people sign in AND what other players see, so they are validated rather
+// than sanitised: 3-20 characters, starting with a letter or a digit, then letters, digits,
+// dots, underscores or dashes. Anything else would show up as an unreadable seat label.
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,19}$`)
+
+// UsernameProblem returns a human-readable reason `name` cannot be used, or "" when it is fine.
+func UsernameProblem(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "Username is required"
+	}
+	if !usernamePattern.MatchString(trimmed) {
+		return "Username must be 3-20 characters: letters, digits, dots, underscores or dashes, starting with a letter or a digit"
+	}
+	return ""
 }
 
 func normalizeGameId(gameId string) string {
@@ -194,7 +215,7 @@ func (db *MemDatabase) AddUser(user models.User) error {
 	defer db.mu.Unlock()
 
 	for _, existing := range db.users {
-		if normalizeEmail(existing.Email) == normalizeEmail(user.Email) {
+		if normalizeLogin(existing.Username) == normalizeLogin(user.Username) {
 			return ErrUserExists
 		}
 	}
@@ -203,17 +224,35 @@ func (db *MemDatabase) AddUser(user models.User) error {
 	return nil
 }
 
-func (db *MemDatabase) FindUserByEmail(email string) (models.User, bool) {
+func (db *MemDatabase) FindUserByUsername(username string) (models.User, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	for _, user := range db.users {
-		if normalizeEmail(user.Email) == normalizeEmail(email) {
+		if normalizeLogin(user.Username) == normalizeLogin(username) {
 			return user, true
 		}
 	}
 
 	return models.User{}, false
+}
+
+// migrateLegacyLogins upgrades accounts created while email was the login field: their
+// username is the address they signed in with, so that is what they keep signing in with (and
+// what they are shown as) instead of being locked out. The legacy field is then cleared.
+// Called on load; a no-op on databases written since.
+func (db *MemDatabase) migrateLegacyLogins() int {
+	migrated := 0
+	for id, user := range db.users {
+		if normalizeLogin(user.Username) != "" || normalizeLogin(user.Email) == "" {
+			continue
+		}
+		user.Username = strings.TrimSpace(user.Email)
+		user.Email = ""
+		db.users[id] = user
+		migrated++
+	}
+	return migrated
 }
 
 func (db *MemDatabase) GetUser(userId string) (models.User, bool) {

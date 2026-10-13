@@ -22,4 +22,9 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-scripts
+# Local helper scripts (deploy.sh points at a private host and key, keep it out of git).
+# The checks that `npm run check` runs are exceptions: a fresh clone without them would fail
+# the build with MODULE_NOT_FOUND, which is exactly the kind of silent rot these catch.
+scripts/*
+!scripts/check-i18n.mjs
+!scripts/check-board-choreography.mjs
