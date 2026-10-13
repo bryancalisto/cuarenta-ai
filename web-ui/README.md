@@ -133,6 +133,24 @@ held back so the cards have landed before anyone plays. Keep the two in step —
 `DEAL_TOTAL_MS + DEAL_HOLD_MS` here. The client gating is what guarantees the rule; the grace is
 what keeps the AI's move visible and animated instead of silently applied during the animation.
 
+### The cartón reaches the score board when the counting closes
+
+The backend pays the cartón **in the same step** that publishes `roundEnd` (`cuarenta.go` adds it to
+`Scores` and then reports it, pinned by `TestDealCounterAndRoundEndEvent`). So the snapshot the board
+receives already carries the final score, and rendering it straight away gave the counting away
+before the overlay performed it.
+
+The board therefore holds the points back for the whole sequence, `waiting` included:
+
+* `heldCartonPoints` is set from `roundEnd.carton` when the sequence is scheduled;
+* `displayedScore(team)` = `game.scores[team] - heldCartonPoints[team]`, floored at zero, and both
+  counters render *that* rather than `game.scores`;
+* the hold is released in the same step that clears `cartonEvent` — the moment the counting overlay
+  closes — where the points also get a "+N" burst next to the score (`.score-gain`, which animates
+  itself out and is dropped by the next sequence);
+* the `SEQUENCE_CAP_MS` deadline releases it too, so a missed step cannot leave the score short for
+  good.
+
 ### Deal order
 
 `HAND_SIZE` cards to one player before moving to the next: your five cards turn up as a group,

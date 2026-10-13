@@ -86,6 +86,14 @@
 	// stays face down until the deal animation turns it over, so the deal is not spoiled by the
 	// new cards appearing the instant the snapshot lands.
 	let sequenceDeals = $state(false);
+	// The carton points the counting is about to explain, held back from the score board until it
+	// has been counted on screen. The backend adds them to the score in the SAME step that
+	// publishes `roundEnd`, so the snapshot already carries the final score: showing it straight
+	// away gives the counting away before it happens.
+	let heldCartonPoints = $state<[number, number] | null>(null);
+	// ...and the points that just landed, for the "+N" next to the score. Not a timer: the badge
+	// animates itself away (see .score-gain) and the next sequence clears it.
+	let cartonGain = $state<[number, number] | null>(null);
 	let cartonEvent = $state<RoundEnd | null>(null);
 	let counted = $state<[number, number]>([0, 0]);
 	let dealtCards = $state(0);
@@ -119,6 +127,13 @@
 	// time around the table. This is what the backend does too -- `deal`/`redeal` in
 	// backend/internal/game/cuarenta.go copy `HandSize` cards per seat in seat order, and only
 	// redeal when a full 20 cards are left -- so the animation is a faithful replay.
+
+	// The score to show for `team`: the real score, minus any carton the counting is still
+	// explaining. It is the same number the score board showed before the deal ended, so nothing
+	// jumps until the points have been counted out.
+	function displayedScore(team: number): number {
+		return Math.max(0, (game.scores?.[team] ?? 0) - (heldCartonPoints?.[team] ?? 0));
+	}
 
 	// How many cards `seat` holds once `dealt` cards have left the deck.
 	function cardsDealtTo(seat: number, dealt: number): number {
@@ -200,11 +215,11 @@
 		if (dealId === 0 && !roundEnd) return;
 
 		const pendingDeal = dealId > seenDealId;
-		const pendingCarton = roundEnd && roundEndKey !== seenRoundEndId && roundEnd !== undefined;
-		if (!pendingDeal && !pendingCarton) return;
+		const hasCarton = Boolean(roundEnd) && roundEndKey !== seenRoundEndId;
+		if (!pendingDeal && !hasCarton) return;
 
 		seenDealId = Math.max(seenDealId, dealId);
-		if (pendingCarton && roundEndKey) seenRoundEndId = roundEndKey;
+		if (hasCarton && roundEndKey) seenRoundEndId = roundEndKey;
 
 		// SEQUENCE OWNERSHIP. Each sequence gets an id and every callback checks it, so a
 		// NEWER sequence orphans an older one. What it must NOT do is cancel the running
@@ -234,6 +249,12 @@
 		// out -- but it keeps the player from starting a turn the deal is about to overwrite.
 		// (This effect never returns a teardown; see the note at its end.)
 		sequenceDeals = Boolean(pendingDeal);
+		// Hold the carton points back for the whole sequence, `waiting` included: the snapshot is
+		// already carrying them, and the counting has not been shown yet.
+		heldCartonPoints = hasCarton
+			? [roundEnd?.carton?.[0] ?? 0, roundEnd?.carton?.[1] ?? 0]
+			: null;
+		cartonGain = null;
 		phase = 'waiting';
 		// The move this sequence waits for. It is the one move that still animates while the
 		// board is busy; anything later is mirrored without animation (see the move effect).
@@ -248,6 +269,7 @@
 			cartonEvent = null;
 			heldTable = null;
 			sequenceDeals = false;
+			heldCartonPoints = null;
 		}, SEQUENCE_CAP_MS);
 
 		const startDeal = () => {
@@ -263,7 +285,7 @@
 			}, DEAL_TOTAL_MS + DEAL_HOLD_MS);
 		};
 
-		if (pendingCarton && roundEnd) {
+		if (hasCarton && roundEnd) {
 			// 1. Count the piles, card by card, while the table keeps its cards. This starts on
 			//    delay 0, i.e. right after the move animation: the cards that were on the table
 			//    are put back (heldTable) only then, because until that moment the move effect is
@@ -292,9 +314,14 @@
 				// the live (empty) table in `displayedTable`, which takes over again.
 				heldTable = null;
 			}, COUNT_MS);
-			// 3. Then the new deal.
+			// 3. The counting is over: pay it on the score board, then deal. The points land here
+			//    rather than with the snapshot, which is what makes the counter agree with what
+			//    the player just watched being counted.
+			const paid: [number, number] = [roundEnd.carton?.[0] ?? 0, roundEnd.carton?.[1] ?? 0];
 			schedule(() => {
 				cartonEvent = null;
+				heldCartonPoints = null;
+				cartonGain = paid.some((points) => points > 0) ? paid : null;
 				if (pendingDeal) startDeal();
 				else phase = 'idle';
 			}, COUNT_MS + PAID_MS);
@@ -546,7 +573,12 @@
 		<div class="scores">
 			<div class="score-item">
 				<span class="label">{t('Team 1')}</span>
-				<span class="value">{game.scores?.[0] ?? 0}</span>
+				<span class="value">
+					{displayedScore(0)}
+					{#if cartonGain && cartonGain[0] > 0}
+						<span class="score-gain">+{cartonGain[0]}</span>
+					{/if}
+				</span>
 				{#if game.cardsCaptured}
 					<span class="carton-info">
 						<span class="carton-label">{t('Cartón:')}</span>
@@ -557,7 +589,12 @@
 			</div>
 			<div class="score-item">
 				<span class="label">{t('Team 2')}</span>
-				<span class="value">{game.scores?.[1] ?? 0}</span>
+				<span class="value">
+					{displayedScore(1)}
+					{#if cartonGain && cartonGain[1] > 0}
+						<span class="score-gain">+{cartonGain[1]}</span>
+					{/if}
+				</span>
 				{#if game.cardsCaptured}
 					<span class="carton-info">
 						<span class="carton-label">{t('Cartón:')}</span>
@@ -801,10 +838,31 @@
 	}
 
 	.value {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.35rem;
 		font-size: 1.5rem;
 		font-weight: 600;
 		color: white;
 		font-family: monospace;
+	}
+
+	/* The carton points arriving: a pop and a fade, so the counter says "+6" rather than silently
+	   becoming a bigger number. No timer to clear it -- it animates itself out and the next
+	   sequence drops it from the DOM. */
+	.score-gain {
+		font-size: 0.95rem;
+		font-weight: 700;
+		color: #fbbf24;
+		animation: score-gain 2600ms ease-out forwards;
+	}
+
+	@keyframes score-gain {
+		0% { opacity: 0; transform: translateY(0.4rem) scale(0.8); }
+		12% { opacity: 1; transform: translateY(0) scale(1.1); }
+		24% { transform: translateY(0) scale(1); }
+		70% { opacity: 1; }
+		100% { opacity: 0; }
 	}
 
 	.current-player-section {

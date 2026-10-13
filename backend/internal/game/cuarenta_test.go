@@ -124,6 +124,7 @@ func TestDealCounterAndRoundEndEvent(t *testing.T) {
 	plies := 0
 	for !env.State().Done {
 		before := env.State().DealsDealt
+		scoresBefore := env.State().Scores
 		legal := env.LegalActions()
 		if len(legal) == 0 {
 			t.Fatalf("ply %d: no legal actions", plies)
@@ -150,6 +151,18 @@ func TestDealCounterAndRoundEndEvent(t *testing.T) {
 					t.Fatalf("ply %d: roundEnd has type %T", plies, raw)
 				}
 				withRoundEnd++
+				// The carton is paid IN the score of this same step, which is what lets the web UI
+				// hold those points back until it has shown the counting (it subtracts them again
+				// while the overlay is up). If the payment ever moved to a later step, the board
+				// would be subtracting points nobody had added. The step also pays the move's own
+				// points, so this is a lower bound rather than an equality.
+				scoresAfter := env.State().Scores
+				for team := 0; team < 2; team++ {
+					if paid := scoresAfter[team] - scoresBefore[team]; paid < event.Carton[team] {
+						t.Fatalf("ply %d: team %d scored %d this step, less than the carton of %d: the carton "+
+							"must be in the score of the step that reports it", plies, team, paid, event.Carton[team])
+					}
+				}
 				for team := 0; team < 2; team++ {
 					if event.Counted[team] != len(event.Captured[team]) {
 						t.Fatalf("ply %d: counted %d but sent %d cards for team %d", plies,
