@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 /**
- * Static invariants for the deal / cartón choreography in `src/lib/GameBoard.svelte`.
+ * Static invariants for the board's animations in `src/lib/GameBoard.svelte`.
  *
  * WHY THIS EXISTS
  * ---------------
- * The board's cinematic (count the cartón -> pay it -> deal the next hands) must never be
- * able to leave the UI stuck. It already did once: the effect returned a teardown that
- * cancelled its own timers, while websocket snapshots arrive once per move (the AI's
- * included) and re-run the effect; the re-run hit the "nothing pending" guard and returned
- * early, so the teardown fired and the sequence was orphaned mid-flight. `phase` stayed
- * 'dealing' forever, which renders every not-yet-dealt card as a placeholder -- no hand, no
- * clickable cards, a full-screen overlay. That reads as a frozen app.
+ * The backend publishes one snapshot per move and paces the AI faster than a capture takes to
+ * show. When the board reacted to each snapshot directly, animations overlapped: a throw landed
+ * on top of the previous capture, and the cards of ONE capture flew partly to one player and
+ * partly to another (each departure read whatever direction was current when it started). Before
+ * that, an effect that cancelled its own timers wedged the board in "dealing" for good.
  *
- * These are the three properties that prevent it. There is no DOM test harness in this repo
- * (no jsdom, no browser in CI), so this is a cheap source-level guard; it is a lint for a
- * known hazard, not a substitute for opening the page.
+ * The fix is structural: snapshots are QUEUED and presented one at a time by a single async loop,
+ * and the board renders `view` (the snapshot whose story has been told), never `game`. These
+ * checks pin that structure. There is no DOM test harness in this repo (no jsdom, no browser in
+ * CI), so this is a cheap source-level guard; it is a lint for known hazards, not a substitute for
+ * opening the page.
  *
  * Run with `npm run check`.
  */
@@ -26,7 +26,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Optional path argument so the guard itself can be tested against a mutated copy.
 const file = process.argv[2] ?? resolve(here, '../src/lib/GameBoard.svelte');
 const source = readFileSync(file, 'utf8');
-const lines = source.split('\n');
 
 const failures = [];
 const check = (ok, message) => {
@@ -34,86 +33,108 @@ const check = (ok, message) => {
 };
 
 /**
- * Slice out one `$effect(() => { ... })` body by brace matching, starting at the first line
- * matching `marker`. Returns the body text plus the line it starts on.
- */
-function effectBody(marker) {
-	const hit = lines.findIndex((line) => marker.test(line));
-	if (hit === -1) return null;
-	// The marker sits *inside* the effect, so walk back to its `$effect(() => {` opener:
-	// brace counting has to start there to span the whole body.
-	let start = hit;
-	while (start > 0 && !/\$effect\s*\(/.test(lines[start])) start--;
-	let depth = 0;
-	for (let i = start; i < lines.length; i++) {
-		for (const char of lines[i]) {
-			if (char === '{') depth++;
-			else if (char === '}') depth--;
-		}
-		// The effect's own arrow-function body closes when depth returns to 0.
-		if (depth === 0 && i > start) {
-			return { body: stripComments(lines.slice(start, i + 1).join('\n')), line: start + 1 };
-		}
-	}
-	return null;
-}
-
-/**
  * Drop comments before matching, so a comment that merely *describes* an invariant cannot
  * satisfy a check for its code. `//` is left alone when it follows a colon, which keeps URLs
  * (`https://...`) intact.
  */
 function stripComments(code) {
-	return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+	return code
+		.replace(/<!--[\s\S]*?-->/g, '')
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.replace(/(^|\s)\/\/[^\n]*/g, '$1');
 }
 
-// 1. The choreography effect must NOT cancel its timers on teardown. It owns them until the
-//    sequence ends (its last step is `phase = 'idle'`), and orphaning on unmount is handled
-//    by bumping `seqId` in `onDestroy` instead.
-const choreography = effectBody(/const\s+dealId\s*=\s*game\.dealId/);
-check(choreography !== null, 'could not find the choreography effect (looked for `const dealId = game.dealId`)');
-if (choreography) {
-	const { body, line } = choreography;
-	check(
-		!/return\s*\(\s*\)\s*=>/.test(body) && !/return\s+\(\)\s*=>\s*\{?\s*(timers|clearTimeout)/.test(body),
-		`GameBoard.svelte:${line}: the choreography effect returns a teardown. Snapshots re-run this ` +
-			'effect mid-animation and the pending-work guard returns early, so a teardown that cancels ' +
-			'timers orphans the sequence and wedges the board in "dealing"/"carton-paid".'
-	);
-	// 2. Ownership + a hard deadline: a new sequence orphans the old one, and every sequence
-	//    guarantees a return to idle even if a step is somehow missed.
-	check(
-		/const\s+alive\s*=[^;]*seqId\s*===\s*id/.test(body) && /if\s*\(\s*alive\(\)\s*\)/.test(body),
-		`GameBoard.svelte:${line}: the choreography effect lost its sequence-ownership guard: it must define ` +
-			'`alive` in terms of `seqId === id` AND consult it before every callback, so a newer sequence ' +
-			'orphans an older one and unmounting stops dead callbacks from writing state.'
-	);
-	check(
-		/SEQUENCE_CAP_MS/.test(body),
-		`GameBoard.svelte:${line}: the choreography effect no longer schedules the SEQUENCE_CAP_MS deadline, ` +
-			'so a missed step can leave the overlay up indefinitely.'
-	);
+const code = stripComments(source);
+const scriptEnd = code.indexOf('</script>');
+const script = code.slice(0, scriptEnd);
+const markup = code.slice(scriptEnd);
+
+/** The body of `function name(...) {...}` (or `async function`), by brace matching. */
+function functionBody(name) {
+	const at = script.search(new RegExp(`(?:async\\s+)?function ${name}\\(`));
+	if (at < 0) return '';
+	let depth = 0;
+	for (let i = script.indexOf('{', script.indexOf(')', at)); i < script.length; i++) {
+		if (script[i] === '{') depth++;
+		else if (script[i] === '}' && --depth === 0) return script.slice(at, i + 1);
+	}
+	return '';
 }
 
-// 3. The move animation mirrors the table on snapshots without a move, and re-running it
-//    cancels the previous throw's timers -- so it must also clear the thrown card.
-const moveEffect = effectBody(/const\s+table\s*=\s*game\.table/);
-check(moveEffect !== null, 'could not find the move-animation effect (looked for `const table = game.table`)');
-if (moveEffect) {
-	const earlyReturn = moveEffect.body.split('if (!move || currentPlayer === undefined)')[1] ?? '';
-	// The played card flies as its own element (`.fly-card`), which is why a snapshot carrying no
-	// move has to drop it: the timers that would have cleared it were cancelled with the effect.
-	check(
-		/throwAnim\s*=\s*null/.test(earlyReturn.slice(0, 400)),
-		`GameBoard.svelte:${moveEffect.line}: the no-move branch of the move effect must set \`throwAnim = null\`,` +
-			' otherwise a cancelled throw leaves the card stuck on the board.'
-	);
-	check(
-		/displayedTable = captures\.length > 0 \? \[\.\.\.before, move\.cardIndex\] : table;/.test(moveEffect.body),
-		`GameBoard.svelte:${moveEffect.line}: when the played card lands it must join the row so it can be taken ` +
-			'with the cards it captured.'
-	);
-}
+// 1. ONE SNAPSHOT AT A TIME. Every snapshot is queued; a single loop presents them in order and
+//    awaits each one before the next, and a failure shows the snapshot rather than wedging.
+check(
+	/queue\.push\(next\)/.test(script) && /if \(!draining\) void drain\(\)/.test(script),
+	'snapshots must be queued (`queue.push(next)`) and drained by a single loop (`if (!draining) void drain()`)'
+);
+const drain = functionBody('drain');
+check(
+	/while \(queue\.length > 0[\s\S]*?await present\(next\)/.test(drain),
+	'`drain()` must await `present(next)` for each snapshot in turn: that await is what keeps two moves from animating at once'
+);
+check(
+	/catch[\s\S]*?resetChoreography\(\);[\s\S]*?view = next/.test(drain),
+	'`drain()` must catch a failed presentation, reset the choreography and show the snapshot, or one broken animation freezes the board'
+);
+check(
+	/finally \{\s*draining = false;/.test(drain),
+	'`drain()` must clear `draining` in a finally block, or the queue stops for good after an error'
+);
+
+// 2. The board renders `view`, never `game`: reading `game` in the markup shows a snapshot before
+//    its move has been animated.
+check(
+	!/\bgame\./.test(markup) && !/\{game\}/.test(markup),
+	'the markup reads `game` directly; it must read `view`, the snapshot whose animation has played'
+);
+
+// 3. A move's card comes from, and its capture goes to, the player NAMED BY THE MOVE, and every
+//    card of a capture goes the same way.
+const playMove = functionBody('playMove');
+check(
+	/const seat = move\.playerIndex;/.test(playMove) && /const dir = dirFor\(seat\);/.test(playMove),
+	'`playMove` must take the direction from `move.playerIndex`, not from whose turn it is now'
+);
+check(
+	!/currentPlayer/.test(playMove),
+	'`playMove` must not look at `currentPlayer`: it has already moved on to the next player'
+);
+check(
+	/leaving\.forEach[\s\S]*?fly\(c, base, base, \{ \.\.\.edgeBox\(dir, base\)/.test(playMove),
+	'every card a capture takes must fly to `edgeBox(dir, ...)` of the one direction of the move'
+);
+check(
+	/delay: i \* CAPTURE_STAGGER_MS/.test(playMove),
+	'the captured cards must leave one after another (`delay: i * CAPTURE_STAGGER_MS`), not all at once'
+);
+check(
+	/heldCapture = captures;[\s\S]*?await sleep\(CAPTURE_HOLD_MS\);[\s\S]*?heldCapture = \[\];/.test(playMove),
+	'a capture must light up the cards it takes for CAPTURE_HOLD_MS before they leave'
+);
+check(
+	/await Promise\.all\(grabs\)/.test(playMove),
+	'`playMove` must wait for every captured card to arrive before the next snapshot is presented'
+);
+const captureHold = source.match(/const CAPTURE_HOLD_MS = (\d+)/)?.[1];
+const captureStagger = source.match(/const CAPTURE_STAGGER_MS = (\d+)/)?.[1];
+check(
+	Number(captureHold) > 0 && Number(captureStagger) > 0,
+	'the capture needs a hold beat (CAPTURE_HOLD_MS) and a per-card stagger (CAPTURE_STAGGER_MS)'
+);
+check(
+	/captured=\{isBeingCaptured\(cardIndex\)\}/.test(markup) && /\.card\.captured \{/.test(code),
+	'the cards a capture takes must be highlighted on the table (class + a .card.captured rule)'
+);
+
+// 4. Order inside one snapshot: move, then counting, then deal.
+const present = functionBody('present');
+const moveAt = present.indexOf('await playMove(');
+const countAt = present.indexOf('await playCounting(');
+const dealAt = present.lastIndexOf('await playDeal(');
+check(
+	moveAt > 0 && countAt > moveAt && dealAt > countAt,
+	'`present()` must play the move, then the counting, then the deal, each awaited'
+);
 
 /**
  * Pull the deal helpers out of the component and evaluate them. They are pure functions of
@@ -122,7 +143,7 @@ if (moveEffect) {
  * that is reported as a failure instead of silently skipping the checks.
  */
 function loadDealHelpers() {
-	const constants = source.match(/const SEAT_COUNT = 4;[\s\S]*?const SEQUENCE_CAP_MS = [^;]+;/);
+	const constants = source.match(/const SEAT_COUNT = 4;[\s\S]*?const DEAL_HOLD_MS = [^;]+;/);
 	const functions = ['cardsDealtTo', 'seatOfCard', 'dealDelayMs'].map((name) =>
 		source.match(new RegExp(`function ${name}[\\s\\S]*?\\n\\t\\}`))
 	);
@@ -208,179 +229,55 @@ if (deal) {
 	);
 }
 
-// 5. One animation at a time. The snapshot that ends a deal also carries the move that ended
-//    it, so the counting/dealing must wait for that move's throw/grab to land -- otherwise two
-//    cinematics play on top of each other. The choreography derives the wait and folds it into
-//    every scheduled step; the move effect publishes when its animation ends.
-if (choreography) {
-	const { body, line } = choreography;
-	check(
-		/moveAnimationMs\s*\(\s*game\.move\s*\)/.test(body) && /moveAnimUntil/.test(body),
-		`GameBoard.svelte:${line}: the choreography effect must wait for the move animation (it reads ` +
-			'`moveAnimationMs(game.move)` and falls back to `moveAnimUntil`) before it starts counting.'
-	);
-	check(
-		/setTimeout\s*\([\s\S]{0,120}?settleMs\s*\+/.test(body),
-		`GameBoard.svelte:${line}: the wait must be applied inside the scheduler (\`settleMs + delay\`), ` +
-			'so every step and the deadline shift together instead of racing the move animation.'
-	);
-}
-if (moveEffect) {
-	check(
-		/moveAnimUntil\s*=\s*performance\.now\(\)\s*\+/.test(moveEffect.body),
-		`GameBoard.svelte:${moveEffect.line}: the move effect must publish when its animation ends ` +
-			'(`moveAnimUntil = performance.now() + ...`), or the choreography cannot know when to start.'
-	);
-	check(
-		/moveAnimUntil\s*=\s*0/.test(moveEffect.body),
-		`GameBoard.svelte:${moveEffect.line}: the move effect must release the board (\`moveAnimUntil = 0\`) ` +
-			'both when its animation finishes and when a snapshot brings no move.'
-	);
-}
 
-// 6. One animation at a time, and nothing playable during a cinematic. The sequence starts by
-//    waiting for the move that triggered it, freezes input from that first moment (not only once
-//    an overlay is up), and the move effect animates only the move the sequence waits for --
-//    anything later is mirrored, so a throw cannot land on top of the counting or the deal.
-if (choreography) {
-	const { body, line } = choreography;
-	check(
-		/phase\s*=\s*'waiting'/.test(body),
-		`GameBoard.svelte:${line}: the sequence must start in the 'waiting' phase, which freezes input ` +
-			'and holds moves back while the triggering move animation finishes.'
-	);
-	check(
-		/sequenceMoveStep\s*=/.test(body),
-		`GameBoard.svelte:${line}: the sequence must record the move step it is waiting for ` +
-			'(`sequenceMoveStep`), so the move effect can tell it apart from a move that arrives mid-cinematic.'
-	);
-}
-if (moveEffect) {
-	check(
-		/boardBusy\s*&&\s*step\s*!==\s*sequenceMoveStep/.test(moveEffect.body),
-		`GameBoard.svelte:${moveEffect.line}: while the board is busy the move effect may animate ONLY the ` +
-			'move the sequence is waiting for; every other move must be mirrored, or two animations overlap.'
-	);
-	check(
-		/handledMove\s*=\s*step/.test(moveEffect.body) && /step\s*===\s*handledMove/.test(moveEffect.body),
-		`GameBoard.svelte:${moveEffect.line}: the move effect must animate each move once ('handledMove'), so a ` +
-			'mirrored or already-shown move is not replayed when the cinematic ends.'
-	);
-}
-
-// 7. Input is frozen for the whole cinematic, through every entry point. These look at the whole
-//    file, comments stripped: a comment that merely mentions `boardBusy` must not pass.
-const code = stripComments(source);
+// 5. Input is frozen while anything is animating OR still queued, through every entry point.
 check(
-	/return\s+!boardBusy\s*&&\s*game\.currentPlayer\s*===\s*myArrayIndex/.test(code),
+	/const boardBusy = \$derived\(phase !== 'idle' \|\| animating \|\| queued > 0\)/.test(script),
+	'`boardBusy` must cover the cinematics, a move being animated, and snapshots still waiting in the queue'
+);
+check(
+	/return\s+!boardBusy\s*&&\s*view\.currentPlayer\s*===\s*myArrayIndex/.test(script),
 	'`canPlayCard()` must be false while the board is busy, so the hand cannot be played mid-animation.'
 );
-const keydown = code.match(/function handleKeydown\(event: KeyboardEvent\) \{[\s\S]*?\n\t\}/)?.[0] ?? '';
+const keydown = functionBody('handleKeydown');
+check(/boardBusy/.test(keydown), 'the keyboard handler must ignore number keys while the board is busy.');
 check(
-	/boardBusy/.test(keydown),
-	'the keyboard handler must ignore number keys while the board is busy (the mouse path is gated by canPlayCard).'
-);
-check(
-	/game\.awaitingCapture[\s\S]{0,160}!boardBusy/.test(code),
-	'the capture prompt must not be offered while a cinematic is playing: the choice is sent to the server ' +
-		'and would land on top of the animation.'
+	/view\.awaitingCapture[\s\S]{0,160}!boardBusy/.test(markup),
+	'the capture prompt must not be offered while the board is busy.'
 );
 
-// 8. A capture has to be readable. It is a story: the played card lands, the cards it takes are
-//    lit up for a beat, then they leave one after another. All at once at 900ms read as a
-//    scuffle, which is what this pins against.
-const captureHold = source.match(/const CAPTURE_HOLD_MS = (\d+)/)?.[1];
-const captureStagger = source.match(/const CAPTURE_STAGGER_MS = (\d+)/)?.[1];
-const throwMs = source.match(/const THROW_MS = (\d+)/)?.[1];
+// 6. The carton points land on the score board when the COUNTING CLOSES, not when the snapshot
+//    arrives (the backend already added them). They are held back before the snapshot goes on
+//    screen and released with the overlay.
 check(
-	Number(captureHold) > 0 && Number(captureStagger) > 0,
-	'the capture needs a hold beat (CAPTURE_HOLD_MS) and a per-card stagger (CAPTURE_STAGGER_MS): ' +
-		'without them every captured card leaves in the same instant and the move cannot be followed'
+	/function displayedScore\(team: number\): number \{[\s\S]*?Math\.max\(0, \(view\.scores\?\.\[team\] \?\? 0\) - \(heldCartonPoints\?\.\[team\] \?\? 0\)\)/.test(script),
+	'the score board must show `view.scores` MINUS the pending carton points (and never below zero)'
 );
 check(
-	/captureHold = captures\.length > 0/.test(moveEffect?.body ?? ''),
-	`GameBoard.svelte:${moveEffect?.line}: the move effect must raise the capture highlight when the played ` +
-		'card lands, before anything leaves the table'
-);
-// The clear has to be in the GRAB step specifically: the busy/no-move branches clear it too, and
-// a check for the bare assignment would be satisfied by those while the highlight stuck on screen.
-check(
-	/captureHold = false;[\s\S]{0,80}?removeDir = dir;/.test(moveEffect?.body ?? ''),
-	'the capture highlight must be dropped in the step that removes the cards (next to `removeDir = dir`), ' +
-		'or the lit-up cards stay lit after they have gone'
+	/class="value">[\s\S]{0,200}?displayedScore\(0\)/.test(markup) && /class="value">[\s\S]{0,200}?displayedScore\(1\)/.test(markup),
+	'both score counters must render displayedScore()'
 );
 check(
-	/captured=\{isBeingCaptured\(cardIndex\)\}/.test(code) && /\.card\.captured \{/.test(code),
-	'the cards a capture takes must be highlighted on the table (class + a .card.captured rule)'
+	/heldCartonPoints = \[roundEnd\.carton[\s\S]*?view = next;/.test(present),
+	'the carton points must be held back BEFORE the snapshot that carries them goes on screen'
 );
 check(
-	/out:flyToSide=\{\{ dir: removeDir, delay: departureDelayMs\(cardIndex\) \}\}/.test(code),
-	'the captured cards must leave with a per-card delay (departureDelayMs), not all at once'
+	/cartonEvent = null;\s*\n\s*heldCartonPoints = null;\s*\n\s*cartonGain = paid/.test(functionBody('playCounting')),
+	'the points must be released in the same step that closes the counting overlay'
 );
 check(
-	/delay,\n\t\t\teasing: cubicIn/.test(code),
-	'flyToSide must pass its delay to the transition, or the stagger is silently ignored'
-);
-// The staggering is part of the animation, so the board has to stay busy for all of it.
-check(
-	/(?:captured|captures)\s*\*\s*CAPTURE_STAGGER_MS|CAPTURE_STAGGER_MS\s*\*\s*(?:captured|captures)/.test(code),
-	'moveAnimationMs must include the staggered departures: the deal would otherwise start on top of them'
-);
-// The flight in has to last exactly as long as the constant the state machine waits for, or the
-// card lands before (or after) the board believes it did.
-check(
-	/animation: throw-in \d+ms/.test(source) && Number(source.match(/animation: throw-in (\d+)ms/)?.[1]) === Number(throwMs),
-	`the throw-in animation and THROW_MS (${throwMs}ms) must be the same number: the card would otherwise land before, or after, the state says it did`
-);
-
-// 9. The carton points land on the score board when the COUNTING CLOSES, not when the snapshot
-//    arrives. The backend pays the carton in the same step that reports it, so the payload already
-//    carries the final score: showing it straight away gives away the counting the overlay is
-//    about to perform. The board therefore subtracts the pending points while the sequence runs.
-check(
-	/function displayedScore\(team: number\): number \{[\s\S]*?Math\.max\(0, \(game\.scores\?\.\[team\] \?\? 0\) - \(heldCartonPoints\?\.\[team\] \?\? 0\)\)/.test(
-		source
-	),
-	'the score board must show `game.scores` MINUS the pending carton points while the counting runs ' +
-		'(and never below zero)'
+	/heldCartonPoints = null;/.test(functionBody('resetChoreography')),
+	'resetting the choreography must release the held points too, or the score stays short for good'
 );
 check(
-	/class="value">[\s\S]{0,200}?displayedScore\(0\)/.test(code) &&
-		/class="value">[\s\S]{0,200}?displayedScore\(1\)/.test(code),
-	'both score counters must render displayedScore(), not game.scores directly: a direct read puts the ' +
-		'carton on screen before it has been counted'
-);
-check(
-	!/class="value">\s*\{game\.scores/.test(code),
-	'a score counter still reads game.scores directly, which undoes the hold-back'
-);
-// Held from the first moment of the sequence (`waiting` included), released in the step that
-// closes the overlay, and released again by the deadline so it can never stick.
-check(
-	/heldCartonPoints = hasCarton\s*\n?\s*\?/.test(code),
-	'the carton points must be held back when the sequence is scheduled, not when an overlay appears'
-);
-check(
-	/const paid: \[number, number\] = \[roundEnd\.carton\?\.\[0\] \?\? 0, roundEnd\.carton\?\.\[1\] \?\? 0\];/.test(code),
-	'the points that land on the score must come from the roundEnd payload'
-);
-check(
-	/cartonEvent = null;\s*\n\s*heldCartonPoints = null;\s*\n\s*cartonGain = paid/.test(code),
-	'the points must be released in the same step that closes the counting overlay, or the counter and the ' +
-		'counting disagree'
-);
-// The deadline that ends any sequence has to release the held points as well.
-const capIndex = source.indexOf('SEQUENCE_CAP_MS);');
-const capBlock = capIndex < 0 ? '' : source.slice(Math.max(0, capIndex - 400), capIndex);
-check(
-	/heldCartonPoints = null;/.test(capBlock),
-	'the sequence deadline must release the held points too, or a missed step leaves the score short for good'
-);
-// The gain is a flourish, not a timer: it animates itself out (so nothing has to clean it up) and
-// the next sequence drops it.
-check(
-	/cartonGain = null;/.test(code) && /\.score-gain \{[\s\S]*?animation: score-gain/.test(code),
+	/cartonGain = null;/.test(present) && /\.score-gain \{[\s\S]*?animation: score-gain/.test(code),
 	'the "+N" must be cleared when the next sequence starts and animate itself away'
+);
+
+// 7. Flying cards live in a layer fixed to the viewport, so they are visible outside the table.
+check(
+	/\.fly-layer \{[\s\S]*?position: fixed;/.test(code) && /class="fly-layer"/.test(markup),
+	'flying cards must be drawn in `.fly-layer` (position: fixed), or they are clipped to the table'
 );
 
 if (failures.length > 0) {
@@ -389,6 +286,6 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 console.log(
-	'check-board-choreography: OK (choreography owns its timers, waits for the move animation, deals ' +
-		'five cards per player before moving on, and freezes play + moves while a cinematic runs)'
+	'check-board-choreography: OK (snapshots are presented one at a time, captures fly to the mover, ' +
+		'deals five cards per player before moving on, and play is frozen while anything animates)'
 );

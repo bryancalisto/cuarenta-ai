@@ -331,6 +331,14 @@ func (s *Server) CreateWsTicketCtl(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ticket": ticket.Code})
 }
 
+// usernameOf is the name a player is shown under at the table (empty if the account is gone).
+func (s *Server) usernameOf(userId string) string {
+	if user, ok := s.DB.GetUser(userId); ok {
+		return user.Username
+	}
+	return ""
+}
+
 func (s *Server) CreateGameCtl(c *gin.Context) {
 	var dto GameCreateDTO
 	if err := bindJSONDTO(c, &dto); err != nil {
@@ -339,9 +347,10 @@ func (s *Server) CreateGameCtl(c *gin.Context) {
 
 	userId := c.GetString("userId")
 	game, err := s.DB.CreateGame(userId, models.HumanPlayer{
-		UserId: userId,
-		Index:  dto.SpotIndex,
-		Team:   dto.Team,
+		UserId:   userId,
+		Username: s.usernameOf(userId),
+		Index:    dto.SpotIndex,
+		Team:     dto.Team,
 	})
 	if err != nil {
 		status, message := mapErrorToStatus(err)
@@ -362,9 +371,10 @@ func (s *Server) JoinGameCtl(c *gin.Context) {
 
 	userId := c.GetString("userId")
 	game, err := s.DB.JoinGame(c.Param("code"), models.HumanPlayer{
-		UserId: userId,
-		Index:  dto.SpotIndex,
-		Team:   dto.Team,
+		UserId:   userId,
+		Username: s.usernameOf(userId),
+		Index:    dto.SpotIndex,
+		Team:     dto.Team,
 	})
 	if err != nil {
 		status, message := mapErrorToStatus(err)

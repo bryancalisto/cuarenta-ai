@@ -176,6 +176,7 @@ const ES: Record<string, string> = {
 	'{rank} of {suit}': '{rank} de {suit}',
 	'Table is empty': 'La mesa está vacía',
 	'You': 'Tú',
+	'Player {n}': 'Jugador {n}',
 	'Your cards': 'Tus cartas',
 	'Your hand': 'Tu mano',
 	'Choose which cards to capture:': 'Elige qué cartas capturar:',

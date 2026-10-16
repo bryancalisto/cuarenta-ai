@@ -17,7 +17,11 @@ type User struct {
 }
 
 type HumanPlayer struct {
-	UserId   string `json:"userId"`
+	UserId string `json:"userId"`
+	// Username is the name the board shows on this player's side of the table. Stamped when
+	// the player creates or joins the game; games stored before it existed decode it empty
+	// and the client falls back to a seat label.
+	Username string `json:"username,omitempty"`
 	Index    int    `json:"index"`
 	Team     int    `json:"team"`
 	JoinedAt string `json:"joinedAt"`

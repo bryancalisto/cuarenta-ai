@@ -7,6 +7,8 @@ export type PublicUser = {
 
 export type HumanPlayer = {
 	userId: string;
+	/** The name shown on this player's side of the table (absent on games created before it existed). */
+	username?: string;
 	index: number;
 	team: number;
 	joinedAt: string;

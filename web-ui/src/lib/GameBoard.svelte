@@ -1,8 +1,7 @@
 <script lang="ts">
-	import { onDestroy, untrack } from 'svelte';
-	import { scale } from 'svelte/transition';
-	import { cubicIn } from 'svelte/easing';
-	import type { Game, RoundEnd } from './api';
+	import { onDestroy, tick, untrack } from 'svelte';
+	import { fade } from 'svelte/transition';
+	import type { Game, Move, RoundEnd } from './api';
 	import { t } from './i18n.svelte';
 	import GameResultsDialog from './GameResultsDialog.svelte';
 	import PlayingCard from './PlayingCard.svelte';
@@ -30,25 +29,119 @@
 		return suits[Math.floor(cardIndex / 10)] ?? '';
 	}
 
+	// ---------------------------------------------------------------------------------------
+	// ONE SNAPSHOT AT A TIME
+	// ---------------------------------------------------------------------------------------
+	// The backend publishes a snapshot per move and paces the AI 1.5-3 s apart, which is shorter
+	// than a capture takes to show. Reacting to `game` directly is what made animations overlap:
+	// the next move started while the previous capture was still flying, and the cards of one
+	// capture ended up split between two players.
+	//
+	// So the board does NOT render `game`. Every snapshot goes into a queue, and the board renders
+	// `view`: the last snapshot whose story has been told. `present()` takes the next snapshot,
+	// plays its move (the card flies in from its player's side; on a capture the taken cards light
+	// up and then fly out to that player), then the cartón counting and the deal if the snapshot
+	// carries them, and only THEN moves `view` on and takes the next one. Nothing can overlap,
+	// because there is only ever one `present()` running.
+	let view = $state<Game>(untrack(() => game));
+	const queue: Game[] = [];
+	// Snapshots waiting their turn. Mirrors `queue.length` so the markup can react to it.
+	let queued = $state(0);
+	let draining = false;
+	let presentedAny = false;
+	let destroyed = false;
+
+	// A backlog this deep is a reconnect or a tab that was asleep, not a game being played: it is
+	// caught up without the show, or the board would replay a minute of moves.
+	const BACKLOG_LIMIT = 4;
+
+	$effect(() => {
+		const next = game;
+		untrack(() => {
+			queue.push(next);
+			queued = queue.length;
+			if (!draining) void drain();
+		});
+	});
+
+	async function drain() {
+		draining = true;
+		try {
+			while (queue.length > 0 && !destroyed) {
+				const next = queue.shift() as Game;
+				queued = queue.length;
+				try {
+					await present(next);
+				} catch (error) {
+					// A broken animation must never wedge the board: show the snapshot as it is.
+					console.error('board animation failed', error);
+					resetChoreography();
+					view = next;
+				}
+			}
+		} finally {
+			draining = false;
+		}
+	}
+
+	onDestroy(() => {
+		destroyed = true;
+	});
+
+	function sleep(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	function myIndexIn(g: Game): number | undefined {
+		const me = g.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id);
+		return me ? me.index - 1 : undefined;
+	}
+
+	const myArrayIndex = $derived(myIndexIn(view));
+	const isMyTurn = $derived(myArrayIndex !== undefined && view.currentPlayer === myArrayIndex);
+
 	function isCurrentUser(playerIndex: number): boolean {
 		return myArrayIndex !== undefined && playerIndex === myArrayIndex;
 	}
 
-	// One thing at a time: input is frozen and incoming moves are not animated while the board
-	// is playing a cinematic. `boardBusy` itself is declared with the choreography state below,
-	// next to `phase`, so it cannot be read before `phase` exists.
+	// One thing at a time: input is frozen while anything is animating or waiting to be animated.
+	// A move made on a board that has not caught up would be made against cards the player has not
+	// seen yet.
 	function canPlayCard(): boolean {
-		return !boardBusy && game.currentPlayer === myArrayIndex;
+		return !boardBusy && view.currentPlayer === myArrayIndex;
 	}
 
-	function getPlayerLabel(index: number): string {
-		return `P${index + 1}`;
+	// SEATS. Each player has a side of the screen, relative to you (always "down"). Humans are
+	// shown by name, the AI seats as AI 1, AI 2, ... in seat order.
+	const DIRS = ['down', 'right', 'up', 'left'] as const;
+	type Dir = (typeof DIRS)[number];
+
+	function dirFor(playerIndex: number): Dir {
+		const me = myArrayIndex ?? 0;
+		return DIRS[(playerIndex - me + 4) % 4];
 	}
 
-	const myPlayer = $derived(game.humanPlayers.find((p: any) => currentUser && p.userId === currentUser.id));
-	const myArrayIndex = $derived(myPlayer ? myPlayer.index - 1 : undefined);
+	function seatAt(dir: Dir): number {
+		return ((myArrayIndex ?? 0) + DIRS.indexOf(dir)) % 4;
+	}
 
-	const isMyTurn = $derived(myArrayIndex !== undefined && game.currentPlayer === myArrayIndex);
+	function humanAt(seat: number) {
+		return view.humanPlayers.find((p: any) => p.index - 1 === seat);
+	}
+
+	function seatName(seat: number): string {
+		const human = humanAt(seat);
+		if (human) return human.username || t('Player {n}', { n: seat + 1 });
+		const aiSeats = [0, 1, 2, 3].filter((s) => !humanAt(s));
+		return `AI ${aiSeats.indexOf(seat) + 1}`;
+	}
+
+	// Cards a seat holds, as the board shows them: a card on its way to the table has left the hand.
+	function handCount(seat: number): number {
+		const held = (view.cards?.[seat] ?? []).filter((c: number) => c >= 0).length;
+		const dealt = phase === 'dealing' ? Math.min(held, cardsDealtTo(seat, dealtCards)) : sequenceDeals ? 0 : held;
+		return Math.max(0, dealt - (throwing?.seat === seat ? 1 : 0));
+	}
 
 	function getCartonCount(capturedCards: number[] | undefined): number {
 		if (!capturedCards || capturedCards.length === 0) return 0;
@@ -60,7 +153,6 @@
 	}
 
 	let isSelectingCapture = $state(false);
-	let displayedTable: number[] = $state([]);
 
 	// ---------------------------------------------------------------------------
 	// Deal / round-end choreography
@@ -72,24 +164,20 @@
 	//     the cartón: the piles as they were counted, the cards left on the table, and the
 	//     points. The state clears those piles in the same step, so this payload is the only
 	//     chance to *show* the counting.
-	// Because both can arrive together (the cartón ends a deal and the next one is already
-	// dealt server-side), the sequence is explicit: wait -> count -> cartón paid -> deal.
-	//
-	// `waiting` is the first step: the sequence has been scheduled and the move that triggered it
-	// is still animating. It shows nothing, but it is NOT idle -- input stays frozen and incoming
-	// moves are not animated, so the cinematic cannot be interrupted halfway through.
-	type Phase = 'idle' | 'waiting' | 'counting' | 'carton-paid' | 'dealing';
+	// Both can arrive on the snapshot of the move that ended the deal, so `present()` plays them
+	// in order: move -> count -> cartón paid -> deal.
+	type Phase = 'idle' | 'counting' | 'carton-paid' | 'dealing';
 	let phase = $state<Phase>('idle');
-	// True from the moment a sequence is scheduled until it returns the board to idle.
-	const boardBusy = $derived(phase !== 'idle');
-	// Whether the sequence in flight will deal a new hand. A hand that arrived with the sequence
-	// stays face down until the deal animation turns it over, so the deal is not spoiled by the
-	// new cards appearing the instant the snapshot lands.
+	// True while a move is being animated.
+	let animating = $state(false);
+	// The board is busy while anything is on screen or still waiting in the queue.
+	const boardBusy = $derived(phase !== 'idle' || animating || queued > 0);
+	// Whether the snapshot being presented deals a new hand. That hand stays face down until the
+	// deal animation turns it over, so the deal is not spoiled by the new cards appearing first.
 	let sequenceDeals = $state(false);
 	// The carton points the counting is about to explain, held back from the score board until it
 	// has been counted on screen. The backend adds them to the score in the SAME step that
-	// publishes `roundEnd`, so the snapshot already carries the final score: showing it straight
-	// away gives the counting away before it happens.
+	// publishes `roundEnd`, so the snapshot already carries the final score.
 	let heldCartonPoints = $state<[number, number] | null>(null);
 	// ...and the points that just landed, for the "+N" next to the score. Not a timer: the badge
 	// animates itself away (see .score-gain) and the next sequence clears it.
@@ -100,17 +188,9 @@
 	// While the counting plays, the table must keep showing the cards that were there when
 	// the deal ended (the live table is already empty).
 	let heldTable = $state<number[] | null>(null);
-	// Bookkeeping the markup never reads: plain variables on purpose. They are written
-	// inside the effect that also reads them, and a $state would re-trigger it forever.
-	let seenDealId = 0;
-	let seenRoundEndId = 0;
-	let seqId = 0;
 
 	const SEAT_COUNT = 4;
 	const HAND_SIZE = 5;
-	// Timings. The backend paces AI turns 1.5-3 s apart, so the whole cartón sequence
-	// (count -> paid -> deal) is kept near 3 s: long enough to read, short enough that the
-	// next move rarely lands on top of it.
 	const HAND_DEAL_MS = 250; // per card
 	const HAND_GAP_MS = 180; // beat between one player's five cards and the next player's
 	const COUNT_MS = 1000; // total time to count each pile
@@ -119,9 +199,6 @@
 	// `cardsDealtTo`), so it is five cards plus one beat, four times over.
 	const DEAL_TOTAL_MS = SEAT_COUNT * HAND_SIZE * HAND_DEAL_MS + (SEAT_COUNT - 1) * HAND_GAP_MS;
 	const DEAL_HOLD_MS = 1000; // settle time after the last card lands
-	// Hard deadline for one cartón+deal sequence, in case a step is ever missed. The
-	// cinematic must never be able to leave the board non-interactive.
-	const SEQUENCE_CAP_MS = COUNT_MS + PAID_MS + DEAL_TOTAL_MS + DEAL_HOLD_MS + 1200;
 
 	// Five cards to one player, THEN the next: a hand lands as a group rather than a card at a
 	// time around the table. This is what the backend does too -- `deal`/`redeal` in
@@ -132,7 +209,7 @@
 	// explaining. It is the same number the score board showed before the deal ended, so nothing
 	// jumps until the points have been counted out.
 	function displayedScore(team: number): number {
-		return Math.max(0, (game.scores?.[team] ?? 0) - (heldCartonPoints?.[team] ?? 0));
+		return Math.max(0, (view.scores?.[team] ?? 0) - (heldCartonPoints?.[team] ?? 0));
 	}
 
 	// How many cards `seat` holds once `dealt` cards have left the deck.
@@ -151,209 +228,300 @@
 		return k * HAND_DEAL_MS + Math.floor(k / HAND_SIZE) * HAND_GAP_MS;
 	}
 
-	// ---------------------------------------------------------------------------------------
-	// ONE ANIMATION AT A TIME
-	// ---------------------------------------------------------------------------------------
-	// The snapshot that ends a deal also carries the move that ended it (the cartón is paid by
-	// a capture, and a deal from the deck follows the card that emptied the hands). Starting the
-	// counting or the deal on that same snapshot plays two cinematics on top of each other: the
-	// captured cards are still flying to the player while the piles are already being counted.
-	// So the choreography waits for the move animation to land first.
 	// A capture has to be READABLE: a card lands, there is a beat in which the cards it takes are
-	// highlighted, and they then leave one after another -- not all at once, which is what made it
-	// feel like a scuffle. The numbers below are the pacing of that story; the CSS animations
-	// (`tableCardIn`, `flyToSide`) are kept in step with them.
-	const THROW_MS = 1150; // the played card flies in from its player's side
-	const CAPTURE_HOLD_MS = 500; // beat: the cards it will take sit highlighted on the table
-	const CAPTURE_STAGGER_MS = 150; // each captured card leaves after the one before it
-	const GRAB_MS = 1250; // a card flies out to the player who grabbed it
+	// highlighted, and they then leave one after another, all of them towards the player who took
+	// them.
+	const THROW_MS = 900; // the played card flies in from its player's side
+	const CAPTURE_HOLD_MS = 550; // beat: the cards it will take sit highlighted on the table
+	const CAPTURE_STAGGER_MS = 160; // each captured card leaves after the one before it
+	const GRAB_MS = 850; // a card flies out to the player who grabbed it
 
-	// How long the animation for `move` runs: the card flies in, and on a capture the played and
-	// captured cards then fly out to the player, LAST one first. The board is busy for the whole
-	// of it, so this has to include the staggered departures.
-	function moveAnimationMs(move: { captureIndices?: number[] } | undefined): number {
-		if (!move) return 0;
-		const captured = move.captureIndices?.length ?? 0;
-		if (captured === 0) return THROW_MS;
-		return THROW_MS + CAPTURE_HOLD_MS + captured * CAPTURE_STAGGER_MS + GRAB_MS;
-	}
-
-	// The card that was played leaves first, then the cards it took, one after another: the eye
-	// can follow each card to the player instead of watching a pile jump.
-	function departureDelayMs(cardIndex: number): number {
-		const move = game.move;
-		if (!move) return 0;
-		const position = (move.captureIndices ?? []).indexOf(cardIndex);
-		return position < 0 ? 0 : (position + 1) * CAPTURE_STAGGER_MS;
-	}
-
-	// True while the cards a capture is about to take are highlighted, so the beat between the
-	// played card landing and those cards leaving says WHICH cards are being taken.
-	let captureHold = $state(false);
-	const heldCapture = $derived((game.move?.captureIndices ?? []) as number[]);
+	// True while the cards a capture is about to take are highlighted.
+	let heldCapture = $state<number[]>([]);
 	function isBeingCaptured(cardIndex: number): boolean {
-		return captureHold && heldCapture.includes(cardIndex);
+		return heldCapture.includes(cardIndex);
 	}
 
-	// The move the running sequence waits for, and the move the board has already dealt with.
-	// Plain variables on purpose: both are written by one effect and read by the other, and a
-	// `$state` would make each one re-run the other.
-	let sequenceMoveStep = -1;
-	let handledMove = -1;
+	function resetChoreography() {
+		phase = 'idle';
+		animating = false;
+		dealtCards = 0;
+		cartonEvent = null;
+		heldTable = null;
+		tableOverride = null;
+		sequenceDeals = false;
+		heldCartonPoints = null;
+		heldCapture = [];
+		incomingCard = null;
+		throwing = null;
+		flights = [];
+	}
 
-	// When the move animation currently on screen ends. Written by the move effect, read here:
-	// a deal can also arrive on its own snapshot, with the previous move still in flight, and
-	// then `game.move` is already gone. Deliberately NOT `$state`: this effect reads it while
-	// also writing state, and reacting to it would re-run the effect mid-sequence.
-	let moveAnimUntil = 0;
+	// Tells the story of one snapshot, then makes it the one on screen.
+	async function present(next: Game) {
+		const prev = view;
+		const first = !presentedAny;
+		presentedAny = true;
 
-	$effect(() => {
-		const dealId = game.dealId ?? 0;
-		const roundEnd = game.roundEnd;
-		const roundEndKey = roundEnd ? game.timeSteps ?? 0 : 0;
-		// Both reads must happen before the guards so the effect re-runs on either change.
-		if (dealId === 0 && !roundEnd) return;
-
-		const pendingDeal = dealId > seenDealId;
-		const hasCarton = Boolean(roundEnd) && roundEndKey !== seenRoundEndId;
-		if (!pendingDeal && !hasCarton) return;
-
-		seenDealId = Math.max(seenDealId, dealId);
-		if (hasCarton && roundEndKey) seenRoundEndId = roundEndKey;
-
-		// SEQUENCE OWNERSHIP. Each sequence gets an id and every callback checks it, so a
-		// NEWER sequence orphans an older one. What it must NOT do is cancel the running
-		// sequence's timers on every re-run: snapshots arrive per move (including the AI's,
-		// mid-animation), each one re-runs this effect, and the guard above then returns
-		// early — so a teardown that cleared the timers would leave the board stuck in
-		// 'dealing'/'carton-paid' with a full-screen overlay up. That was the freeze.
-		const id = ++seqId;
-		const alive = () => seqId === id;
-
-		// Let the move that triggered all this land first. On the cartón snapshot the move is
-		// right here in the payload, so its duration is known exactly; if this snapshot has no
-		// move, the previous one may still be in flight, and `moveAnimUntil` says until when.
-		// The offset is applied inside `schedule`, so every step (and the deadline) shifts with
-		// it instead of racing it.
-		const settleMs = game.move
-			? moveAnimationMs(game.move)
-			: Math.max(0, moveAnimUntil - performance.now());
-		const schedule = (fn: () => void, delay: number) => {
-			setTimeout(() => {
-				if (alive()) fn();
-			}, settleMs + delay);
-		};
-
-		// From here the board is busy: input is frozen and moves that arrive are not animated
-		// until the sequence ends. `waiting` shows nothing -- it is the move animation playing
-		// out -- but it keeps the player from starting a turn the deal is about to overwrite.
-		// (This effect never returns a teardown; see the note at its end.)
-		sequenceDeals = Boolean(pendingDeal);
-		// Hold the carton points back for the whole sequence, `waiting` included: the snapshot is
-		// already carrying them, and the counting has not been shown yet.
-		heldCartonPoints = hasCarton
-			? [roundEnd?.carton?.[0] ?? 0, roundEnd?.carton?.[1] ?? 0]
-			: null;
-		cartonGain = null;
-		phase = 'waiting';
-		// The move this sequence waits for. It is the one move that still animates while the
-		// board is busy; anything later is mirrored without animation (see the move effect).
-		sequenceMoveStep = game.move ? game.timeSteps ?? 0 : -1;
-
-		// Belt and braces: whatever happens, the cinematic cannot hold the UI hostage. A
-		// stuck overlay is indistinguishable from a frozen app, so every sequence has a hard
-		// deadline that returns the board to idle.
-		schedule(() => {
-			phase = 'idle';
-			dealtCards = 0;
-			cartonEvent = null;
-			heldTable = null;
-			sequenceDeals = false;
-			heldCartonPoints = null;
-		}, SEQUENCE_CAP_MS);
-
-		const startDeal = () => {
-			phase = 'dealing';
-			dealtCards = 0;
-			for (let k = 0; k < SEAT_COUNT * HAND_SIZE; k++) {
-				schedule(() => (dealtCards = k + 1), dealDelayMs(k));
-			}
-			schedule(() => {
-				phase = 'idle';
-				dealtCards = 0;
-				sequenceDeals = false;
-			}, DEAL_TOTAL_MS + DEAL_HOLD_MS);
-		};
-
-		if (hasCarton && roundEnd) {
-			// 1. Count the piles, card by card, while the table keeps its cards. This starts on
-			//    delay 0, i.e. right after the move animation: the cards that were on the table
-			//    are put back (heldTable) only then, because until that moment the move effect is
-			//    still animating them off it.
-			schedule(() => {
-				cartonEvent = roundEnd;
-				counted = [0, 0];
-				heldTable = roundEnd.tableCards ?? [];
-				phase = 'counting';
-			}, 0);
-
-			// ~26 updates reads as "counting", whatever the pile sizes are.
-			const steps = 26;
-			const targets: [number, number] = [roundEnd.counted?.[0] ?? 0, roundEnd.counted?.[1] ?? 0];
-			for (let s = 1; s <= steps; s++) {
-				schedule(() => {
-					const t = s / steps;
-					counted = [Math.round(targets[0] * t), Math.round(targets[1] * t)];
-				}, (s * COUNT_MS) / steps);
-			}
-			// 2. Cartón paid: show the points, and let the table empty out.
-			schedule(() => {
-				counted = [targets[0], targets[1]];
-				phase = 'carton-paid';
-				// Dropping the held cards is all it takes: the move effect has already put
-				// the live (empty) table in `displayedTable`, which takes over again.
-				heldTable = null;
-			}, COUNT_MS);
-			// 3. The counting is over: pay it on the score board, then deal. The points land here
-			//    rather than with the snapshot, which is what makes the counter agree with what
-			//    the player just watched being counted.
-			const paid: [number, number] = [roundEnd.carton?.[0] ?? 0, roundEnd.carton?.[1] ?? 0];
-			schedule(() => {
-				cartonEvent = null;
-				heldCartonPoints = null;
-				cartonGain = paid.some((points) => points > 0) ? paid : null;
-				if (pendingDeal) startDeal();
-				else phase = 'idle';
-			}, COUNT_MS + PAID_MS);
-		} else {
-			schedule(startDeal, 0);
+		if (first || next.id !== prev.id) {
+			resetChoreography();
+			view = next;
+			// The opening deal is animated when the board opens on it; a board opened mid-game
+			// (a reload) just shows the hands.
+			if ((next.dealId ?? 0) > 0 && (next.timeSteps ?? 0) === 0) await playDeal();
+			return;
 		}
 
-		// No teardown: the sequence above owns its timers and always terminates (its last
-		// step is idle, and the cap guarantees one). Cancelling them here is what wedged the
-		// board; orphaning on unmount is handled by `onDestroy`, which bumps `seqId`.
-	});
+		const isNewStep = (next.timeSteps ?? 0) > (prev.timeSteps ?? 0);
+		const hurry = queue.length >= BACKLOG_LIMIT || document.hidden;
+		if (!isNewStep || hurry) {
+			// The same step again (a resend, a capture prompt), or a backlog: just show it.
+			view = next;
+			return;
+		}
 
-	// Leaving the board (or the game) orphans whatever sequence is in flight, so its
-	// remaining callbacks become no-ops instead of writing to a dead component.
-	onDestroy(() => {
-		seqId++;
-	});
+		if (next.move) await playMove(prev, next.move);
+
+		const roundEnd = next.roundEnd;
+		const deals = (next.dealId ?? 0) > (prev.dealId ?? 0);
+		if (roundEnd || deals) cartonGain = null;
+		// Everything the next snapshot would give away before its time is held back BEFORE it goes
+		// on screen: the cartón points (already in its score), the cards that were on the table when
+		// the deal ended (its table is already empty), and the new hand (not dealt yet).
+		sequenceDeals = deals;
+		if (roundEnd) {
+			heldCartonPoints = [roundEnd.carton?.[0] ?? 0, roundEnd.carton?.[1] ?? 0];
+			heldTable = roundEnd.tableCards ?? [];
+		}
+		view = next;
+		tableOverride = null;
+
+		if (roundEnd) await playCounting(roundEnd);
+		if (deals) await playDeal();
+		sequenceDeals = false;
+	}
+
+	async function playCounting(roundEnd: RoundEnd) {
+		cartonEvent = roundEnd;
+		counted = [0, 0];
+		phase = 'counting';
+		// ~26 updates reads as "counting", whatever the pile sizes are.
+		const steps = 26;
+		const targets: [number, number] = [roundEnd.counted?.[0] ?? 0, roundEnd.counted?.[1] ?? 0];
+		for (let s = 1; s <= steps; s++) {
+			await sleep(COUNT_MS / steps);
+			if (destroyed) return;
+			counted = [Math.round((targets[0] * s) / steps), Math.round((targets[1] * s) / steps)];
+		}
+		// Cartón paid: show the points, and let the table empty out.
+		counted = [targets[0], targets[1]];
+		phase = 'carton-paid';
+		heldTable = null;
+		await sleep(PAID_MS);
+		// The counting is over: pay it on the score board. The points land here rather than with
+		// the snapshot, which is what makes the counter agree with what was just counted.
+		const paid: [number, number] = [roundEnd.carton?.[0] ?? 0, roundEnd.carton?.[1] ?? 0];
+		cartonEvent = null;
+		heldCartonPoints = null;
+		cartonGain = paid.some((points) => points > 0) ? paid : null;
+		phase = 'idle';
+	}
+
+	async function playDeal() {
+		sequenceDeals = true;
+		phase = 'dealing';
+		dealtCards = 0;
+		const start = performance.now();
+		const until = (at: number) => sleep(Math.max(0, start + at - performance.now()));
+		for (let k = 0; k < SEAT_COUNT * HAND_SIZE; k++) {
+			await until(dealDelayMs(k));
+			if (destroyed) return;
+			dealtCards = k + 1;
+		}
+		await until(DEAL_TOTAL_MS + DEAL_HOLD_MS);
+		phase = 'idle';
+		dealtCards = 0;
+		sequenceDeals = false;
+	}
+
+	// ---------------------------------------------------------------------------------------
+	// CARDS IN FLIGHT
+	// ---------------------------------------------------------------------------------------
+	// A card travelling between a player and the table is drawn in `.fly-layer`, a layer fixed to
+	// the viewport, so it is visible the whole way: from the edge of the screen on its player's
+	// side to its place on the table, and back out. (Drawn inside the table it was clipped to it.)
+	type Box = { cx: number; cy: number; w: number; h: number };
+	type Flight = {
+		key: number;
+		card: number;
+		// The box the element is laid out in; the keyframes move it from/to the other boxes.
+		base: Box;
+		frames: Keyframe[];
+		options: KeyframeAnimationOptions;
+		done: () => void;
+	};
+	let flights = $state<Flight[]>([]);
+	let flightKey = 0;
+	let flyLayer: HTMLElement | undefined = $state();
+	let boardEl: HTMLElement | undefined = $state();
+	const seatEls: Partial<Record<Dir, HTMLElement>> = $state({});
+
+	function boxOf(el: Element): Box {
+		const r = el.getBoundingClientRect();
+		return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, w: r.width, h: r.height };
+	}
+
+	// Just past the edge of the screen on `dir`'s side, level with that player's seat.
+	function edgeBox(dir: Dir, like: Box): Box {
+		const seat = seatEls[dir];
+		const anchor = seat ? boxOf(seat) : { cx: window.innerWidth / 2, cy: window.innerHeight / 2, w: 0, h: 0 };
+		const margin = Math.max(like.w, like.h);
+		const box = { ...like };
+		if (dir === 'left') Object.assign(box, { cx: -margin, cy: anchor.cy });
+		if (dir === 'right') Object.assign(box, { cx: window.innerWidth + margin, cy: anchor.cy });
+		if (dir === 'up') Object.assign(box, { cx: anchor.cx, cy: -margin });
+		if (dir === 'down') Object.assign(box, { cx: anchor.cx, cy: window.innerHeight + margin });
+		return box;
+	}
+
+	function transformTo(box: Box, base: Box, rotate = 0): string {
+		const s = box.w / base.w;
+		return `translate(${box.cx - base.cx}px, ${box.cy - base.cy}px) scale(${s}) rotate(${rotate}deg)`;
+	}
+
+	// Flies `card` from `from` to `to`. `base` is the box the card is laid out in (the table box),
+	// in viewport coordinates. Resolves when the card has arrived.
+	function fly(card: number, base: Box, from: Box, to: Box, options: KeyframeAnimationOptions, spin = 0) {
+		// The layer is `position: fixed`, but an ancestor with a transform would make it relative to
+		// that ancestor instead of the viewport: measure where it really is.
+		const origin = flyLayer?.getBoundingClientRect() ?? { left: 0, top: 0 };
+		const local = { ...base, cx: base.cx - origin.left, cy: base.cy - origin.top };
+		return new Promise<void>((resolve) => {
+			const key = ++flightKey;
+			flights = [
+				...flights,
+				{
+					key,
+					card,
+					base: local,
+					frames: [{ transform: transformTo(from, base, spin) }, { transform: transformTo(to, base) }],
+					options,
+					done: () => {
+						flights = flights.filter((f) => f.key !== key);
+						resolve();
+					}
+				}
+			];
+		});
+	}
+
+	// Svelte action: runs one flight's animation and reports when it is over (or torn down).
+	function flight(node: HTMLElement, f: Flight) {
+		const animation = node.animate(f.frames, { ...f.options, fill: 'both' });
+		let finished = false;
+		const finish = () => {
+			if (finished) return;
+			finished = true;
+			f.done();
+		};
+		animation.finished.then(finish, finish);
+		return {
+			destroy() {
+				animation.cancel();
+				finish();
+			}
+		};
+	}
+
+	// What the table shows while a move is being told (null: the snapshot's own table).
+	let tableOverride = $state<number[] | null>(null);
+	// The card that is flying in: it already holds its place on the table, invisibly, so the
+	// flight knows exactly where it lands.
+	let incomingCard = $state<number | null>(null);
+	// The card being thrown and whose hand it left.
+	let throwing = $state<{ card: number; seat: number } | null>(null);
+
+	function tableCardEl(card: number): HTMLElement | null {
+		return boardEl?.querySelector<HTMLElement>(`[data-table-card="${card}"]`) ?? null;
+	}
+
+	// The move in `move`, told against the board as it was before it (`prev`).
+	async function playMove(prev: Game, move: Move) {
+		animating = true;
+		try {
+			// The move names its player: that is where the card comes from and where the capture
+			// goes. Never inferred from whose turn it is now.
+			const seat = move.playerIndex;
+			const dir = dirFor(seat);
+			const card = move.cardIndex;
+			const captures = move.captureIndices ?? [];
+			const before = (prev.table ?? []).filter((c: number) => c !== card);
+
+			// 1. Throw. Your own card leaves from your hand; anyone else's from their edge.
+			const handCard = boardEl?.querySelector<HTMLElement>(`[data-hand-card="${card}"]`);
+			const handBox = handCard && seat === myArrayIndex ? boxOf(handCard) : null;
+			throwing = { card, seat };
+			incomingCard = card;
+			tableOverride = [...before, card];
+			await tick();
+			const target = tableCardEl(card);
+			if (target && !destroyed) {
+				const base = boxOf(target);
+				await fly(card, base, handBox ?? edgeBox(dir, base), base, {
+					duration: THROW_MS,
+					easing: 'cubic-bezier(0.22, 1, 0.36, 1)'
+				}, handBox ? 0 : 10);
+			}
+			incomingCard = null;
+			if (captures.length === 0 || destroyed) return;
+
+			// 2. The cards it takes light up for a beat, so the capture can be seen.
+			heldCapture = captures;
+			await sleep(CAPTURE_HOLD_MS);
+			heldCapture = [];
+			if (destroyed) return;
+
+			// 3. Grab: the played card, then each captured card, leave one after another, ALL of
+			//    them to the player who made the move. They are measured where they sit, and handed
+			//    to the fly layer in the same update that takes them off the table.
+			const leaving = [card, ...captures];
+			const grabs: Promise<void>[] = [];
+			leaving.forEach((c, i) => {
+				const el = tableCardEl(c);
+				if (!el) return;
+				const base = boxOf(el);
+				grabs.push(
+					fly(c, base, base, { ...edgeBox(dir, base), w: base.w * 0.8 }, {
+						duration: GRAB_MS,
+						delay: i * CAPTURE_STAGGER_MS,
+						easing: 'cubic-bezier(0.55, 0, 0.75, 0.3)'
+					})
+				);
+			});
+			tableOverride = [...before, card].filter((c) => !leaving.includes(c));
+			await Promise.all(grabs);
+		} finally {
+			// The hand keeps the card hidden until the snapshot that no longer has it goes on
+			// screen, which `present()` does right after this.
+			throwing = null;
+			animating = false;
+		}
+	}
 
 	// NUMBER KEYS PLAY A CARD. A hand is five cards and the board is mouse-driven otherwise,
 	// so on a desktop this is the whole game: 1-5 picks the n-th card of your hand. Guarded
 	// on it being your turn, no capture prompt being open (that choice belongs to the
 	// prompt), and the focus not sitting in a form field.
 	function handleKeydown(event: KeyboardEvent) {
-		// `boardBusy` covers it being your turn during a cinematic: the cards are still being
-		// counted or dealt, so the move would land on top of an animation.
-		if (boardBusy || !isMyTurn || isSelectingCapture || game.awaitingCapture) return;
+		// `boardBusy` covers it being your turn during an animation: the move would land on top
+		// of it.
+		if (boardBusy || !isMyTurn || isSelectingCapture || view.awaitingCapture) return;
 		if (event.metaKey || event.ctrlKey || event.altKey) return;
 		const target = event.target as HTMLElement | null;
 		if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
 		const index = Number.parseInt(event.key, 10);
 		if (!Number.isInteger(index) || index < 1 || index > 9) return;
-		const hand = myArrayIndex !== undefined ? game.cards?.[myArrayIndex] : undefined;
+		const hand = myArrayIndex !== undefined ? view.cards?.[myArrayIndex] : undefined;
 		const cardIndex = hand?.[index - 1];
 		if (cardIndex === undefined || cardIndex < 0) return;
 		event.preventDefault();
@@ -362,24 +530,19 @@
 
 	// The hand is revealed in the same order the cards are dealt, so the animation matches
 	// what actually happened: your five cards turn up together, when your seat's turn in the
-	// deal comes round. A hand that arrived with the deal in flight stays face down until then
-	// -- showing the new cards the instant the snapshot lands would spoil the deal, and those
-	// cards are unplayable during it anyway.
+	// deal comes round. A hand that arrived with the deal in flight stays face down until then.
 	const myDealtCount = $derived(
 		myArrayIndex === undefined
 			? Number.POSITIVE_INFINITY
 			: phase === 'dealing'
 				? cardsDealtTo(myArrayIndex, dealtCards)
-				: sequenceDeals && boardBusy
+				: sequenceDeals
 					? 0
 					: Number.POSITIVE_INFINITY
 	);
 
-	// Game-end dialog, 2 s after the final snapshot so the last move's animation can finish.
-	// `game.done` is the source of truth (a derived value, read-only); the delay is local
-	// state. Writing to the derived directly -- as this used to -- makes the pause a no-op,
-	// because the derived already reads the very flag the timer was meant to lag behind.
-	const gameEnded = $derived(Boolean(game.done));
+	// Game-end dialog, 2 s after the last animation has played out.
+	const gameEnded = $derived(Boolean(view.done) && !boardBusy);
 	let showGameEndDialog = $state(false);
 	$effect(() => {
 		if (!gameEnded) {
@@ -394,40 +557,14 @@
 
 	// Reset capture selection when a new capture prompt appears
 	$effect(() => {
-		if (game.awaitingCapture) {
+		if (view.awaitingCapture) {
 			isSelectingCapture = false;
 		}
 	});
 
-	// Get the current player during animation
-	const getDisplayedCurrentPlayer = (): number | undefined => {
-		return game.currentPlayer
-	};
-
-	// Side each player throws from / grabs to, relative to current user (always "down").
-	const DIRS = ['down', 'right', 'up', 'left'] as const;
-
-	function dirFor(playerIndex: number): string {
-		const me = myArrayIndex ?? 0;
-		return DIRS[(playerIndex - me + 4) % 4];
-	}
-
-	// Where a table card flies to when it is taken, and where the played card comes in from, in
-	// pixels from the table's centre. `flyToSide` parses these as numbers, so they cannot be
-	// viewport-relative like FX_OFFSET above.
-	const OFFSET: Record<string, { tx: string; ty: string }> = {
-		down: { tx: '0px', ty: '340px' },
-		right: { tx: '560px', ty: '0px' },
-		up: { tx: '0px', ty: '-340px' },
-		left: { tx: '-560px', ty: '0px' }
-	};
-
-	// Tighter offsets for the dealing overlay: the throw/grab animations travel the whole
-	// board, but four card piles have to fit on a phone screen. These are capped against the
-	// viewport, so on a narrow screen the piles close in rather than sliding off the edge (a
-	// pile positioned past the viewport edge is what drags the page sideways). They are only
-	// ever read as CSS custom properties, so `min()`/`calc()` are fine here -- unlike OFFSET
-	// above, which `flyToSide` parses as a number.
+	// Tighter offsets for the dealing overlay: four card piles have to fit on a phone screen.
+	// These are capped against the viewport, so on a narrow screen the piles close in rather
+	// than sliding off the edge. Only ever read as CSS custom properties.
 	const FX_OFFSET: Record<string, { tx: string; ty: string }> = {
 		down: { tx: '0px', ty: 'min(150px, 20vh)' },
 		right: { tx: 'min(210px, 26vw)', ty: '0px' },
@@ -435,9 +572,9 @@
 		left: { tx: 'calc(-1 * min(210px, 26vw))', ty: '0px' }
 	};
 
-	// While a cartón is being counted the live table is already empty, so the cards that
-	// were on it come from the round-end payload; `shownTable` keeps them on screen.
-	const shownTable = $derived(heldTable ?? displayedTable);
+	// While a cartón is being counted the live table is already empty, so the cards that were on
+	// it come from the round-end payload; while a move is being told, from `tableOverride`.
+	const shownTable = $derived<number[]>(heldTable ?? tableOverride ?? view.table ?? []);
 
 	// WHERE A CARD SITS ON THE TABLE. See tableLayout.ts: the first card takes the middle and the
 	// rest are laid out around it, each card keeping its place while it is on the table. A capture
@@ -454,123 +591,15 @@
 		shownTable.reduce((widest, cardIndex) => Math.max(widest, Math.abs(slotFor(cardIndex))), 0)
 	);
 
-	// Cards that have left free their slots for the next ones; the card on its way out keeps the
-	// position it was rendered with, so this does not move it.
+	// Cards that have left free their slots for the next ones.
 	$effect(() => {
 		tableSlots.retain(shownTable);
-	});
-
-	let throwAnim = $state<{ card: number; dir: string; id: number } | null>(null);
-	// Direction the currently-leaving table cards fly toward (read by the out transition).
-	let removeDir = $state('down');
-	let animId = 0;
-
-	// Animation timings (ms) — must match the CSS animation durations. Declared with the
-	// choreography above, because the deal/cartón sequence has to wait for them.
-
-	// Out transition: a table card flies off toward the player who grabbed it. `delay` staggers
-	// the captured cards so they leave in sequence (see departureDelayMs).
-	function flyToSide(_node: Element, { dir, delay = 0 }: { dir: string; delay?: number }) {
-		const tx = parseFloat(OFFSET[dir].tx);
-		const ty = parseFloat(OFFSET[dir].ty);
-		return {
-			duration: GRAB_MS,
-			delay,
-			easing: cubicIn,
-			// t goes 1 -> 0; start centered/opaque, end translated/faded.
-			css: (t: number) =>
-				`transform: translate(${tx * (1 - t)}px, ${ty * (1 - t)}px) scale(${0.5 + 0.5 * t}); opacity: ${t};`
-		};
-	}
-
-	$effect(() => {
-		const table = game.table ?? [];
-		const move = game.move;
-		const currentPlayer = game.currentPlayer;
-		// One move per snapshot: the backend bumps `stepCount` on every turn.
-		const step = game.timeSteps ?? 0;
-
-		// A cinematic owns the board. Only the move the sequence is waiting for still animates
-		// (the sequence's own first step hangs off it); any move after that is mirrored without
-		// animation, and marked as seen so it is not replayed when the board goes idle again.
-		// Animating here is what put a throw/grab on top of the counting or the deal.
-		if (boardBusy && step !== sequenceMoveStep) {
-			displayedTable = table;
-			throwAnim = null;
-			captureHold = false;
-			moveAnimUntil = 0;
-			if (move && currentPlayer !== undefined) handledMove = step;
-			return;
-		}
-
-		// No move to animate: just mirror the table.
-		if (!move || currentPlayer === undefined) {
-			displayedTable = table;
-			// Re-running this effect cancels the timers of an in-flight throw (Svelte runs
-			// the previous teardown first), so a snapshot that carries no move -- the
-			// opening deal, for instance -- would otherwise leave the thrown card stuck on
-			// screen forever. Drop it explicitly.
-			throwAnim = null;
-			captureHold = false;
-			// Nothing is animating any more, so the deal/cartón choreography is free to run.
-			moveAnimUntil = 0;
-			return;
-		}
-
-		// The same move can be seen twice: this effect re-runs whenever one of its dependencies
-		// changes (the phase ending a sequence, for instance) and a reconnect can resend the same
-		// snapshot. Animate each move once.
-		if (step === handledMove) return;
-		handledMove = step;
-
-		const before = untrack(() => displayedTable);
-		const dir = dirFor((currentPlayer - 1 + 4) % 4);
-		const id = ++animId;
-		const captures = move.captureIndices ?? [];
-		// Publish when this animation is over, for the choreography effect above.
-		moveAnimUntil = performance.now() + moveAnimationMs(move);
-
-		// 1. Throw: keep the old table visible while the played card flies in.
-		throwAnim = { card: move.cardIndex, dir, id };
-
-		const timers: ReturnType<typeof setTimeout>[] = [];
-
-		// 2. Played card lands -> inserted into the table (scale-in, neighbors reflow).
-		//    On a capture, also keep the captured cards so they can be grabbed next.
-		timers.push(setTimeout(() => {
-			if (animId !== id) return;
-			throwAnim = null;
-			displayedTable = captures.length > 0 ? [...before, move.cardIndex] : table;
-			// 2b. A capture holds here: the cards the played card takes are lit up for a beat
-			//     before any of them moves, so the move can be seen rather than guessed.
-			captureHold = captures.length > 0;
-		}, THROW_MS));
-
-		if (captures.length > 0) {
-			// 3. Grab: remove the played + captured cards from the table. Each flies off toward
-			//    the player (out transition, staggered by `departureDelayMs`); remaining cards
-			//    reflow (flip).
-			timers.push(setTimeout(() => {
-				if (animId !== id) return;
-				captureHold = false;
-				removeDir = dir;
-				displayedTable = table;
-			}, THROW_MS + CAPTURE_HOLD_MS));
-			// The captured cards are still travelling to their player until the out transition
-			// ends, so release the board only then -- this is what the deal waits for.
-			timers.push(setTimeout(() => {
-				if (animId !== id) return;
-				moveAnimUntil = 0;
-			}, moveAnimationMs(move)));
-		}
-
-		return () => timers.forEach(clearTimeout);
 	});
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="game-board">
+<div class="game-board" bind:this={boardEl}>
 	{#if phase === 'counting'}
 		<div class="round-indicator counting">{t('🃏 End of the deal — counting the cartón…')}</div>
 	{:else if phase === 'carton-paid'}
@@ -589,7 +618,7 @@
 				<span class="value">
 					<span class="culture-mark" title={t('Cuarenta, the Ecuadorian card game')}>
 						<span class="culture-icon sm" role="img" aria-label={t('Ecuador')}></span>
-						{game.id}
+						{view.id}
 					</span>
 				</span>
 			</div>
@@ -604,11 +633,11 @@
 						<span class="score-gain">+{cartonGain[0]}</span>
 					{/if}
 				</span>
-				{#if game.cardsCaptured}
+				{#if view.cardsCaptured}
 					<span class="carton-info">
 						<span class="carton-label">{t('Cartón:')}</span>
-						<span class="carton-count">{getCartonCount(game.cardsCaptured[0])}</span>
-						<span class="captured-label">({game.cardsCaptured[0]?.length ?? 0})</span>
+						<span class="carton-count">{getCartonCount(view.cardsCaptured[0])}</span>
+						<span class="captured-label">({view.cardsCaptured[0]?.length ?? 0})</span>
 					</span>
 				{/if}
 			</div>
@@ -620,149 +649,167 @@
 						<span class="score-gain">+{cartonGain[1]}</span>
 					{/if}
 				</span>
-				{#if game.cardsCaptured}
+				{#if view.cardsCaptured}
 					<span class="carton-info">
 						<span class="carton-label">{t('Cartón:')}</span>
-						<span class="carton-count">{getCartonCount(game.cardsCaptured[1])}</span>
-						<span class="captured-label">({game.cardsCaptured[1]?.length ?? 0})</span>
+						<span class="carton-count">{getCartonCount(view.cardsCaptured[1])}</span>
+						<span class="captured-label">({view.cardsCaptured[1]?.length ?? 0})</span>
 					</span>
 				{/if}
 			</div>
 		</div>
 	</div>
 
-	<!-- Current player indicator. Only YOUR turn is announced: for anyone else the seat label
-	     alone says whose turn it is, and labelling a seat "Human"/"AI's turn" was noise. -->
+	<!-- Only YOUR turn is announced here: whose turn it is otherwise is lit up on their seat. -->
 	<div class="current-player-section">
-		{#if getDisplayedCurrentPlayer() !== undefined && !game.done}
-			{@const currentPlayerIdx = getDisplayedCurrentPlayer() ?? 0}
-			<div class="current-player-text" class:your-turn={isCurrentUser(currentPlayerIdx)}>
-				{getPlayerLabel(currentPlayerIdx)}
-				{#if isCurrentUser(currentPlayerIdx)}
-					<span class="turn-label" aria-live="polite">{t('Your turn')}</span>
-				{/if}
+		{#if isMyTurn && !view.done}
+			<div class="current-player-text your-turn">
+				<span class="turn-label" aria-live="polite">{t('Your turn')}</span>
 			</div>
 		{/if}
 	</div>
 
 	{#if showGameEndDialog}
-		<GameResultsDialog {game} {onReturnToLobby} />
+		<GameResultsDialog game={view} {onReturnToLobby} />
 	{/if}
 
-	<!-- Table area -->
-	<div class="table-area">
-		<div class="table-cards">
-			{#if shownTable.length > 0}
-				<div class="cards-display" style="--half-slots:{halfSlots}">
-					{#each shownTable as cardIndex (cardIndex)}
-						<div
-							class="card on-table"
-							style="--slot:{slotFor(cardIndex)}"
-							class:captured={isBeingCaptured(cardIndex)}
-							in:scale={{ duration: 300, start: 0.4 }}
-							out:flyToSide={{ dir: removeDir, delay: departureDelayMs(cardIndex) }}
-						>
-							<PlayingCard {cardIndex} />
-						</div>
+	<!-- The table with the four players around it: you at the bottom, the others left, up and
+	     right in turn order. Cards fly between these sides and the table. -->
+	<div class="table-ring">
+		{#each DIRS as dir (dir)}
+			{@const seat = seatAt(dir)}
+			<div
+				class="seat seat-{dir}"
+				class:active={!view.done && view.currentPlayer === seat}
+				class:team-a={seat % 2 === 0}
+				class:team-b={seat % 2 === 1}
+				bind:this={seatEls[dir]}
+			>
+				<span class="seat-name" title={seatName(seat)}>{seatName(seat)}</span>
+				{#if isCurrentUser(seat)}<span class="seat-you">{t('You')}</span>{/if}
+				<span class="seat-hand" aria-hidden="true">
+					{#each Array(handCount(seat)) as _, i (i)}
+						<span class="mini-back"></span>
 					{/each}
-				</div>
-			{:else}
-				<div class="empty-table">{t('Table is empty')}</div>
-			{/if}
-		</div>
+				</span>
+			</div>
+		{/each}
 
-		<!-- Played card flying in from the player's side toward the table -->
-		<div class="anim-overlay">
-			{#if throwAnim}
-				{#key throwAnim.id}
-					<div
-						class="fly-card throw"
-						style="--tx:{OFFSET[throwAnim.dir].tx}; --ty:{OFFSET[throwAnim.dir].ty}"
-					>
-						<PlayingCard cardIndex={throwAnim.card} />
-					</div>
-				{/key}
-			{/if}
-		</div>
-
-		<!-- Deal: the deck empties into four piles, five cards to a player before the next -->
-		{#if phase === 'dealing'}
-			<div class="fx-overlay">
-				<div class="deck-pile">
-					{#each Array(Math.max(0, SEAT_COUNT * HAND_SIZE - dealtCards)) as _, i}
-						<span class="card-back" style="--i:{i}"></span>
-					{/each}
-				</div>
-				{#each [0, 1, 2, 3] as seat (seat)}
-					{@const dir = dirFor(seat)}
-					<div
-						class="seat-pile"
-						class:mine={seat === myArrayIndex}
-						style="--tx:{FX_OFFSET[dir].tx}; --ty:{FX_OFFSET[dir].ty}"
-					>
-						{#each Array(cardsDealtTo(seat, dealtCards)) as _, i}
-							<span class="card-back landed" style="--i:{i}"></span>
+		<div class="table-area">
+			<div class="table-cards">
+				{#if shownTable.length > 0}
+					<div class="cards-display" style="--half-slots:{halfSlots}">
+						{#each shownTable as cardIndex (cardIndex)}
+							<div
+								class="card on-table"
+								style="--slot:{slotFor(cardIndex)}"
+								data-table-card={cardIndex}
+								class:captured={isBeingCaptured(cardIndex)}
+								class:incoming={incomingCard === cardIndex}
+								in:fade={{ duration: 200 }}
+							>
+								<PlayingCard {cardIndex} />
+							</div>
 						{/each}
-						{#if seat === myArrayIndex}<span class="seat-label">{t('You')}</span>{/if}
 					</div>
-				{/each}
-				{#if dealtCards > 0 && dealtCards <= SEAT_COUNT * HAND_SIZE}
-					{@const dir = dirFor(seatOfCard(dealtCards))}
-					{#key dealtCards}
-						<span
-							class="deal-fly card-back"
-							style="--tx:{FX_OFFSET[dir].tx}; --ty:{FX_OFFSET[dir].ty}"
-						></span>
-					{/key}
+				{:else}
+					<div class="empty-table">{t('Table is empty')}</div>
 				{/if}
 			</div>
-		{/if}
 
-		<!-- Round end: count the two captured piles, card by card, then pay the cartón -->
-		{#if (phase === 'counting' || phase === 'carton-paid') && cartonEvent}
-			<div class="fx-overlay carton-overlay">
-				{#each [0, 1] as team (team)}
-					<div class="carton-pile" class:paid={phase === 'carton-paid'}>
-						<div class="carton-pile-head">{t('Team {team}', { team: team + 1 })}</div>
-						<div class="carton-stack">
-							{#each cartonEvent.captured?.[team] ?? [] as cardIndex, i (i)}
-								<!-- Face-down pile: cards turn face-up one at a time as they are
-								     counted, so the animation reads as counting rather than as a
-								     slide show of the final numbers. -->
-								<span
-									class="card-back"
-									class:flipped={i < counted[team]}
-									class:red={Math.floor(cardIndex / 10) <= 1}
-									style="--i:{i}"
-									title={i < counted[team] ? cardToString(cardIndex) : undefined}
-									>{#if i < counted[team]}{suitGlyph(cardIndex)}{/if}</span
-								>
-							{/each}
-						</div>
-						<!-- Just the running count: the total was a spoiler, and the cards turning
-						     over one by one already show the pile being counted. -->
-						<div class="carton-tally">
-							<span class="tally-number">{counted[team]}</span>
-						</div>
-						{#if phase === 'carton-paid'}
-							<div class="carton-paid-badge" class:zero={(cartonEvent.carton?.[team] ?? 0) === 0}>
-								{(cartonEvent.carton?.[team] ?? 0) > 0
-									? t('+{points} points', { points: cartonEvent.carton[team] })
-									: t('no cartón')}
-							</div>
-						{/if}
+			<!-- Deal: the deck empties into four piles, five cards to a player before the next -->
+			{#if phase === 'dealing'}
+				<div class="fx-overlay">
+					<div class="deck-pile">
+						{#each Array(Math.max(0, SEAT_COUNT * HAND_SIZE - dealtCards)) as _, i}
+							<span class="card-back" style="--i:{i}"></span>
+						{/each}
 					</div>
-				{/each}
+					{#each [0, 1, 2, 3] as seat (seat)}
+						{@const dir = dirFor(seat)}
+						<div
+							class="seat-pile"
+							class:mine={seat === myArrayIndex}
+							style="--tx:{FX_OFFSET[dir].tx}; --ty:{FX_OFFSET[dir].ty}"
+						>
+							{#each Array(cardsDealtTo(seat, dealtCards)) as _, i}
+								<span class="card-back landed" style="--i:{i}"></span>
+							{/each}
+							<span class="seat-label">{seat === myArrayIndex ? t('You') : seatName(seat)}</span>
+						</div>
+					{/each}
+					{#if dealtCards > 0 && dealtCards <= SEAT_COUNT * HAND_SIZE}
+						{@const dir = dirFor(seatOfCard(dealtCards))}
+						{#key dealtCards}
+							<span
+								class="deal-fly card-back"
+								style="--tx:{FX_OFFSET[dir].tx}; --ty:{FX_OFFSET[dir].ty}"
+							></span>
+						{/key}
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Round end: count the two captured piles, card by card, then pay the cartón -->
+			{#if (phase === 'counting' || phase === 'carton-paid') && cartonEvent}
+				<div class="fx-overlay carton-overlay">
+					{#each [0, 1] as team (team)}
+						<div class="carton-pile" class:paid={phase === 'carton-paid'}>
+							<div class="carton-pile-head">{t('Team {team}', { team: team + 1 })}</div>
+							<div class="carton-stack">
+								{#each cartonEvent.captured?.[team] ?? [] as cardIndex, i (i)}
+									<!-- Face-down pile: cards turn face-up one at a time as they are
+									     counted, so the animation reads as counting rather than as a
+									     slide show of the final numbers. -->
+									<span
+										class="card-back"
+										class:flipped={i < counted[team]}
+										class:red={Math.floor(cardIndex / 10) <= 1}
+										style="--i:{i}"
+										title={i < counted[team] ? cardToString(cardIndex) : undefined}
+										>{#if i < counted[team]}{suitGlyph(cardIndex)}{/if}</span
+									>
+								{/each}
+							</div>
+							<!-- Just the running count: the total was a spoiler, and the cards turning
+							     over one by one already show the pile being counted. -->
+							<div class="carton-tally">
+								<span class="tally-number">{counted[team]}</span>
+							</div>
+							{#if phase === 'carton-paid'}
+								<div class="carton-paid-badge" class:zero={(cartonEvent.carton?.[team] ?? 0) === 0}>
+									{(cartonEvent.carton?.[team] ?? 0) > 0
+										? t('+{points} points', { points: cartonEvent.carton[team] })
+										: t('no cartón')}
+								</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	</div>
+
+	<!-- Cards travelling between a player's side of the screen and the table. Fixed to the
+	     viewport, so a card is visible the whole way, not only once it is over the table. -->
+	<div class="fly-layer" bind:this={flyLayer} aria-hidden="true">
+		{#each flights as f (f.key)}
+			<div
+				class="fly-card"
+				style="left:{f.base.cx - f.base.w / 2}px; top:{f.base.cy - f.base.h / 2}px; width:{f.base.w}px; height:{f.base.h}px"
+				use:flight={f}
+			>
+				<PlayingCard cardIndex={f.card} />
 			</div>
-		{/if}
+		{/each}
 	</div>
 
 	<!-- Capture selection section -->
-	{#if game.awaitingCapture && game.captureOptions && game.captureOptions.length > 0 && !isSelectingCapture && !boardBusy}
+	{#if view.awaitingCapture && view.captureOptions && view.captureOptions.length > 0 && !isSelectingCapture && !boardBusy}
 		<div class="capture-selection">
 			<div class="section-title">{t('Choose which cards to capture:')}</div>
 			<div class="captures-grid">
-				{#each game.captureOptions as option}
+				{#each view.captureOptions as option}
 					<button
 						class="capture-option"
 						onclick={() => {
@@ -782,7 +829,7 @@
 	{/if}
 
 	<!-- Player's hand at bottom -->
-	{#if myArrayIndex !== undefined && game.cards && game.cards[myArrayIndex]}
+	{#if myArrayIndex !== undefined && view.cards && view.cards[myArrayIndex]}
 		<div class="player-hand" class:my-turn={isMyTurn}>
 			<div class="hand-header">
 				<div class="hand-label">
@@ -791,13 +838,15 @@
 				</div>
 			</div>
 			<div class="cards-container">
-				{#each game.cards[myArrayIndex] as cardIndex, i}
+				{#each view.cards[myArrayIndex] as cardIndex, i}
 					{#if cardIndex >= 0}
 						{#if i < myDealtCount}
 							<button
 								class="card"
 								class:playable={canPlayCard()}
 								class:just-dealt={phase === 'dealing'}
+								class:in-flight={throwing?.card === cardIndex}
+								data-hand-card={cardIndex}
 								style="--i:{i}"
 								disabled={!canPlayCard()}
 								onclick={() => onPlayCard(cardIndex)}
@@ -918,47 +967,106 @@
 		font-weight: 600;
 	}
 
-	.anim-overlay {
-		position: absolute;
+	/* Cards in flight between a player's side and the table. Fixed to the viewport so the card is
+	   visible the whole way, outside the table too; the clip at the viewport edge is where a card
+	   comes from and goes to, and it keeps the travel from widening the page. */
+	.fly-layer {
+		position: fixed;
 		inset: 0;
-		/* The throw/grab travels 340-560px toward a player's side, which is off-screen on a
-		   phone: clip it here so the card leaves the table instead of widening the page. */
 		overflow: hidden;
-		display: flex;
-		align-items: center;
-		justify-content: center;
 		pointer-events: none;
-		z-index: 10;
+		z-index: 30;
 	}
 
 	.fly-card {
-		padding: 0;
+		position: absolute;
 		border-radius: 0.45rem;
-		width: clamp(2.6rem, 11vw, 3.5rem);
-		aspect-ratio: 5 / 7;
-		display: block;
+		border: 2px solid rgba(255, 255, 255, 0.3);
 		overflow: hidden;
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-		will-change: transform, opacity;
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+		will-change: transform;
 	}
 
-	.fly-card.throw {
-		/* Keep in step with THROW_MS. */
-		animation: throw-in 1150ms cubic-bezier(0.22, 1, 0.36, 1);
+	/* The table and the four players around it: you at the bottom, the others on their sides. */
+	.table-ring {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-areas:
+			'.    up    .'
+			'left table right'
+			'.    down  .';
+		align-items: center;
+		justify-items: center;
+		gap: 0.5rem;
+		min-width: 0;
 	}
 
-	@keyframes throw-in {
-		from {
-			transform: translate(var(--tx), var(--ty)) scale(0.6) rotate(8deg);
-			opacity: 0;
-		}
-		to {
-			transform: translate(0, 0) scale(1) rotate(0deg);
-			opacity: 1;
-		}
+	.seat {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.2rem;
+		min-width: 0;
+		max-width: clamp(3.5rem, 18vw, 8rem);
+		padding: 0.35rem 0.6rem;
+		border-radius: 0.6rem;
+		border: 2px solid rgba(255, 255, 255, 0.12);
+		background: rgba(15, 23, 42, 0.6);
+		transition: border-color 0.3s, box-shadow 0.3s, background 0.3s;
+	}
+
+	.seat-up { grid-area: up; }
+	.seat-left { grid-area: left; }
+	.seat-right { grid-area: right; }
+	.seat-down { grid-area: down; }
+
+	.seat.active {
+		border-color: #fbbf24;
+		background: rgba(251, 191, 36, 0.12);
+		box-shadow: 0 0 16px rgba(251, 191, 36, 0.35);
+	}
+
+	.seat-name {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.8rem;
+		font-weight: 700;
+		color: #e2e8f0;
+	}
+
+	.seat.team-a .seat-name { color: #93c5fd; }
+	.seat.team-b .seat-name { color: #fca5a5; }
+	.seat.active .seat-name { color: #fbbf24; }
+
+	.seat-you {
+		font-size: 0.6rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #94a3b8;
+	}
+
+	.seat-hand {
+		display: flex;
+		gap: 2px;
+		min-height: 0.9rem;
+	}
+
+	.mini-back {
+		width: 0.6rem;
+		height: 0.85rem;
+		border-radius: 0.15rem;
+		border: 1px solid rgba(255, 255, 255, 0.35);
+		background:
+			repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 2px, transparent 2px 4px),
+			linear-gradient(135deg, #1e3a8a, #0f172a);
 	}
 
 	.table-area {
+		grid-area: table;
+		width: 100%;
 		position: relative;
 		display: flex;
 		flex-direction: column;
@@ -1051,6 +1159,12 @@
 			0 0 0 3px rgba(251, 191, 36, 0.6),
 			0 8px 22px rgba(251, 191, 36, 0.35);
 		filter: brightness(1.12);
+	}
+
+	/* Holding its place on the table (or in the hand) while its flying copy is on the way. */
+	.card.incoming,
+	.card.in-flight {
+		visibility: hidden;
 	}
 
 	.card.playable:hover {
