@@ -177,3 +177,4 @@ prof.out
 tic_tac_toe*
 checkpoints*
 .DS_Store
+statistics.db.*
