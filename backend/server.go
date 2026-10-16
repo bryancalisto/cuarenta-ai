@@ -2,6 +2,7 @@ package cua
 
 import (
 	"context"
+	"cua/internal/stats"
 	"log"
 	"net/http"
 	"net/http/pprof"
@@ -22,6 +23,10 @@ type Server struct {
 	// i know it's dirty, but some things need a centralized way to get the DB
 	DB Database
 
+	// Stats is the SQLite database behind the admin dashboard. Nil (or not enabled) means the
+	// dashboard answers "statistics are not available" instead of pretending there is no data.
+	Stats *stats.Store
+
 	// services
 	AuthService  AuthService
 	JobsService  JobsService
@@ -29,8 +34,14 @@ type Server struct {
 	inferService InferenceService
 }
 
-func NewServer(r *gin.Engine, clock clock.Clock, db Database, authService AuthService, jobsService JobsService, inferService InferenceService, gameplay Gameplay) *Server {
-	return &Server{r: r, clock: clock, DB: db, AuthService: authService, JobsService: jobsService, inferService: inferService, gameplay: gameplay}
+// NewServer wires the HTTP layer. The statistics store is optional (variadic) so every existing
+// call site keeps working: a server without it simply has no dashboard data.
+func NewServer(r *gin.Engine, clock clock.Clock, db Database, authService AuthService, jobsService JobsService, inferService InferenceService, gameplay Gameplay, statsStores ...*stats.Store) *Server {
+	server := &Server{r: r, clock: clock, DB: db, AuthService: authService, JobsService: jobsService, inferService: inferService, gameplay: gameplay}
+	if len(statsStores) > 0 {
+		server.Stats = statsStores[0]
+	}
+	return server
 }
 
 func (s *Server) Setup() {
@@ -57,6 +68,18 @@ func (s *Server) Setup() {
 	authGroup.Use(s.AuthService.AuthMiddleware())
 	authGroup.POST("/refresh-token", s.RefreshJwtCtl)
 	authGroup.POST("/ws-ticket", s.CreateWsTicketCtl)
+
+	// The admin dashboard. Sign-in is public (it IS the credential check) and everything else
+	// hangs off it behind AdminMiddleware, which accepts only a token carrying `role: "admin"`.
+	// It is registered before the player middleware below so an admin request is never judged by
+	// the player rule, and a player request never reaches these handlers.
+	adminGroup := api.Group("/admin")
+	adminGroup.POST("/sign-in", s.AdminSignInCtl)
+	adminGroup.Use(s.AuthService.AdminMiddleware())
+	adminGroup.GET("/stats/overview", s.AdminOverviewCtl)
+	adminGroup.GET("/stats/games", s.AdminGamesCtl)
+	adminGroup.GET("/stats/games/:id/replay", s.AdminReplayCtl)
+	adminGroup.GET("/stats/timeseries", s.AdminTimeseriesCtl)
 
 	api.Use(s.AuthService.AuthMiddleware())
 	api.GET("/games", s.MyGamesCtl)

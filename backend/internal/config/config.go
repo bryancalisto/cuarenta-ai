@@ -38,6 +38,19 @@ type Environ struct {
 	// the board. Keep it in step with the web UI: it is DEAL_TOTAL_MS + DEAL_HOLD_MS in
 	// web-ui/src/lib/GameBoard.svelte, which the deal timings there define. 0 disables the wait.
 	AiDealGraceMs int `env:"AI_DEAL_GRACE_MS" envDefault:"6500"`
+
+	// AdminUsername and AdminPassword are the credentials for the statistics dashboard
+	// (`/dashboard` in the web UI). They are deliberately NOT user accounts: they never touch the
+	// game database, they are only compared against the environment, and the token they mint
+	// carries `role: "admin"`, which a player token never has. Leaving AdminPassword empty closes
+	// the dashboard instead of opening it with a default.
+	AdminUsername string `env:"ADMIN_USERNAME"`
+	AdminPassword string `env:"ADMIN_PASSWORD"`
+
+	// StatsDbPath is the SQLite file the game statistics are recorded into, next to the server's
+	// working directory by default. It is separate from the game database (which is gob): losing
+	// statistics must never cost a game its state, and vice versa.
+	StatsDbPath string `env:"STATS_DB_PATH" envDefault:"statistics.db"`
 }
 
 var env Environ

@@ -182,3 +182,148 @@
 	color: #0b1220;
 	background: #f8fafc;
 }
+
+/* ---------------------------------------------------------------------------
+ * Dashboard: the seat chips. H and AI have to be readable at a glance inside a
+ * "Team win" cell, so they are two HUE families rather than two shades: green
+ * for a human seat, violet for an AI one. These are the same hex values the
+ * charts get from `src/lib/dashboard/theme.ts` -- keep the two in step, or the
+ * bar chart and the chips stop meaning the same thing.
+ * ------------------------------------------------------------------------- */
+.seat-chip {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 1.5rem;
+	padding: 0.05rem 0.35rem;
+	border-radius: 999px;
+	border: 1px solid transparent;
+	font-size: 0.65rem;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	line-height: 1.4;
+}
+
+.seat-chip.human {
+	border-color: rgba(52, 211, 153, 0.5);
+	background-color: rgba(52, 211, 153, 0.15);
+	color: #6ee7b7;
+}
+
+.seat-chip.ai {
+	border-color: rgba(167, 139, 250, 0.5);
+	background-color: rgba(167, 139, 250, 0.16);
+	color: #c4b5fd;
+}
+
+/* A seat whose kind the API did not say. Grey and explicitly unknown beats a
+   chip that silently claims to be human, which is what a default would do. */
+.seat-chip.unknown {
+	border-color: rgba(148, 163, 184, 0.35);
+	background-color: rgba(148, 163, 184, 0.12);
+	color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+ * Dashboard: the cards in the replay. PlayingCard draws the face and scales
+ * everything inside it from the card's own width, so the frame AROUND it is what
+ * sets the size -- portrait, exactly like `.card` in GameBoard.svelte. The parent
+ * must therefore always carry one of these classes.
+ * ------------------------------------------------------------------------- */
+.replay-card {
+	display: inline-block;
+	width: clamp(2.1rem, 7vw, 2.6rem);
+	aspect-ratio: 5 / 7;
+	border-radius: 0.35rem;
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	overflow: hidden;
+}
+
+/* The card the current move played: bigger, and ringed in the accent, so it is
+   the first thing the eye finds on a new frame. */
+.replay-card.played {
+	width: clamp(2.4rem, 9vw, 3rem);
+	border-color: rgba(245, 158, 11, 0.55);
+}
+
+/* A hand is the point of the replay, so hands get the smallest cards: four of
+   them have to fit on a phone, and the corner index is still readable. */
+.replay-card.hand {
+	width: clamp(1.75rem, 6vw, 2.2rem);
+}
+
+/* The captured piles are the least important, and the deepest (up to 20 each). */
+.replay-card.tiny {
+	width: clamp(1.3rem, 4vw, 1.7rem);
+}
+
+/* The card that was just placed on the table: what changed since the last frame. */
+.replay-card.last-placed {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.45);
+}
+
+/* ---------------------------------------------------------------------------
+ * Dashboard: header buttons, the same pill as `.back-button`, so the refresh,
+ * sign-out, back and language controls read as one group. 2.4rem is the same
+ * touch-target floor the back button uses.
+ * ------------------------------------------------------------------------- */
+.dash-button {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	min-height: 2.4rem;
+	padding: 0.35rem 0.9rem;
+	border-radius: 999px;
+	border: 1px solid var(--card-border);
+	background-color: rgba(9, 18, 33, 0.85);
+	color: var(--text-main);
+	font-size: 0.8rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	cursor: pointer;
+	transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.15s ease;
+}
+
+.dash-button:hover,
+.dash-button:focus-visible {
+	border-color: rgba(245, 158, 11, 0.6);
+	background-color: rgba(15, 23, 42, 0.95);
+	outline: none;
+}
+
+.dash-button:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+/* Dashboard: the replay's ply arrows. Same pill, square-ish and never below the
+   44px thumb target a phone needs to page through 50 plies. */
+.replay-arrow {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 2.4rem;
+	min-height: 2.4rem;
+	padding: 0 0.5rem;
+	border-radius: 999px;
+	border: 1px solid var(--card-border);
+	background-color: rgba(9, 18, 33, 0.85);
+	color: var(--text-main);
+	font-size: 1rem;
+	line-height: 1;
+	cursor: pointer;
+	transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.replay-arrow:hover:not(:disabled),
+.replay-arrow:focus-visible {
+	border-color: rgba(245, 158, 11, 0.6);
+	background-color: rgba(15, 23, 42, 0.95);
+	outline: none;
+}
+
+.replay-arrow:disabled {
+	cursor: not-allowed;
+	opacity: 0.35;
+}

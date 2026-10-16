@@ -192,3 +192,50 @@ func TestDealCounterAndRoundEndEvent(t *testing.T) {
 	}
 	t.Logf("deals: %d, carton events: %d, plies: %d", len(seenDeal), withRoundEnd, plies)
 }
+
+// TestFiguresCaptureBySameRank pins a rule the UI depends on: a figure takes a figure of its own
+// rank. The frontend labels the deck's 10/11/12 as J/Q/K and the engine names the same ranks
+// Jack/Queen/King, so "I played a J onto a J and nothing happened" is a question about ranks, not
+// about labels -- and the answer has to be "that is a capture", with no placement on offer.
+func TestFiguresCaptureBySameRank(t *testing.T) {
+	for _, figure := range []Rank{Jack, Queen, King} {
+		env := NewEnv(99)
+		env.Reset()
+		state := env.State()
+
+		played := Card{Rank: figure, Suit: Brillos}
+		onTable := Card{Rank: figure, Suit: Treboles}
+		state.Hands[0] = []Card{played}
+		state.Table = []Card{onTable}
+		state.LastPlaced = nil
+		state.CurrentPlayer = 0
+
+		legal := env.LegalActionsForCard(played)
+		if len(legal) == 0 {
+			t.Fatalf("a %s onto a %s offers no action at all", played, onTable)
+		}
+
+		var captures int
+		var placements int
+		for _, action := range legal {
+			switch {
+			case len(action.Capture) == 1 && action.Capture[0] == onTable:
+				captures++
+			case len(action.Capture) == 0:
+				placements++
+			default:
+				t.Fatalf("a %s onto a %s offered an unexpected capture %v", played, onTable, action.Capture)
+			}
+		}
+
+		if captures != 1 {
+			t.Errorf("a %s onto a %s must offer exactly one capture, got %d (legal: %v)", played, onTable, captures, legal)
+		}
+		// The placement is deliberately NOT an option while a capture exists: a client that sends a
+		// bare card is asking to place it, and that request must be refused rather than silently
+		// played as a non-capture.
+		if placements != 0 {
+			t.Errorf("placing a %s while it can take the %s must not be legal", played, onTable)
+		}
+	}
+}

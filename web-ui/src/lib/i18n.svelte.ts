@@ -190,7 +190,126 @@ const ES: Record<string, string> = {
 	// ---- results ----------------------------------------------------------------
 	'Winner': 'Ganador',
 	'Time played:': 'Duración:',
-	'Return to lobby': 'Volver a la sala'
+	'Return to lobby': 'Volver a la sala',
+
+	// ---- admin dashboard: chrome ------------------------------------------------
+	'Admin dashboard': 'Panel de administración',
+	'Games, win rates and replays recorded by this backend.':
+		'Partidas, tasas de victoria y repeticiones registradas por este backend.',
+	'Signed in as {username}': 'Sesión iniciada como {username}',
+	'Refresh': 'Actualizar',
+	'Back to lobby': 'Volver a la sala',
+	'Admin': 'Administrador',
+
+	// ---- admin dashboard: the gate ----------------------------------------------
+	'Admin sign in': 'Acceso de administrador',
+	'Sign in to see the statistics.': 'Inicia sesión para ver las estadísticas.',
+	'Invalid credentials': 'Credenciales inválidas',
+	'Could not sign in': 'No se pudo iniciar sesión',
+	'Your admin session expired. Sign in again.': 'Tu sesión de administrador caducó. Inicia sesión de nuevo.',
+	'Loading statistics…': 'Cargando estadísticas…',
+	'Could not load statistics': 'No se pudieron cargar las estadísticas',
+	'Retry': 'Reintentar',
+
+	// ---- admin dashboard: the numbers -------------------------------------------
+	'Total games': 'Partidas totales',
+	'{humans} human seats · {ais} AI seats': '{humans} puestos humanos · {ais} puestos de IA',
+	'Finished games': 'Partidas finalizadas',
+	'Canceled games': 'Partidas canceladas',
+	'Running games': 'Partidas en curso',
+	'Total plies': 'Jugadas totales',
+	'Average plies per game': 'Jugadas por partida',
+	'Average duration': 'Duración media',
+	'Average AI decision time': 'Tiempo medio de decisión de la IA',
+	'{ms} ms': '{ms} ms',
+	'Captures': 'Capturas',
+	'{seconds}s': '{seconds}s',
+	'{minutes}m {seconds}s': '{minutes} min {seconds} s',
+	'AI vs humans': 'IA contra humanos',
+	'Games where one team was all humans and the other all AI.':
+		'Partidas en las que un equipo era todo humanos y el otro todo IA.',
+	'Human team': 'Equipo humano',
+	'AI team': 'Equipo de IA',
+	'{wins} of {games} games won': '{wins} de {games} partidas ganadas',
+	'{wins} of {seats} seats won': '{wins} de {seats} puestos ganados',
+	'{wins} of {games} games won by {teams} AI teams':
+		'{wins} de {games} partidas ganadas por {teams} equipos de IA',
+
+	// ---- admin dashboard: seats and results -------------------------------------
+	// The seat kinds are shown as two letters with their own colours, so H stays H
+	// and AI becomes the Spanish IA: the chip is a badge, not prose.
+	'H': 'H',
+	'AI': 'IA',
+	'Human seat': 'Puesto humano',
+	'AI seat': 'Puesto de IA',
+	'No result': 'Sin resultado',
+	// Game vocabulary stays in Spanish in both locales, like caída/limpia/cartón above.
+	'caída': 'caída',
+	'limpia': 'limpia',
+
+	// ---- admin dashboard: the charts --------------------------------------------
+	'Line chart': 'Gráfico de líneas',
+	'Bar chart': 'Gráfico de barras',
+	'no data': 'sin datos',
+	'No data yet.': 'Todavía no hay datos.',
+	'Games': 'Partidas',
+	'Plys': 'Jugadas',
+	'Win rate': 'Tasa de victoria',
+	'Games and plies over time': 'Partidas y jugadas a lo largo del tiempo',
+	'One point per day: how many games were played, and how many plies they took. Games use the left axis, plies the right.':
+		'Un punto por día: cuántas partidas se jugaron y cuántas jugadas costaron. Las partidas usan el eje izquierdo y las jugadas el derecho.',
+	'Win rate over time': 'Tasa de victoria a lo largo del tiempo',
+	'Daily win rate of the AI team against the human team. Days with no AI-against-human game are skipped, not counted as a loss.':
+		'Tasa de victoria diaria del equipo de IA contra el equipo humano. Los días sin partida de IA contra humanos se omiten, no cuentan como derrota.',
+	'Win rate by seat kind': 'Tasa de victoria por tipo de puesto',
+	'How often a human seat and an AI seat ended up on the winning team.':
+		'Con qué frecuencia un puesto humano y un puesto de IA acabaron en el equipo ganador.',
+	'Win rate by team composition': 'Tasa de victoria por composición de equipos',
+	'How often a team with a given make-up beat the opposing make-up.':
+		'Con qué frecuencia un equipo con cierta composición venció a la composición rival.',
+	'{composition} vs {opponent}': '{composition} contra {opponent}',
+	'AI win rate by search budget': 'Tasa de victoria de la IA según el presupuesto de búsqueda',
+	'AI team win rate grouped by how many search simulations each turn was allowed.':
+		'Tasa de victoria del equipo de IA agrupada por cuántas simulaciones de búsqueda se permitieron por turno.',
+	'Simulations per turn': 'Simulaciones por turno',
+
+	// ---- admin dashboard: match history -----------------------------------------
+	'Show match history': 'Mostrar historial de partidas',
+	'Hide match history': 'Ocultar historial de partidas',
+	'Match history': 'Historial de partidas',
+	'Every game this backend recorded, newest first.':
+		'Todas las partidas registradas por este backend, de la más reciente a la más antigua.',
+	'Could not load the match history': 'No se pudo cargar el historial de partidas',
+	'No games recorded yet.': 'Todavía no hay partidas registradas.',
+	'Started': 'Inicio',
+	'Deals': 'Repartos',
+	'Team win': 'Equipo ganador',
+	'Team lose': 'Equipo perdedor',
+	'Score': 'Marcador',
+	'Replay': 'Repetición',
+	'Replay of game {id}': 'Repetición de la partida {id}',
+	'Showing {from}-{to} of {total} games': 'Mostrando {from}-{to} de {total} partidas',
+	'Previous': 'Anterior',
+	'Next': 'Siguiente',
+
+	// ---- admin dashboard: the replay viewer -------------------------------------
+	'Close': 'Cerrar',
+	'Loading replay…': 'Cargando la repetición…',
+	'Could not load the replay': 'No se pudo cargar la repetición',
+	'First ply': 'Primera jugada',
+	'Previous ply': 'Jugada anterior',
+	'Next ply': 'Jugada siguiente',
+	'Last ply': 'Última jugada',
+	'ply {current} / {total}': 'jugada {current} / {total}',
+	'played': 'jugó',
+	'Captured {count} cards': 'Capturó {count} cartas',
+	'{points} points': '{points} puntos',
+	'Opening deal — no move yet.': 'Reparto inicial: todavía no hay jugada.',
+	'Cards on the table': 'Cartas en la mesa',
+	'Deck: {count} cards': 'Mazo: {count} cartas',
+	'Turn:': 'Turno:',
+	'Moved': 'Jugó',
+	'Turn': 'Turno'
 };
 
 /** The reactive locale. Module-level `$state` in a `.svelte.ts` module is shared by every

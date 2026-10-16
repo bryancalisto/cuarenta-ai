@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { onDestroy, untrack } from 'svelte';
-	import { flip } from 'svelte/animate';
 	import { scale } from 'svelte/transition';
 	import { cubicIn } from 'svelte/easing';
 	import type { Game, RoundEnd } from './api';
 	import { t } from './i18n.svelte';
 	import GameResultsDialog from './GameResultsDialog.svelte';
 	import PlayingCard from './PlayingCard.svelte';
+	import { slotOffsetUnits, TableSlots } from './tableLayout';
 
 	let { game, currentUser, onPlayCard, onSelectCapture, onReturnToLobby } = $props<{
 		game: Game;
@@ -162,7 +162,7 @@
 	// A capture has to be READABLE: a card lands, there is a beat in which the cards it takes are
 	// highlighted, and they then leave one after another -- not all at once, which is what made it
 	// feel like a scuffle. The numbers below are the pacing of that story; the CSS animations
-	// (`.fly-card.throw`, `flyToSide`) are kept in step with them.
+	// (`tableCardIn`, `flyToSide`) are kept in step with them.
 	const THROW_MS = 1150; // the played card flies in from its player's side
 	const CAPTURE_HOLD_MS = 500; // beat: the cards it will take sit highlighted on the table
 	const CAPTURE_STAGGER_MS = 150; // each captured card leaves after the one before it
@@ -406,6 +406,15 @@
 
 	// Side each player throws from / grabs to, relative to current user (always "down").
 	const DIRS = ['down', 'right', 'up', 'left'] as const;
+
+	function dirFor(playerIndex: number): string {
+		const me = myArrayIndex ?? 0;
+		return DIRS[(playerIndex - me + 4) % 4];
+	}
+
+	// Where a table card flies to when it is taken, and where the played card comes in from, in
+	// pixels from the table's centre. `flyToSide` parses these as numbers, so they cannot be
+	// viewport-relative like FX_OFFSET above.
 	const OFFSET: Record<string, { tx: string; ty: string }> = {
 		down: { tx: '0px', ty: '340px' },
 		right: { tx: '560px', ty: '0px' },
@@ -413,17 +422,12 @@
 		left: { tx: '-560px', ty: '0px' }
 	};
 
-	function dirFor(playerIndex: number): string {
-		const me = myArrayIndex ?? 0;
-		return DIRS[(playerIndex - me + 4) % 4];
-	}
-
 	// Tighter offsets for the dealing overlay: the throw/grab animations travel the whole
 	// board, but four card piles have to fit on a phone screen. These are capped against the
 	// viewport, so on a narrow screen the piles close in rather than sliding off the edge (a
 	// pile positioned past the viewport edge is what drags the page sideways). They are only
 	// ever read as CSS custom properties, so `min()`/`calc()` are fine here -- unlike OFFSET
-	// below, which `flyToSide` parses as a number.
+	// above, which `flyToSide` parses as a number.
 	const FX_OFFSET: Record<string, { tx: string; ty: string }> = {
 		down: { tx: '0px', ty: 'min(150px, 20vh)' },
 		right: { tx: 'min(210px, 26vw)', ty: '0px' },
@@ -434,6 +438,27 @@
 	// While a cartón is being counted the live table is already empty, so the cards that
 	// were on it come from the round-end payload; `shownTable` keeps them on screen.
 	const shownTable = $derived(heldTable ?? displayedTable);
+
+	// WHERE A CARD SITS ON THE TABLE. See tableLayout.ts: the first card takes the middle and the
+	// rest are laid out around it, each card keeping its place while it is on the table. A capture
+	// therefore moves only the cards being taken, and the row never re-centres itself.
+	const tableSlots = new TableSlots();
+
+	function slotFor(cardIndex: number): number {
+		return slotOffsetUnits(tableSlots.slotFor(cardIndex));
+	}
+
+	// The furthest slot in use, in steps from the middle: the row is `2 * half + 1` cards wide, and
+	// that is the width the card size has to fit into (see .cards-display).
+	const halfSlots = $derived(
+		shownTable.reduce((widest, cardIndex) => Math.max(widest, Math.abs(slotFor(cardIndex))), 0)
+	);
+
+	// Cards that have left free their slots for the next ones; the card on its way out keeps the
+	// position it was rendered with, so this does not move it.
+	$effect(() => {
+		tableSlots.retain(shownTable);
+	});
 
 	let throwAnim = $state<{ card: number; dir: string; id: number } | null>(null);
 	// Direction the currently-leaving table cards fly toward (read by the out transition).
@@ -628,12 +653,12 @@
 	<div class="table-area">
 		<div class="table-cards">
 			{#if shownTable.length > 0}
-				<div class="cards-display">
+				<div class="cards-display" style="--half-slots:{halfSlots}">
 					{#each shownTable as cardIndex (cardIndex)}
 						<div
 							class="card on-table"
+							style="--slot:{slotFor(cardIndex)}"
 							class:captured={isBeingCaptured(cardIndex)}
-							animate:flip={{ duration: 350 }}
 							in:scale={{ duration: 300, start: 0.4 }}
 							out:flyToSide={{ dir: removeDir, delay: departureDelayMs(cardIndex) }}
 						>
@@ -893,21 +918,6 @@
 		font-weight: 600;
 	}
 
-	.table-area {
-		position: relative;
-		display: flex;
-		flex-direction: column;
-		justify-content: center;
-		min-width: 0;
-		max-width: 100%;
-		min-height: clamp(6rem, 25vw, 9rem);
-		align-items: center;
-		border-radius: 1rem;
-		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
-		padding: clamp(1rem, 4vw, 3rem);
-		gap: 1rem;
-	}
-
 	.anim-overlay {
 		position: absolute;
 		inset: 0;
@@ -924,7 +934,7 @@
 	.fly-card {
 		padding: 0;
 		border-radius: 0.45rem;
-		width: clamp(2.9rem, 12vw, 3.9rem);
+		width: clamp(2.6rem, 11vw, 3.5rem);
 		aspect-ratio: 5 / 7;
 		display: block;
 		overflow: hidden;
@@ -948,17 +958,56 @@
 		}
 	}
 
+	.table-area {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		min-width: 0;
+		max-width: 100%;
+		min-height: clamp(6rem, 25vw, 9rem);
+		align-items: center;
+		border-radius: 1rem;
+		background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(20, 30, 50, 0.8));
+		padding: clamp(1rem, 4vw, 3rem);
+		gap: 1rem;
+	}
+
+	/* `width: 100%` is load-bearing: `.cards-display` sizes its cards against a PERCENTAGE of this
+	   box, and the cards inside it are absolutely positioned, so without an explicit width this box
+	   shrink-wraps to nothing and the card size collapses with it. */
 	.table-cards {
 		display: flex;
 		justify-content: center;
 		align-items: center;
+		width: 100%;
+		min-width: 0;
 	}
 
+	/* The table's own grid: no flex, no wrapping, no centring. Cards are placed from the middle
+	   outwards (see tableLayout.ts), so adding or taking one leaves the others exactly where they
+	   were -- which is the point, and why this is not a centred flex row. */
 	.cards-display {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-		justify-content: center;
+		position: relative;
+		width: 100%;
+		--gap: 0.4rem;
+		--half-slots: 0;
+		/* The card is as large as it can be while still fitting `2 * half-slots + 1` of them (plus a
+		   gap between each) inside the table: the SIZE gives way, never the spacing, so cards are
+		   never drawn over each other and all of them stay visible. The `max()` is the floor: a card
+		   must never shrink into a dot, whatever the arithmetic does. */
+		--card-w: max(
+			2.1rem,
+			min(
+				clamp(2.5rem, 9.5vw, 3.4rem),
+				calc((100% - 2 * var(--half-slots) * var(--gap)) / (2 * var(--half-slots) + 1))
+			)
+		);
+		--card-h: calc(var(--card-w) * 7 / 5);
+		/* Always a whole card plus a gap: cards get smaller as the table fills, they never close in
+		   on each other. */
+		--step: calc(var(--card-w) + var(--gap));
+		height: var(--card-h);
 	}
 
 	/* The frame only: the face itself is PlayingCard.svelte. Portrait, because a card is taller
@@ -978,15 +1027,24 @@
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
 	}
 
+	/* Centred by `left/top: 50%` plus a negative margin, and then moved by its slot as a MARGIN --
+	   not a transform, which the in/out transitions own. Sharing it would make a card jump to the
+	   middle the moment it started leaving the table. */
 	.card.on-table {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: var(--card-w);
+		margin-top: calc(var(--card-h) / -2);
+		margin-left: calc((var(--card-w) / -2) + var(--slot) * var(--step));
 		cursor: default;
 		pointer-events: none;
-		width: clamp(4.5rem, 9.5vw, 4.4rem);
 	}
 
 
 	/* The cards a capture is about to take, lit up for a beat before they leave. No transform: the
-	   FLIP animation writes `transform` inline, and fighting it would make the cards jump. */
+	   in/out transitions animate `transform`, and sharing the property would make the highlight
+	   fight the flight. */
 	.card.captured {
 		border-color: #fbbf24;
 		box-shadow:

@@ -101,10 +101,17 @@ const moveEffect = effectBody(/const\s+table\s*=\s*game\.table/);
 check(moveEffect !== null, 'could not find the move-animation effect (looked for `const table = game.table`)');
 if (moveEffect) {
 	const earlyReturn = moveEffect.body.split('if (!move || currentPlayer === undefined)')[1] ?? '';
+	// The played card flies as its own element (`.fly-card`), which is why a snapshot carrying no
+	// move has to drop it: the timers that would have cleared it were cancelled with the effect.
 	check(
 		/throwAnim\s*=\s*null/.test(earlyReturn.slice(0, 400)),
-		`GameBoard.svelte:${moveEffect.line}: the no-move branch of the move effect must set \`throwAnim = null\`, ` +
-			'otherwise a cancelled throw leaves the card stuck on the board.'
+		`GameBoard.svelte:${moveEffect.line}: the no-move branch of the move effect must set \`throwAnim = null\`,` +
+			' otherwise a cancelled throw leaves the card stuck on the board.'
+	);
+	check(
+		/displayedTable = captures\.length > 0 \? \[\.\.\.before, move\.cardIndex\] : table;/.test(moveEffect.body),
+		`GameBoard.svelte:${moveEffect.line}: when the played card lands it must join the row so it can be taken ` +
+			'with the cards it captured.'
 	);
 }
 
@@ -319,11 +326,61 @@ check(
 	/(?:captured|captures)\s*\*\s*CAPTURE_STAGGER_MS|CAPTURE_STAGGER_MS\s*\*\s*(?:captured|captures)/.test(code),
 	'moveAnimationMs must include the staggered departures: the deal would otherwise start on top of them'
 );
-// The CSS throw has to last exactly as long as the constant the state machine waits for.
-const cssThrow = source.match(/animation: throw-in (\d+)ms/)?.[1];
+// The flight in has to last exactly as long as the constant the state machine waits for, or the
+// card lands before (or after) the board believes it did.
 check(
-	cssThrow !== undefined && cssThrow === throwMs,
-	`the throw-in animation is ${cssThrow}ms but THROW_MS is ${throwMs}ms: the card would land before (or after) the state says it did`
+	/animation: throw-in \d+ms/.test(source) && Number(source.match(/animation: throw-in (\d+)ms/)?.[1]) === Number(throwMs),
+	`the throw-in animation and THROW_MS (${throwMs}ms) must be the same number: the card would otherwise land before, or after, the state says it did`
+);
+
+// 9. The carton points land on the score board when the COUNTING CLOSES, not when the snapshot
+//    arrives. The backend pays the carton in the same step that reports it, so the payload already
+//    carries the final score: showing it straight away gives away the counting the overlay is
+//    about to perform. The board therefore subtracts the pending points while the sequence runs.
+check(
+	/function displayedScore\(team: number\): number \{[\s\S]*?Math\.max\(0, \(game\.scores\?\.\[team\] \?\? 0\) - \(heldCartonPoints\?\.\[team\] \?\? 0\)\)/.test(
+		source
+	),
+	'the score board must show `game.scores` MINUS the pending carton points while the counting runs ' +
+		'(and never below zero)'
+);
+check(
+	/class="value">[\s\S]{0,200}?displayedScore\(0\)/.test(code) &&
+		/class="value">[\s\S]{0,200}?displayedScore\(1\)/.test(code),
+	'both score counters must render displayedScore(), not game.scores directly: a direct read puts the ' +
+		'carton on screen before it has been counted'
+);
+check(
+	!/class="value">\s*\{game\.scores/.test(code),
+	'a score counter still reads game.scores directly, which undoes the hold-back'
+);
+// Held from the first moment of the sequence (`waiting` included), released in the step that
+// closes the overlay, and released again by the deadline so it can never stick.
+check(
+	/heldCartonPoints = hasCarton\s*\n?\s*\?/.test(code),
+	'the carton points must be held back when the sequence is scheduled, not when an overlay appears'
+);
+check(
+	/const paid: \[number, number\] = \[roundEnd\.carton\?\.\[0\] \?\? 0, roundEnd\.carton\?\.\[1\] \?\? 0\];/.test(code),
+	'the points that land on the score must come from the roundEnd payload'
+);
+check(
+	/cartonEvent = null;\s*\n\s*heldCartonPoints = null;\s*\n\s*cartonGain = paid/.test(code),
+	'the points must be released in the same step that closes the counting overlay, or the counter and the ' +
+		'counting disagree'
+);
+// The deadline that ends any sequence has to release the held points as well.
+const capIndex = source.indexOf('SEQUENCE_CAP_MS);');
+const capBlock = capIndex < 0 ? '' : source.slice(Math.max(0, capIndex - 400), capIndex);
+check(
+	/heldCartonPoints = null;/.test(capBlock),
+	'the sequence deadline must release the held points too, or a missed step leaves the score short for good'
+);
+// The gain is a flourish, not a timer: it animates itself out (so nothing has to clean it up) and
+// the next sequence drops it.
+check(
+	/cartonGain = null;/.test(code) && /\.score-gain \{[\s\S]*?animation: score-gain/.test(code),
+	'the "+N" must be cleared when the next sequence starts and animate itself away'
 );
 
 if (failures.length > 0) {

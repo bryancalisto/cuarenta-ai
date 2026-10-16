@@ -93,6 +93,28 @@ The move/throw effect is the mirror image: it *does* have a teardown (a re-run s
 the throw), so its no-move branch must drop `throwAnim`, or a cancelled throw leaves the card
 stuck on the board forever.
 
+### The table does not re-centre itself
+
+Cards are laid out from the **middle outwards** and each keeps its place for as long as it is on the
+table (`src/lib/tableLayout.ts`): the first card takes the centre, the next ones alternate right and
+left, and slot `n` is `0, +1, -1, +2, -2, …` steps from the middle.
+
+That is why this is not a centred flex row: `justify-content: center` re-centres EVERY card whenever
+the number of cards changes, and Svelte's `animate:flip` even animates that shuffle, so playing a
+card shifts the whole table and taking one slides the others towards the middle to close the gap.
+
+Now only the card actually being played or taken moves. A card that leaves frees its slot and the
+next card takes the innermost free one, so the table fills its gaps instead of drifting outwards all
+deal. The slot offset is applied as a `margin`, deliberately **not** a `transform`: the in/out
+transitions own `transform`, and sharing the property would snap a card to the middle the instant it
+started leaving.
+
+Cards never overlap either: the step between neighbours is always a whole card plus a gap, and the
+card width is what gives way to fit `2 * half-slots + 1` cards in the row — with a floor, so a
+crowded table shrinks the cards rather than drawing them over each other. `scripts/check-table-layout.mjs`
+(part of `npm run check`) runs the slot logic and asserts that adding and removing cards leaves every
+other card where it was, plus the CSS contract above.
+
 ### Capture pacing
 
 A capture is the one move with a lot happening at once, so it is paced as a story rather than as
@@ -109,30 +131,6 @@ one gesture (`THROW_MS`, `CAPTURE_HOLD_MS`, `CAPTURE_STAGGER_MS`, `GRAB_MS` in t
 A capture is therefore ~3.2s (a two-card one) instead of the ~2s it was, and no two cards start
 moving in the same frame. `moveAnimationMs` includes the stagger, because the board is busy for
 all of it: a deal or cartón sequence scheduled behind a capture waits for the last card to land.
-
-**One animation at a time.** The snapshot that ends a deal also carries the move that ended it,
-so the sequence waits for that move's throw/grab to land: it takes `moveAnimationMs(game.move)`
-when the payload has the move, and otherwise the remaining time until `moveAnimUntil` (published
-by the move effect), and folds that wait into every scheduled step. Without it the captured
-cards are still flying to their player while the piles are already being counted.
-
-The board is *busy* for that whole stretch, not just while an overlay is up: the sequence starts
-in the `waiting` phase (nothing shown, the triggering move is still animating) and only then
-moves to `counting`/`carton-paid`/`dealing`. While busy:
-
-* `canPlayCard()`, the keyboard handler and the capture prompt are all off — a turn started now
-  would be overwritten by the deal that is already on its way;
-* the move effect mirrors incoming moves instead of animating them, so an AI card cannot fly
-  across a deal in progress. The one exception is the move the sequence is waiting for
-  (`sequenceMoveStep`), which *must* animate because the sequence's first step hangs off it;
-* a hand that arrived with the deal stays face down (`myDealtCount` is 0) until the deal
-  animation turns it over.
-
-The server cooperates through `AI_DEAL_GRACE_MS` (`backend/.env`): the first AI move of a deal is
-held back so the cards have landed before anyone plays. Keep the two in step — that value is
-`DEAL_TOTAL_MS + DEAL_HOLD_MS` here. The client gating is what guarantees the rule; the grace is
-what keeps the AI's move visible and animated instead of silently applied during the animation.
-
 ### The cartón reaches the score board when the counting closes
 
 The backend pays the cartón **in the same step** that publishes `roundEnd` (`cuarenta.go` adds it to
@@ -272,6 +270,37 @@ The header carries the language picker and the one way back, as a single top-rig
   ~2.4rem pill so it is tappable, and the arrow leans left on hover;
 * `scripts/check-page-layout.mjs` (see below) fails if any screen loses its way back, if the button
   leaves the header cluster, or if the tap target or the mobile label rule is removed.
+
+## Admin dashboard
+
+`/dashboard` is the statistics page, and it is admin-only in both halves of the stack:
+
+* its account lives in the backend's environment (`ADMIN_USERNAME` / `ADMIN_PASSWORD`), not in the
+  user table, and an empty password keeps the page closed;
+* the backend signs it in at `POST /api/admin/sign-in` and hands out a JWT that carries
+  `role: "admin"`. Every `/api/admin/*` route sits behind that role check, so a player's token --
+  perfectly valid everywhere else -- gets a 401 here, and the admin token cannot play a game
+  either. The page keeps its token in `localStorage` (`cuarenta-admin-token`, distinct from a
+  player session) and shows only the sign-in card without one. Hiding the page is not the
+  protection; refusing the request is.
+
+What it shows, all of it recorded by the backend into `statistics.db`
+(`backend/internal/stats/`): totals (games, plies, averages, AI thinking time, captures, caídas,
+limpias), the human-vs-AI headline (only games where one team was all humans and the other all AI),
+win rate by seat kind and by team composition, AI win rate per search budget, games/plies/win rates
+over time, and the match history behind a **toggle that starts closed**. The history's `Team win`
+and `Team lose` columns label the seats of that team -- `H` for a person and `AI` for the bot, in
+seat order and in two different colours -- and each row has a `Plys` count, the score, the status
+and a **Replay** button.
+
+The replay is rebuilt server-side from the game's recorded seed plus its recorded moves, and the
+viewer steps through it with `←`/`→` (plus first/last and Escape to close), showing the whole board
+for that ply: the table, every seat's hand, the two cartones, the scores, whose turn it is, the deck
+count, and what the move did (card, captures, points, caída/limpia).
+
+Deployment note: the app is built with `adapter-static` and the `index.html` fallback, so a static
+host must rewrite unknown paths to `index.html` for a direct visit or bookmark of `/dashboard` to
+work (in-app navigation already does).
 
 ## Other UX details
 

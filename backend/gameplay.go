@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"cua/internal/game"
 	"cua/internal/models"
 	"cua/internal/search"
+	"cua/internal/stats"
 
 	"github.com/benbjohnson/clock"
 )
@@ -40,16 +42,27 @@ type MainGameplay struct {
 	// dealGraceMs is how long the first AI move of a deal waits, so the cards have finished
 	// flying to the four seats before anyone plays. Derived from AI_DEAL_GRACE_MS; 0 disables it.
 	dealGraceMs int
+
+	// stats records what happened, for the admin dashboard. Optional: a nil recorder (the zero
+	// value) records nothing, which is what the tests and a server without ADMIN_PASSWORD want.
+	stats *stats.Recorder
 }
 
-func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService) *MainGameplay {
-	return &MainGameplay{
+// NewMainGameplay wires the gameplay service. The statistics recorder is optional (pass one to
+// have games recorded for the dashboard): it is variadic so every existing call site keeps
+// working, and so tests can leave it out.
+func NewMainGameplay(db Database, clock clock.Clock, inferService InferenceService, recorders ...*stats.Recorder) *MainGameplay {
+	gameplay := &MainGameplay{
 		db:           db,
 		clock:        clock,
 		inferService: inferService,
 		pause:        time.Sleep,
 		dealGraceMs:  config.GetEnv().AiDealGraceMs,
 	}
+	if len(recorders) > 0 {
+		gameplay.stats = recorders[0]
+	}
+	return gameplay
 }
 
 type PlayGameDTO struct {
@@ -62,6 +75,10 @@ type gameSession struct {
 	env        *game.Env
 	stepCount  int
 	humanSeats map[int]string
+
+	// seed is the value the game's randomness was built from. Kept so a recorded game can be
+	// rebuilt move by move: same seed + same moves = same game (see admin.go's replay).
+	seed int64
 
 	// pendingRoundEnd is the carton event of the move just played, waiting to ride along
 	// with the next snapshot and then be cleared: the client animates it exactly once.
@@ -244,9 +261,11 @@ func (g *MainGameplay) publishGameSnapshot(snapshot models.Game) {
 }
 
 func (g *MainGameplay) newGameSession(snapshot models.Game) *gameSession {
+	seed := time.Now().UnixNano()
 	return &gameSession{
-		env:        game.NewEnv(time.Now().UnixNano()),
+		env:        game.NewEnv(seed),
 		humanSeats: humanSeats(snapshot),
+		seed:       seed,
 	}
 }
 
@@ -271,6 +290,7 @@ func (g *MainGameplay) startRunningGame(snapshot models.Game) (models.Game, erro
 		return models.Game{}, err
 	}
 
+	g.recordGameStart(snapshot)
 	g.publishGameSnapshot(updated)
 
 	session, ok := getSession(snapshot.Id)
@@ -444,6 +464,10 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 		return fmt.Errorf("ai turn has no legal actions")
 	}
 
+	// The clock starts HERE: what the dashboard wants to know is how long the AI thought (the
+	// search plus the forward pass), not how long the engine took to apply its answer.
+	thinkStart := time.Now()
+
 	// The policy scores candidate ACTIONS by features, so the observation, the
 	// [64][84] action-feature block and the [64] mask are built in exactly the order of
 	// `legal`: the slot the model answers with indexes this same list.
@@ -477,7 +501,10 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	g.inferService.RecordHistory(gameId, currentSeat, obs, game.ActionFeatures(action, state))
 
 	dealsBefore := state.DealsDealt
+	thinkTime := time.Since(thinkStart)
+	stepStart := time.Now()
 	_, done, info, err := session.env.Step(action)
+	decision := thinkTime + time.Since(stepStart)
 	g.noteDeal(session, dealsBefore)
 	session.pendingRoundEnd = roundEndFromInfo(info)
 
@@ -488,6 +515,11 @@ func (g *MainGameplay) playAITurn(gameId string) error {
 	}
 
 	session.stepCount++
+	g.stats.RecordPly(plyRecord(gameId, session, currentSeat, "ai", action, info, decision))
+
+	if done {
+		g.recordGameEnd(gameId, session, time.Duration(base.DurationSeconds)*time.Second)
+	}
 
 	move := models.Move{
 		CardIndex:      action.Card.Index(),
@@ -591,11 +623,14 @@ func (g *MainGameplay) deleteSession(gameId string) {
 	Sessions.Mu.Unlock()
 
 	g.inferService.ClearGameState(gameId)
+	// A deleted session is a game nobody is playing any more. The store only closes it if it still
+	// counts as running, so a game that already finished keeps its result.
+	g.stats.CancelIfRunning(gameId)
 }
 
 func (g *MainGameplay) cancelRunningGames() int {
-	count := g.db.CancelInProgressGames()
-	return count
+	g.stats.CancelRunning()
+	return g.db.CancelInProgressGames()
 }
 
 // randomPause is how long the AI "thinks" between two moves: [1.5, 3] seconds, so the humans
@@ -603,6 +638,84 @@ func (g *MainGameplay) cancelRunningGames() int {
 func randomPause() time.Duration {
 	millis := []int{1500, 1800, 2000, 2400, 3000}
 	return time.Duration(millis[rand.Intn(len(millis))]) * time.Millisecond
+}
+
+// ---------------------------------------------------------------------------------------------
+// Statistics
+//
+// One `games` row when a game starts, one `plies` row per move, one final update when it ends.
+// The recorder swallows its own failures (a statistic is worth less than the game), so nothing
+// here can fail a move.
+// ---------------------------------------------------------------------------------------------
+
+// recordGameStart writes the row that everything else hangs off: the seed (so the replay can be
+// rebuilt), who sat where, and the settings the AI played with (so strength can be compared
+// between search budgets and models rather than pooled).
+func (g *MainGameplay) recordGameStart(snapshot models.Game) {
+	session, ok := getSession(snapshot.Id)
+	if !ok {
+		return
+	}
+
+	seats := make([]int, 0, len(session.humanSeats))
+	for seat := range session.humanSeats {
+		seats = append(seats, seat)
+	}
+	slices.Sort(seats)
+
+	env := config.GetEnv()
+	// StartedAt is the RFC3339 stamp the game store writes when the game starts; if it is missing
+	// or unparseable, now is close enough for a statistic.
+	created := time.Now()
+	if parsed, err := time.Parse(time.RFC3339, snapshot.StartedAt); err == nil {
+		created = parsed
+	}
+	g.stats.StartGame(snapshot.Id, created, session.seed, seats, env.AiSearchIterations, env.AiDealGraceMs, env.OnnxModelPath)
+}
+
+// plyRecord assembles the statistics row for the move that has just been applied. It reads the
+// position AFTER the move, so every number in the row describes the state the client was shown.
+func plyRecord(gameID string, session *gameSession, seat int, kind string, action game.Action, info map[string]any, decision time.Duration) stats.Ply {
+	state := session.env.State()
+	points, _ := info["points"].(int)
+	reasons, _ := info["reasons"].([]string)
+
+	return stats.Ply{
+		GameID:     gameID,
+		Ply:        session.stepCount,
+		Seat:       seat,
+		Kind:       kind,
+		Card:       action.Card.Index(),
+		Captures:   cardIndices(action.Capture),
+		Points:     points,
+		Caida:      slices.Contains(reasons, game.ReasonCaida),
+		Limpia:     slices.Contains(reasons, game.ReasonLimpia),
+		Score0:     state.Scores[0],
+		Score1:     state.Scores[1],
+		TableCards: len(state.Table),
+		DealNo:     state.DealsDealt,
+		DecisionMs: int(decision.Milliseconds()),
+		At:         time.Now(),
+	}
+}
+
+// recordGameEnd closes the game out. Called with the session lock held, right where the game is
+// known to be over.
+func (g *MainGameplay) recordGameEnd(gameID string, session *gameSession, duration time.Duration) {
+	state := session.env.State()
+	winner := -1
+	if state.Winner != nil {
+		winner = *state.Winner
+	}
+	g.stats.FinishGame(gameID, stats.GameResult{
+		Status:          "finished",
+		ScoreTeam0:      state.Scores[0],
+		ScoreTeam1:      state.Scores[1],
+		WinnerTeam:      winner,
+		Plies:           session.stepCount,
+		Deals:           state.DealsDealt,
+		DurationSeconds: int(duration.Seconds()),
+	})
 }
 
 // noteDeal records when a deal was handed out. Call it with the session lock held, right after
@@ -789,7 +902,9 @@ func (g *MainGameplay) playHumanTurnAndAdvanceAI(gameId string, userID string, d
 	g.advanceRecurrentState(gameId, session, currentSeat)
 
 	dealsBefore := state.DealsDealt
+	decisionStart := time.Now()
 	_, done, info, err := session.env.Step(action)
+	decision := time.Since(decisionStart)
 	g.noteDeal(session, dealsBefore)
 	session.pendingRoundEnd = roundEndFromInfo(info)
 
@@ -801,6 +916,13 @@ func (g *MainGameplay) playHumanTurnAndAdvanceAI(gameId string, userID string, d
 	}
 
 	session.stepCount++
+	// `decision` here is the time the SERVER spent applying the move, not how long the player
+	// thought: the time between two plies is in the `at` stamps, which the dashboard can derive.
+	g.stats.RecordPly(plyRecord(gameId, session, currentSeat, "human", action, info, decision))
+
+	if done {
+		g.recordGameEnd(gameId, session, time.Duration(base.DurationSeconds)*time.Second)
+	}
 
 	move := models.Move{
 		CardIndex:      action.Card.Index(),
