@@ -46,6 +46,9 @@ class PPOConfig:
     lstm_hidden: int = 128
     lstm_layers: int = 1
     value_hidden: int = 128
+    # Training-time dropout on the shared state embedding (0 = off). Identity in eval
+    # mode, so acting, evaluation and the ONNX export are unaffected.
+    dropout: float = 0.0
 
     # ---- reward shaping ----
     # True (default): an opponent's reward counts as a NEGATIVE reward for the learner,

@@ -73,7 +73,7 @@ class ActorCriticNetwork(nn.Module):
         obs [B, T, 208] -> trunk(208→H→H) -> LSTM (optional) -> s_emb [B, T, H]
         feats [B, n_slots, 84] -> action_mlp(84→H→H) -> a_emb [B, n_slots, H]
         logits = (a_emb · s_emb) / sqrt(H)          (masked to legal slots by the caller)
-        value  = MLP(s_emb) -> tanh?  no: linear, trained on normalised returns
+        value  = MLP(s_emb) -> linear, trained on normalised returns
 
     Why features instead of a flat logit per action id (the old 1640-wide head):
     the meaning of a slot changes from position to position, so a flat head has to
@@ -95,6 +95,7 @@ class ActorCriticNetwork(nn.Module):
         lstm_hidden: int = 128,
         lstm_layers: int = 1,
         value_hidden: int = 128,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -105,6 +106,12 @@ class ActorCriticNetwork(nn.Module):
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
         self.value_hidden = value_hidden
+
+        # One dropout mask per forward, on the embedding BOTH heads read, so the policy
+        # and the value never see different perturbations of the same state. Identity at
+        # p=0 and in eval mode, so acting, evaluation and the ONNX export are unaffected.
+        self.dropout_p = float(dropout)
+        self.dropout = nn.Dropout(self.dropout_p) if self.dropout_p > 0 else nn.Identity()
 
         self.obs_mlp = nn.Sequential(
             nn.Linear(obs_dim, hidden), nn.ReLU(),
@@ -160,7 +167,7 @@ class ActorCriticNetwork(nn.Module):
         x = self.embed_obs(obs)
         if self.use_lstm:
             x, _ = self.lstm(x, lstm_state)
-        return x
+        return self.dropout(x)          # one mask over the sequence (train mode only)
 
     def forward(
         self,
@@ -181,6 +188,7 @@ class ActorCriticNetwork(nn.Module):
         new_state = None
         if self.use_lstm:
             x, new_state = self.lstm(x, lstm_state)
+        x = self.dropout(x)                       # one mask, shared by both heads
         s_emb = x[:, -1, :]                       # [B, F] — the decision point
 
         logits = self.logits_from(s_emb, self.embed_actions(action_feats))
@@ -207,6 +215,7 @@ class ActorCriticNetwork(nn.Module):
             "lstm_hidden": self.lstm_hidden,
             "lstm_layers": self.lstm_layers,
             "value_hidden": self.value_hidden,
+            "dropout": self.dropout_p,
         }
 
 
@@ -275,6 +284,7 @@ def load_actor_critic(checkpoint_path: str, device: torch.device,
         lstm_hidden=int(state.get("lstm_hidden", 128)),
         lstm_layers=int(state.get("lstm_layers", 1)),
         value_hidden=int(state.get("value_hidden", 128)),
+        dropout=float(state.get("dropout", 0.0)),
     ).to(device)
     net.load_state_dict(state["model_state"])
     net.eval()

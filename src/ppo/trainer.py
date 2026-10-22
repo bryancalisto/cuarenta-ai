@@ -99,6 +99,7 @@ class PPOTrainer:
             obs_dim=self.obs_size, action_feat_dim=ACTION_FEAT_DIM, n_slots=self.n_slots,
             hidden=cfg.hidden, use_lstm=cfg.use_lstm, lstm_hidden=cfg.lstm_hidden,
             lstm_layers=cfg.lstm_layers, value_hidden=cfg.value_hidden,
+            dropout=cfg.dropout,
         ).to(self.device)
         self.opt = optim.Adam(self.net.parameters(), lr=cfg.lr)
         self.ret_rms = RunningMeanStd()
@@ -143,8 +144,8 @@ class PPOTrainer:
         # NOTE: `__init__` runs BEFORE a checkpoint is loaded, so this seed is the freshly
         # built RANDOM network, not the warm start. `load_policy` replaces it with
         # `pool.reset_to(...)` once the real weights are in. Without that reset the learner
-        # plays the entire run against random weights -- which is exactly what happened
-        # before, and it is invisible because a random opponent is still a legal opponent.
+        # plays the entire run against random weights -- and it stays invisible, because a
+        # random opponent is still a legal opponent.
         self.pool.add_snapshot(self.net, 0)
 
         # ---- bookkeeping ----
@@ -282,8 +283,9 @@ class PPOTrainer:
 
         # Per-episode reward bookkeeping for logging (raw, per team). Every term of the
         # env's reward is counted, so `EpisodeStats.accounted_return` can be checked
-        # exactly: captures (+1/card) + caídas + limpias + the win bonus. `carton` is NOT
-        # a reward term any more (it only moves the SCORE), so it is logged separately.
+        # exactly: captures (+1/card) + caídas + limpias + cartón + the win bonus.
+        # `carton` is paid once at the end of a deal rather than per move, so it is
+        # accumulated separately from the other terms.
         returns: List[List[float]] = [[0.0, 0.0] for _ in range(cfg.n_envs)]
         captures: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
         caidas: List[List[int]] = [[0, 0] for _ in range(cfg.n_envs)]
@@ -461,9 +463,9 @@ class PPOTrainer:
         advanced on EVERY turn (see `_collect_rollout`), so feeding it a state that
         skipped the learner's turns hands it a hidden state it was never trained on.
         That is not a cosmetic difference: the replayed history is what the LSTM
-        conditions on, so a desynchronised opponent plays measurably worse than its
-        weights imply, and self-play would be scoring the learner against a weakened
-        copy of itself rather than against itself. Its logits are discarded here.
+        conditions on, so a desynchronised opponent plays worse than its weights imply,
+        and self-play would be scoring the learner against a weakened copy of itself
+        rather than against itself. Its logits are discarded here.
         """
         opp_net = self.pool.nets[env_idx]
         _, _, new_opp_state = opp_net(obs_t, feats_t, mask_t,

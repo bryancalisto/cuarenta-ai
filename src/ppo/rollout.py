@@ -330,7 +330,7 @@ class EpisodeStats:
     captures: Tuple[int, int]       # cards captured (env pays +1 per captured card)
     caidas: Tuple[int, int]         # caída bonuses earned per team
     limpias: Tuple[int, int]        # limpia bonuses earned per team
-    carton: Tuple[int, int] = (0, 0)  # cartón points paid per team (a reward term again)
+    carton: Tuple[int, int] = (0, 0)  # cartón points paid per team (a reward term)
     learner_team: int = 0
     # The learner's SHAPED return (its own team's rewards, opponents' negated): this
     # is the quantity PPO actually optimises, and it is what the value head estimates.

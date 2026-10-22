@@ -10,17 +10,14 @@ answering "why do my two numbers disagree?".
 
 The value target must be right (`--value-target`, else the checkpoint's sidecar): in return
 mode the search accumulates the dense reward, in win mode it ignores it and backs up ±1 game
-results. MEASURED on `checkpoints-return/best_heuristic.pt` over 100 games: 64% with the
-wrong (win) mode, 80% with the right one.
+results.
 
 The net plays team 0 (seats 0 and 2). Team 1 is either:
 
   --opponent heuristic  (default) the HeuristicAgent: the reference opponent used
-                        throughout this project. NOTE it was fixed recently (it used
-                        to never play for a caída/limpia because of a `list == str`
-                        bug), so it is a *stronger* opponent than the one earlier
-                        checkpoints were measured against. Do not compare new
-                        win rates with old numbers.
+                        throughout this project. Note it plays for a caída/limpia now, so it is a *stronger*
+                        opponent than the one older numbers were taken against. Do
+                        not compare new win rates with old ones.
   --opponent raw        the same net with NO search: it plays the argmax of its own
                         policy head. This is the AlphaZero sanity check — if
                         "net + search" cannot beat "net + argmax policy", the search
@@ -84,8 +81,8 @@ def play_one(args) -> dict:
         # SAME per-game RNG convention as the trainer's evaluation workers
         # (`train.py: _make_search(..., seed)` -> random.Random(seed)). The searcher's RNG
         # drives the determinization sampling, so a different convention means different
-        # realized games even for the same environment seed — which is exactly why this
-        # script used to disagree with the trainer's own gate numbers.
+        # realized games even for the same environment seed, and the two harnesses would
+        # then disagree about the same snapshot.
         rng=random.Random(seed),
         dirichlet_eps=0.0,        # no exploration noise at eval
         device="cpu",
@@ -199,8 +196,8 @@ def main():
     score_t1 = np.mean([r["score_team1"] for r in results])
     steps_avg = np.mean([r["steps"] for r in results])
 
-    # Standard error of a win rate: sqrt(p(1-p)/n). Useful because 30 games gives
-    # roughly ±9%, which is why single evaluations looked so noisy.
+    # Standard error of a win rate: sqrt(p(1-p)/n). At 30 games that is roughly ±9%, so
+    # a single small evaluation cannot separate two close nets.
     p = wins_t0 / max(args.n_games, 1)
     stderr = (p * (1 - p) / max(args.n_games, 1)) ** 0.5
 

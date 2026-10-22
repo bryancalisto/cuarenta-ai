@@ -130,28 +130,4 @@ class OpponentMode(StrEnum):
 
 
 def has_reason(reasons, reason: "PointsReasons") -> bool:
-    """
-    True if `reason` is among the reasons returned by `captures.score_play`.
-
-    WHY THIS HELPER EXISTS — a bug that silently removed signal from the whole
-    project, in both the PPO and the ISMCTS pipelines:
-
-    `score_play` returns `reasons` as a **list** (`[]`, `[PointsReasons.CAIDA]`, ...),
-    because one play could in principle earn several bonuses. Code that wrote
-
-        if reasons == PointsReasons.CAIDA:      # list == str  ->  ALWAYS False
-        if reasons == PointsReasons.LIMPIA:     # list == str  ->  ALWAYS False
-
-    never fired. Consequences:
-
-      * `env.step()` never paid the +2 caída / +2 limpia bonus, so PPO was training
-        on a reward that valued the two most important scoring actions in Cuarenta at
-        exactly zero; and
-      * (ISMCTS side) the `is_caida` network feature was permanently 0 and the
-        heuristic teacher never played for a caída.
-
-    `PointsReasons` is a `StrEnum`, so `PointsReasons.CAIDA == 'caida'` is True while
-    `[PointsReasons.CAIDA] == 'caida'` is False. Always test membership — use this
-    helper, or `reason in reasons`.
-    """
     return reason in (reasons or [])

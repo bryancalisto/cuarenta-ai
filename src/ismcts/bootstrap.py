@@ -16,14 +16,10 @@ Two things that matter for trusting the result:
 
  * TRAIN/VAL SPLIT. Games are split by seed into a training set and a held-out
    validation set, and every epoch reports validation numbers. Without this you
-   cannot tell learning from memorisation: an earlier version of this script
-   reported `value=0.036` because the value head had memorised the outcome of the
-   few hundred games it was trained on (one ±1 label per game is trivially
-   memorisable). On genuinely unseen games that same checkpoint had value MSE
-   1.49 — worse than predicting 0 (MSE 1.0 for ±1 targets).
- * The teacher is only as good as `heuristic_agent.py`. It used to never play for
-   a caída or a limpia at all (a `list == str` bug), so the bootstrap policy
-   inherited that blind spot.
+   cannot tell learning from memorisation: one ±1 label per game is trivially
+   memorisable, so a value loss near 0 on the training games says nothing about
+   games the net has never seen.
+ * The teacher is only as good as `heuristic_agent.py`.
 
 Usage:
     uv run src/ismcts/bootstrap.py --games 2000 --epochs 20
@@ -268,10 +264,10 @@ def evaluate(net, loader, device):
     above that is worse than admitting ignorance (overconfident and wrong).
 
     The bar means the same thing in both modes, which is the point of
-    `RETURN_VALUE_SCALE`: for ±1 targets the variance is ~1 and for scaled return targets
-    it is ~1 by construction (the shaped return-to-go has mean ~0 and std ~35 points, and
-    the targets are divided by 30), so `mse > VALUE_MSE_BAR` is "worse than predicting the
-    mean" either way. Predicting exactly 0 is also the near-optimal constant in both modes,
+    `RETURN_VALUE_SCALE`: for ±1 targets the variance is ~1, and it is ~1 for scaled
+    return targets by construction (the shaped return-to-go has mean ~0 and the targets
+    are divided by 30), so `mse > VALUE_MSE_BAR` is "worse than predicting the mean"
+    either way. Predicting exactly 0 is also the near-optimal constant in both modes,
     since neither target has a large mean.
     """
     net.eval()

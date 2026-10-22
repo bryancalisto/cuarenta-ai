@@ -241,10 +241,10 @@ def test_trimmed_members_run_end_to_end():
     A trimmed `--members` set must run all the way through `run_evaluation` — matches,
     metric keys, AND the printed summary.
 
-    This is here because the summary print read `metrics['heuristic_*']` unconditionally and
-    only blew up on the real command line (`--members reference,random` -> KeyError), which
-    no unit test of `requested_members` could catch: the crash is in the reporting code, not
-    the selection logic. Two shapes are covered — a set without `heuristic`, and the
+    This is here because the summary print read `metrics['heuristic_*']` unconditionally,
+    which only crashed for a trimmed `--members` set, and no unit test of
+    `requested_members` could catch it: the bug is in the reporting code, not the
+    selection logic. Two shapes are covered — a set without `heuristic`, and the
     gate-only set with no league members at all.
     """
     cfg = {"n_iter": 4, "leaf_value_mode": "net", "max_rollout_len": T.MAX_ROLLOUT_LEN}

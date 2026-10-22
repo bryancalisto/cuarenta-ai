@@ -1,5 +1,3 @@
-"""Imitation learning module for Cuarenta."""
-
 from .imitation_learning import (
     ExpertPolicy,
     CuarentaPolicyLearner,

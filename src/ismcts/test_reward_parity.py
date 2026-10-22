@@ -5,9 +5,7 @@ The env's reward, and the copy of it that lives in the search.
 the search steps through) both pay the reward, and they MUST agree: if they drift, then
 
   * anything that bootstraps from `step_state`'s reward disagrees with anything that
-    reads the env's (this has happened TWICE, both times on the cartón term: once paid in
-    `step_state` but not in `env.step`, and once re-enabled in `env.step` but not in
-    `step_state`), and
+    reads the env's (this has happened more than once, always on the cartón term), and
   * `GameResult.accounted_return` — the identity behind the `selfplay/return_*` curves —
     stops being checkable.
 

@@ -324,10 +324,9 @@ def test_return_value_scale_puts_the_targets_at_unit_variance():
     """
     `RETURN_VALUE_SCALE` is not arbitrary: it is chosen so that the return target has (about)
     UNIT variance, which is what makes it comparable to the ±1 win target. That matters for
-    three things that were measured wrong at scale 100 — the value loss's share of
-    `policy_loss + value_loss` (~2% instead of ~20-30%), the size of Q's advantages next to
-    PUCT's exploration bonus (which `c_puct = 1.5` assumes are O(1)), and whether "MSE > 1.0"
-    means "no better than the mean" (it only does at unit variance).
+    three things — the value loss's share of `policy_loss + value_loss`, the size of Q's
+    advantages next to PUCT's exploration bonus (which `c_puct = 1.5` assumes are O(1)), and
+    whether "MSE > 1.0" means "no better than the mean" (it only does at unit variance).
 
     If someone changes the reward or the scale constant, this is the test that notices.
     The band is wide on purpose: this asserts the ORDER OF MAGNITUDE of the scale's

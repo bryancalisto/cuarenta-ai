@@ -17,8 +17,3 @@ for _ in range(N):
 dt = (time.time() - t0) / N
 print(f"search(n_iter=100): {dt*1000:.1f} ms")
 print(f"throughput: {N/(time.time()-t0):.1f} searches/sec")
-
-"""
-search(n_iter=100): 255.8 ms
-throughput: 3.9 searches/sec
-"""

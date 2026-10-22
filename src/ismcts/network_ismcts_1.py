@@ -7,14 +7,13 @@ later experiments; both are now thin shims that re-export this class. The bugs t
 version fixes, and why they mattered:
 
  1. LEAF VALUES WERE ZERO FOR MOST OF THE GAME.
-    v1 valued leaves with a greedy rollout capped at `max_rollout_len=80` while
-    games run 130-215 plies, and a truncated rollout was scored 0.0. Measured
-    termination rate at len 80: 0.00 at ply 0, 0.10 at ply 25, 0.60 at ply 75. So
-    for the first half of every game *every* simulation backed up 0.0, the tree had
-    no value signal at all, and the visit distribution was decided by expansion
-    order + Dirichlet noise instead of by play quality. Fine-tuning on those visit
-    targets is what dropped the net from 73% to ~40% against the heuristic.
-    Now the value head evaluates the leaf (one net forward), which is also ~50x
+    The old rollout mode valued leaves with a greedy rollout capped at
+    `max_rollout_len=80` while games run 130-215 plies, and a truncated rollout was
+    scored 0.0. So for the first half of every game *every* simulation backed up 0.0,
+    the tree had no value signal at all, and the visit distribution was decided by
+    expansion order + Dirichlet noise instead of by play quality. Fine-tuning on those
+    visit targets is what wrecked the net against the heuristic.
+    Now the value head evaluates the leaf (one net forward), which is also far
     cheaper than an 80-ply rollout, so we can afford far more simulations.
 
  2. INTERIOR NODES HAD NO PRIORS.

@@ -24,6 +24,8 @@ Run: python3 src/ppo/test_ppo.py    (from the repository root or from src/ppo/)
 from __future__ import annotations
 
 import random
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -123,9 +125,9 @@ def test_env_reward_identity():
                 saw_bonus += 1
         for team in (0, 1):
             won = 1.0 if env.state.winner == team else 0.0
-            # The carton is a reward term again (it was off for a while), so it is back in
-            # the identity. Kept as an exact equality: every term the env pays must appear
-            # here, and a term that stops being paid must disappear from here too.
+            # The carton is a reward term, so it is in the identity. Kept as an exact
+            # equality: every term the env pays must appear here, and a term that stops
+            # being paid must disappear from here too.
             expected = (float(cards[team]) + 2.0 * caidas[team] + 2.0 * limpias[team]
                         + float(carton[team]) + WIN_BONUS * won)
             assert abs(returns[team] - expected) < 1e-9, (
@@ -477,6 +479,60 @@ def test_checkpoint_roundtrip():
     print(f"test_checkpoint_roundtrip: OK ({path.name})")
 
 
+def test_dropout_is_training_only():
+    """
+    0 must be a strict no-op in train and eval mode; >0 must draw ONE mask per forward on
+    the shared state embedding (so the policy and the value are perturbed together); eval
+    mode must stay deterministic; and the setting must survive a checkpoint round-trip.
+    """
+    torch.manual_seed(0)
+    obs = torch.randn(2, 1, OBS_SIZE)
+    feats = torch.randn(2, MAX_ACTIONS, ACTION_FEAT_DIM)
+
+    # dropout=0 must be byte-identical to no dropout at all
+    off = ActorCriticNetwork(obs_dim=OBS_SIZE, use_lstm=False, hidden=16, value_hidden=8)
+    off.train()
+    with torch.no_grad():
+        off_a = off(obs, feats)[:2]
+        off_b = off(obs, feats)[:2]
+    assert torch.allclose(off_a[0], off_b[0]) and torch.allclose(off_a[1], off_b[1]), \
+        "dropout=0 must be a no-op in train mode"
+    assert off.dropout_p == 0.0 and off.architecture_config()["dropout"] == 0.0
+
+    # a large dropout must perturb BOTH heads in train mode, and neither in eval mode
+    net = ActorCriticNetwork(obs_dim=OBS_SIZE, use_lstm=False, hidden=16,
+                             value_hidden=8, dropout=0.5)
+    net.eval()
+    with torch.no_grad():
+        eval_a = net(obs, feats)[:2]
+    net.train()
+    with torch.no_grad():
+        train_a = net(obs, feats)[:2]
+        train_b = net(obs, feats)[:2]
+    net.eval()
+    with torch.no_grad():
+        eval_b = net(obs, feats)[:2]
+
+    assert torch.allclose(eval_a[0], eval_b[0], atol=1e-6), "eval must be deterministic (logits)"
+    assert torch.allclose(eval_a[1], eval_b[1], atol=1e-6), "eval must be deterministic (value)"
+    assert not torch.allclose(train_a[0], train_b[0], atol=1e-6), "train must draw a fresh mask"
+    assert not torch.allclose(train_a[1], train_b[1], atol=1e-6), "the mask is shared by both heads"
+
+    # the checkpoint must remember the value, so load_actor_critic rebuilds with it
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dropout.pt"
+        torch.save({"model_state": net.state_dict(), **net.architecture_config()}, path)
+        loaded = load_actor_critic(str(path), torch.device("cpu"))
+        assert loaded.dropout_p == 0.5, loaded.dropout_p
+        loaded.eval()
+        with torch.no_grad():
+            reloaded = loaded(obs, feats)[:2]
+        assert torch.allclose(eval_a[0], reloaded[0], atol=1e-6)
+        assert torch.allclose(eval_a[1], reloaded[1], atol=1e-6)
+
+    print("test_dropout_is_training_only: OK")
+
+
 # ---------------------------------------------------------------------------
 # 8. evaluation harness
 # ---------------------------------------------------------------------------
@@ -521,5 +577,6 @@ if __name__ == "__main__":
     test_shaped_reward_rule()
     test_rollout_rewards_use_the_shaping_rule()
     test_checkpoint_roundtrip()
+    test_dropout_is_training_only()
     test_eval_harness_runs()
     print("\nAll PPO tests passed.")

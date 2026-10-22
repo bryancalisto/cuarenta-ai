@@ -105,6 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--value-coef", type=float, default=0.5,
                         help="weight of the value loss relative to the policy loss")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="dropout on the shared state embedding, training only. "
+                             "Omit it to inherit an --init-checkpoint's value")
     # checkpoints / evaluation
     parser.add_argument("--init-checkpoint", type=str, default=None,
                         help="checkpoint to warm start from")
@@ -162,7 +165,7 @@ def _wandb_setup(args, cfg: SelfPlayConfig) -> bool:
             wandb.define_metric(f"{group}/*", step_metric="iteration")
         _WANDB = wandb
         return True
-    except Exception as exc:                                    # noqa: BLE001
+    except Exception as exc:
         print(f"[rebel] wandb unavailable, continuing without it: {exc!r}")
         _WANDB = None
         return False
@@ -174,7 +177,7 @@ def _wandb_log(iteration: int, metrics: Dict[str, float]) -> None:
         return
     try:
         _WANDB.log(dict(metrics, iteration=iteration))
-    except Exception as exc:                                    # noqa: BLE001
+    except Exception as exc:
         if not _WANDB_WARNED:
             print(f"[rebel] wandb logging failed, continuing without it: {exc!r}")
             _WANDB_WARNED = True
@@ -280,11 +283,13 @@ def main() -> None:
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    net = RebelNet().to(device)
+    # An explicit --dropout wins; omitting it keeps the warm start's setting.
+    dropout = args.dropout if args.dropout is not None else 0.0
+    net = RebelNet(dropout=dropout).to(device)
     if args.init_checkpoint:
         init_path = Path(args.init_checkpoint)
         if init_path.exists():
-            net = load_rebel_checkpoint(init_path, device)
+            net = load_rebel_checkpoint(init_path, device, dropout=args.dropout)
             print(f"[rebel] warm start from {init_path}")
         else:
             print(f"[rebel] init checkpoint not found, starting from scratch: {init_path}")
@@ -295,7 +300,7 @@ def main() -> None:
 
     print(f"[rebel] iterations={args.iterations} games={args.games} "
           f"n_iter={args.n_iter} depth={args.depth} particles={args.particles} "
-          f"lr={args.lr} device={args.device} save_dir={save_dir} "
+          f"lr={args.lr} dropout={net.dropout_p} device={args.device} save_dir={save_dir} "
           f"eval_games={args.eval_games} league_games={args.league_games} "
           f"league={'on' if args.league else 'off'} "
           f"wandb={'on' if wandb_live else 'off'}")

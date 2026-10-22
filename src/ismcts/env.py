@@ -43,14 +43,13 @@ WIN_SCORE = 40
 #
 # WIN_BONUS is the one knob that decides whether the agent optimises "win" or "collect
 # cards". The dense terms are NOT small: a game runs over several rounds (each round deals
-# a fresh 40-card deck) and MEASURED over 3 games with the trained net, the two teams'
-# combined return was ~137, of which captures were 46%, caídas/limpias 39% and the win
-# bonus 15%. So at 20 the win bonus is the SMALLEST term — raise it (to ~60-100) if you
-# want winning to dominate the objective. A larger bonus does not by itself destabilise
-# PPO, whose value targets are normalised by a running mean/std. It does not affect ISMCTS
-# in win mode either — the search backs up ±1 game outcomes and ignores this reward — but
-# in RETURN mode the search adds these terms up itself (see the VALUE TARGET note in
-# selfplay.py), so every term here has to be in `rules.py` too.
+# a fresh 40-card deck) and the cards captured, the caídas, the limpias and the cartónes
+# add up to far more than this bonus, so at 20 the win is the SMALLEST term — raise it (to
+# ~60-100) if you want winning to dominate the objective. A larger bonus does not by
+# itself destabilise PPO, whose value targets are normalised by a running mean/std. It
+# does not affect ISMCTS in win mode either — the search backs up ±1 game outcomes and
+# ignores this reward — but in RETURN mode the search adds these terms up itself (see the
+# VALUE TARGET note in selfplay.py), so every term here has to be in `rules.py` too.
 WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index

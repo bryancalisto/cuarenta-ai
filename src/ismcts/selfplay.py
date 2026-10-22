@@ -36,16 +36,14 @@ applies. Why ±1 is the default:
     choice rather than a fact, and Q ends up on a different scale (which is why return
     mode also has to center Q on the node's value; see `_puct_select`).
   * RANGE. The value head ends in `tanh` -> (-1, 1) and terminal values are ±1. A game
-    return is a different order of magnitude — MEASURED with the trained net, single-team
-    returns of 23 / 71 / 83 / 106 in three games — so return mode uses a LINEAR head and
-    divides by `RETURN_VALUE_SCALE`, and "unvisited child has Q = 0" stops meaning
-    "unknown/even" unless Q is centered.
+    return is a different order of magnitude (tens to ~150 points) — so return mode uses
+    a LINEAR head and divides by `RETURN_VALUE_SCALE`, and "unvisited child has Q = 0"
+    stops meaning "unknown/even" unless Q is centered.
   * ALIGNMENT. Points in Cuarenta come from caídas, limpias and cartón, while captured
-    cards only pay off through the cartón. Measured over those same three games, the win
-    bonus was only ~15% of the return (captures 46%, caídas/limpias 39%), so a team that
-    farms cards and loses still earns most of the return. Return-maximising is therefore
-    NOT winning — which is fine if that is what you want to measure, and is exactly why
-    the ±1 target stays the default.
+    cards only pay off through the cartón, so `WIN_BONUS` is a small share of a game's
+    return and a team that farms cards and loses still earns most of it. Return-maximising
+    is therefore NOT winning — which is fine if that is what you want to measure, and is
+    exactly why the ±1 target stays the default.
 
 So in win mode the env reward is LOGGING-ONLY here (it is what the `selfplay/*` curves in
 train.py plot), and PPO is the pipeline that optimises it. In return mode the search
@@ -130,11 +128,9 @@ def backfill_value_targets(
     WHY `value_lambda` EXISTS (return mode only)
     --------------------------------------------
     The Monte-Carlo target above is a SUM OVER THE WHOLE REST OF THE GAME, and most of its
-    spread is captures in later rounds that the current state does not determine. Measured:
-    the MC target has mean ~0 and std ~35 points, and a value head asked to predict that
-    ends up memorising the replay buffer instead (in-sample R^2 0.77 while held-out R^2 was
-    -0.27 on a real run) — which is fatal here because the search values its leaves with
-    that head.
+    spread is captures in later rounds that the current state does not determine, so a value
+    head asked to predict it ends up memorising the replay buffer instead of the game —
+    which is fatal here because the search values its leaves with that head.
 
     `value_lambda` (1.0 = pure Monte-Carlo, the old behaviour) trades that noise for the
     head's own current estimate, using the standard TD(lambda) recursion with no discounting:

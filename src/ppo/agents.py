@@ -10,27 +10,18 @@ Three kinds of thing live here:
     actor-critics), and
   * `load_agent_from_checkpoint`, which picks the right wrapper for a file.
 
-THE HEURISTIC OPPONENT WAS BROKEN AND IS FIXED HERE
----------------------------------------------------
-The old version decided captures from the observation vectors instead of the game
-rules: it looked for `last_placed` inside the capture set (caída) and otherwise took
-"the capture with the most cards" as a PROXY for a limpia. So it never actually
-played for a limpia. It also could not be seeded (it used the global `random`), so
-evaluations were not repeatable.
-
-It now scores every legal action with the same `score_play` the env uses, which is
-the only way to read a position the way the game does:
+THE HEURISTIC OPPONENT SCORES ACTIONS WITH THE ENV'S RULES
+----------------------------------------------------------
+It scores every legal action with the same `score_play` the env uses, which is the only
+way to read a position the way the game does:
 
     1. caída (2 points)  -> take it
     2. limpia (2 points) -> take it
     3. any capture       -> the one taking the most cards
     4. otherwise         -> place a card at random
 
-Two consequences worth remembering: this opponent is *stronger* than the one earlier
-runs were measured against, so PPO win rates are not comparable with old logs; and
-`load_agent_from_checkpoint` used to be defined twice in this file (the second
-definition silently shadowed the first), which is now a single implementation that
-dispatches on the checkpoint contents.
+It also keeps its own `random.Random` rather than the global one, so a seeded agent
+makes evaluations repeatable.
 """
 
 from __future__ import annotations

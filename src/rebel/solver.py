@@ -96,11 +96,10 @@ class ReBeLSolver:
           * "current" -- the last iteration's regret-matched strategy, no averaging.
 
         "linear" exists to test the guess that the early, still-uniform iterations were
-        diluting the returned strategy. MEASURED: it makes no difference to playing
-        strength (search + bootstrapped net vs the heuristic: 21.9% linear vs 25.0%
-        uniform, 32 games each, +-7.5% se), so the default stays plain and the knob is
-        left for anyone revisiting it at higher iteration counts. Whatever is wrong with
-        the search, it is not the averaging weight.
+        diluting the returned strategy, and it makes no measurable difference to playing
+        strength: whatever is wrong with the search, it is not the averaging weight. The
+        default stays plain and the knob is left for anyone revisiting it at higher
+        iteration counts.
         """
         assert strategy_averaging in ("uniform", "linear", "current"), strategy_averaging
         self.net = net

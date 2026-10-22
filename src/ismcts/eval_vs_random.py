@@ -64,9 +64,4 @@ if __name__ == "__main__":
     execution_time_seconds = end_time - start_time
     readable_time = timedelta(seconds=execution_time_seconds)
     print(f"Execution time: {readable_time}")
-
-    """
-    ISMCTS (team 0) wins: 95/100 = 95.0%
-    Execution time: 0:03:47.865486
-    """
     

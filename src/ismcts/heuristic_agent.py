@@ -15,10 +15,7 @@ The agent is deterministic given a seed (uses its own random.Random).
 
 IMPORTANT, and this is what made it a poor teacher before: `captures.score_play`
 returns `reasons` as a LIST, so tests must be `has_reason(reasons, ...)` or
-`reason in reasons`. The old code wrote `r == PointsReasons.CAIDA`, which is
-`list == str` and therefore ALWAYS False. As a result this agent never played for
-a caída or a limpia at all: it fell through to "largest capture by card count",
-which systematically prefers a bigger 0-point capture over a 1-card caída worth 2.
+`reason in reasons`.
 Since this agent generates the imitation-learning data for CuarentaNet's bootstrap
 and is also the opponent used for evaluation, that bug poisoned both.
 

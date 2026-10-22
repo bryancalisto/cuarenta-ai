@@ -104,18 +104,16 @@ _WARNED_MISSING_VALUE_TARGET = False
 # but it decides three things that matter:
 #
 #   * the SIZE of the value loss, i.e. how much of `policy_loss + value_loss` is the value
-#     head's gradient. At the wrong scale the value head gets a negligible share and never
-#     learns (measured at 100: value 0.02 vs policy 0.92 = 2% of the loss, versus ~20-30%
-#     in win mode where the targets have variance ~1),
+#     head's gradient. At the wrong scale the value head gets a negligible share of the
+#     loss and never learns, unlike win mode where the targets have variance ~1,
 #   * the size of Q's advantages next to PUCT's exploration term
 #     `c_puct * P * sqrt(N) / (1 + N)`, which `c_puct = 1.5` assumes are O(1) — the same
 #     assumption win mode satisfies,
 #   * whether `mse > 1.0` / `mse < 0.05` style thresholds mean anything: with targets of
 #     unit variance, "1.0" is exactly "no better than predicting the mean" in BOTH modes.
 #
-# MEASURED (this is why it is 30, not 100): the shaped return-to-go target has mean ~0 and
-# std ~31-36 points — 35.8 over 30 heuristic games, and 31.0 on the trainer's probe games
-# (`eval/probe_target_var` 0.0962 at scale 100). So 30 puts the targets at std ~1.1.
+# The constant is sized so the return-to-go targets land at unit std, which win mode gets
+# for free and which is what makes the three points above hold.
 #
 # A return-mode checkpoint's head is expressed in these units, and the scale is NOT in the
 # state_dict, so changing this constant silently invalidates existing return-mode
@@ -152,8 +150,8 @@ class CuarentaNet(nn.Module):
         # `dropout` is a TRAINING-time regulariser for the small-replay-buffer regime: the
         # buffer is replayed for `EPOCHS_PER_ITER x REPLAY_ITERS` passes, and this net has
         # 1.6M parameters for ~20k decisions, so both heads can fit the buffer instead of
-        # the game (measured in return mode: in-sample value R^2 0.79 while held-out R^2
-        # was ~0.05).
+        # the game — the symptom is a value head that fits the replayed buffer and predicts
+        # nothing held out.
         #
         # Placement matters: ONE mask is drawn per forward and applied to `s_emb`, the
         # embedding BOTH heads read. Dropping inside each head separately would give the
@@ -335,9 +333,8 @@ class CuarentaNet(nn.Module):
         the return head is linear, but that is an ACTIVATION: both load the same weights
         without an error, and if the mode is wrong then `NetworkISMCTS` ignores the dense
         reward and backs up ±1 game results — i.e. it searches as a DIFFERENT AGENT than the
-        one that was trained, and a 100-game match silently reports the wrong strength.
-        MEASURED: evaluating a return-mode checkpoint with a win-mode search gave 64% against
-        the heuristic where the trainer's own (correctly built) evaluation gave 81.7%.
+        one that was trained, and the resulting match silently reports the strength of that
+        other agent rather than the checkpoint's.
         """
         if explicit:
             return explicit

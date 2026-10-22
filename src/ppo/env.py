@@ -95,9 +95,9 @@ ACTION_FEAT_DIM = 84
 WIN_SCORE = 40
 
 # Reward for winning the game: +1 per captured card, +2 caída, +2 limpia, WIN_BONUS for
-# the win. Measured with the trained net, the win bonus is
-# only ~15% of a game's return, so raise this if you want a win-first agent. It is a
-# single knob on purpose; see the REWARD note in src/ismcts/env.py for the full rationale.
+# the win. The win bonus stays a small share of a game's return, so raise this if you want
+# a win-first agent. It is a single knob on purpose; see the REWARD note in
+# src/ismcts/env.py for the full rationale.
 WIN_BONUS = 20
 MAX_ACHIEVABLE_POINTS_BY_NON_CAIDA_ACTIONS = 38
 TEAMS = {0: 0, 1: 1, 2: 0, 3: 1}   # player: team index

@@ -17,9 +17,9 @@ same (checkpoint, seed) always gives the same result.
 Because the seats rotate, a mirror match (policy vs itself) is 50% IN EXPECTATION, so no
 systematic seat bias is baked in — unlike the ISMCTS harness, where the policy always sat
 on team 0 and the bar had to be calibrated for that offset. Expectation is not a
-guarantee, though: over a finite number of games the measured mirror wanders (one real
-run measured 41.7% over 60 games), which is why the trainer calibrates its acceptance bar
-against a measured mirror baseline rather than assuming exactly 50%.
+guarantee, though: over a finite number of games the mirror win rate wanders, which is why
+the trainer calibrates its acceptance bar against a measured mirror baseline rather than
+assuming exactly 50%.
 
 Reported per match (`_for` = the policy's team, `_against` = the opponent), and
 `return` is the env's dense reward (`cards + 2*caidas + 2*limpias + WIN_BONUS*won` — there

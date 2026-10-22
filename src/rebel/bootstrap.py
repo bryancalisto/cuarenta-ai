@@ -4,13 +4,12 @@ Warm start the ReBeL network by imitating the heuristic bot.
 WHY THIS STAGE EXISTS
 ---------------------
 The value head is the search's only source of information beyond the horizon it can play
-out, and a randomly initialised head carries none. That is measurable, not theoretical: in
-a 40-game ablation the search with a random net won 7.5% against a trivial deterministic
-policy, and the SAME search with a hand-written value (tanh of the score difference) won
-16/16 against that same policy. Self-play starting from a random value therefore has
-almost nothing to learn from -- the search picks moves on noise -- so the first stage is
-supervised: teach the network to imitate a known-decent player, then let self-play improve
-on it. `src/ppo/bootstrap.py` does the same thing for the same reason.
+out, and a randomly initialised head carries none: a search that is valued by noise picks
+its moves on noise. Even a hand-written value (tanh of the score difference) makes the
+same search play far better. Self-play starting from a random value therefore has almost
+nothing to learn from, so the first stage is supervised: teach the network to imitate a
+known-decent player, then let self-play improve on it. `src/ppo/bootstrap.py` does the
+same thing for the same reason.
 
 WHAT IS LEARNED
 ---------------
@@ -39,8 +38,8 @@ One decision costs 368 + 64*84 + 64 floats, so a few thousand games would not fi
 memory (200k decisions would be ~4.6 GB). Each iteration generates `--games` games,
 trains `--epochs` passes over that chunk with a held-out validation split, and discards
 it. The best epoch is kept by validation metrics, so the checkpoint is not simply
-"whatever the last epoch produced" -- the PPO bootstrap learned this the hard way when its
-value head overfit.
+"whatever the last epoch produced" -- a value head can overfit inside one chunk, and the
+last epoch is then the worst one.
 
   * `val/value_mse` below 1.0 means better than always predicting 0 (that is the reference
     the metric is read against, as in `src/ppo/bootstrap.py`),
@@ -167,11 +166,9 @@ def heuristic_game(seed: int, cfg: BootstrapConfig, rng: random.Random) -> GameR
     # The value target. The search consumes this at its leaves, so what goes in here
     # decides what the search is willing to play for.
     #
-    # MEASURED, which is why there is a choice at all: with the pure win/loss target the
-    # head rated the best capture BELOW the best placement in 79.3% of positions where the
-    # capture actually earned points (218/275). It had learned "who is winning" without
-    # learning that scoring is HOW you win, so the search optimising that head declined
-    # caidas and limpias -- the exact failure seen in play.
+    # The pure win/loss target is sparse, which is why there is a choice at all: the head
+    # learns "who is winning" without learning that scoring is HOW you win, and a search
+    # optimising it declines caidas and limpias.
     #
     #   win   -- +1 / -1. Matches the search's terminal utility, but sparse: it says
     #            nothing about a +2 caida until the game is nearly decided.
@@ -180,11 +177,9 @@ def heuristic_game(seed: int, cfg: BootstrapConfig, rng: random.Random) -> GameR
     #            strictly better than a win).
     #   mix   -- half of each, keeping both signals.
     #
-    # MEASURED, and it refuted the guess this option was added for: training all three at
-    # equal data volume left the capture ranking essentially unchanged (a diagnostic over
-    # ~240 positions where the capture earned points rated the capture below a placement
-    # 86.5% / 86.0% / 86.0% of the time for win / score / mix). So the head's difficulty is
-    # not the scale of the target, and the default stays "win".
+    # The score and mix targets do not cure that on their own: the head's difficulty is
+    # not the scale of the target, so the default stays on the one that matches the
+    # search's terminal utility.
     for decision in decisions:
         won = 1.0 if winner == decision.acting_team else -1.0
         margin = scores[decision.acting_team] - scores[1 - decision.acting_team]
@@ -287,6 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="fraction of each chunk held out, split by GAME (default 0.15)")
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--value-hidden", type=int, default=128)
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="dropout on the shared state embedding, training only. "
+                             "Omit it to inherit an --init-checkpoint's value")
     parser.add_argument("--init-checkpoint", type=str, default=None,
                         help="continue from an existing ReBeL checkpoint")
     parser.add_argument("--out", type=str, default=str(DEFAULT_OUT),
@@ -333,10 +331,11 @@ def main() -> None:
                           value_target=args.value_target, seed=args.seed_base)
 
     if args.init_checkpoint:
-        net = load_rebel_checkpoint(args.init_checkpoint, device).to(device)
+        net = load_rebel_checkpoint(args.init_checkpoint, device, dropout=args.dropout).to(device)
         print(f"[bootstrap] continuing from {args.init_checkpoint}")
     else:
-        net = RebelNet(hidden=args.hidden, value_hidden=args.value_hidden).to(device)
+        net = RebelNet(hidden=args.hidden, value_hidden=args.value_hidden,
+                       dropout=args.dropout or 0.0).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     run = _wandb_setup(args)
 

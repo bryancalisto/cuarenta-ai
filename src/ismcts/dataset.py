@@ -25,11 +25,10 @@ TARGET TEMPERATURE (`target_temperature`, tau)
 ----------------------------------------------
     pi_target ∝ (visits / sum(visits)) ** (1 / tau)
 `tau = 1` keeps the raw visit distribution. `tau > 1` flattens it, which matters
-because a 400-simulation search produces a fairly peaked distribution (measured
-mean top-action probability ~0.70). If that peakiness partly reflects noise rather
-than knowledge, training the policy to reproduce it teaches overconfidence: the
-policy loss falls on that sample while held-out accuracy gets worse. Flattening
-caps how much a single sample can push the policy toward one action.
+because a 400-simulation search produces a fairly peaked distribution. If that peakiness
+partly reflects noise rather than knowledge, training the policy to reproduce it teaches
+overconfidence: the policy loss falls on that sample while held-out accuracy gets worse.
+Flattening caps how much a single sample can push the policy toward one action.
 
 (Do not confuse `target_temperature` — what the net LEARNS from — with
 selfplay.temperature/temperature_cutoff — which action gets PLAYED.)

@@ -20,8 +20,8 @@
 # BOOTSTRAP_CKPT=... to reuse a checkpoint trained with the current code.
 #
 # The self-play phase prints four evaluation numbers per evaluation:
-#   vs_reference   win rate against the best net so far  <- the gating criterion
-#   vs_heuristic   win rate against the fixed heuristic  <- external reference
+#   reference      win rate against the best net so far  <- the gating criterion
+#   heuristic      win rate against the fixed heuristic  <- external reference
 #   teacher_edge   search vs this net's own raw policy   <- must stay well above 50%
 #   probe_*        held-out policy accuracy / value MSE  <- value MSE must stay <= 1.0
 

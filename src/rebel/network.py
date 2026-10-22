@@ -51,13 +51,21 @@ class RebelNet(nn.Module):
     """Feedforward actor-critic over (observation, belief marginals, action features)."""
 
     def __init__(self, obs_dim: int = INPUT_DIM, action_feat_dim: int = ACTION_FEAT_DIM,
-                 n_slots: int = N_SLOTS, hidden: int = 256, value_hidden: int = 128):
+                 n_slots: int = N_SLOTS, hidden: int = 256, value_hidden: int = 128,
+                 dropout: float = 0.0):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.action_feat_dim = int(action_feat_dim)
         self.n_slots = int(n_slots)
         self.hidden = int(hidden)
         self.value_hidden = int(value_hidden)
+
+        # One dropout mask per forward, on the embedding BOTH heads read, so the policy
+        # and the value never see different perturbations of the same belief state.
+        # Identity at p=0 and in eval mode, so the search, evaluation and exports see the
+        # deterministic net.
+        self.dropout_p = float(dropout)
+        self.dropout = nn.Dropout(self.dropout_p) if self.dropout_p > 0 else nn.Identity()
 
         self.obs_trunk = nn.Sequential(
             nn.Linear(self.obs_dim, self.hidden), nn.ReLU(),
@@ -81,7 +89,7 @@ class RebelNet(nn.Module):
         Returns (logits [B, S], value [B]) with the value from the acting team's
         perspective, in [-1, 1] (+1 = that team wins).
         """
-        state_emb = self.obs_trunk(obs)                       # [B, H]
+        state_emb = self.dropout(self.obs_trunk(obs))         # [B, H], one mask
         action_emb = self.action_mlp(feats)                   # [B, S, H]
         logits = (action_emb * state_emb.unsqueeze(1)).sum(-1) / math.sqrt(self.hidden)
         if mask is not None:
@@ -120,6 +128,7 @@ class RebelNet(nn.Module):
             "n_slots": self.n_slots,
             "hidden": self.hidden,
             "value_hidden": self.value_hidden,
+            "dropout": self.dropout_p,
         }
 
 
@@ -160,6 +169,7 @@ def load_rebel_checkpoint(path, device: torch.device = torch.device("cpu"),
         "n_slots": int(state.get("n_slots", N_SLOTS)),
         "hidden": int(state.get("hidden", 256)),
         "value_hidden": int(state.get("value_hidden", 128)),
+        "dropout": float(state.get("dropout", 0.0)),
     }
     dims.update({k: v for k, v in overrides.items() if v is not None})
     net = RebelNet(**dims).to(device)

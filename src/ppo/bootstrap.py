@@ -205,6 +205,7 @@ def train(
     lstm_hidden: int,
     lstm_layers: int,
     value_hidden: int,
+    dropout: float,
     vf_coef: float,
     advantage_weighted: bool,
     batch_games: int,
@@ -218,7 +219,7 @@ def train(
     net = ActorCriticNetwork(
         obs_dim=OBS_SIZE_ISMCTS, action_feat_dim=ACTION_FEAT_DIM, n_slots=MAX_ACTIONS,
         hidden=hidden, use_lstm=use_lstm, lstm_hidden=lstm_hidden,
-        lstm_layers=lstm_layers, value_hidden=value_hidden,
+        lstm_layers=lstm_layers, value_hidden=value_hidden, dropout=dropout,
     ).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=1e-4)
 
@@ -302,6 +303,8 @@ def main():
     p.add_argument("--lstm-hidden", type=int, default=128)
     p.add_argument("--lstm-layers", type=int, default=1)
     p.add_argument("--value-hidden", type=int, default=128)
+    p.add_argument("--dropout", type=float, default=0.0,
+                   help="dropout on the shared state embedding, training only")
     p.add_argument("--out", type=str, default="checkpoints-ppo/bootstrap.pt")
     p.add_argument("--seed-base", type=int, default=0)
     p.add_argument("--device", type=str, default=None)
@@ -341,6 +344,7 @@ def main():
     train(train_games, val_games, out_path=args.out, epochs=args.epochs, lr=args.lr,
           use_lstm=use_lstm, hidden=args.hidden, lstm_hidden=args.lstm_hidden,
           lstm_layers=args.lstm_layers, value_hidden=args.value_hidden,
+          dropout=args.dropout,
           vf_coef=args.vf_coef, advantage_weighted=args.advantage_weighted,
           batch_games=args.batch_games, device=device, patience=args.patience,
           use_wandb=wandb_enabled)

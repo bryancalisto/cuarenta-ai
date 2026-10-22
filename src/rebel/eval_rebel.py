@@ -50,16 +50,15 @@ ARGMAX OF ITS OWN POLICY (one network forward pass per ply), which is what
 it keeps a league evaluation's cost the same order as the heuristic match.
 
 The alternative would be to let a checkpoint member run the same search the net under test
-runs, which is what `src/ismcts/train.py` does for its `vs_reference`/`initial`/
+runs, which is what `src/ismcts/train.py` does for its `reference`/`initial`/
 `prev_checkpoint` members ("same search, same rules, only the weights differ"). That is the
 stricter mirror, and it was not chosen here for two reasons: it doubles the search cost of
-every league game (the member would solve at every ply, so a 30-game league match costs
-twice what it does now), and it is NOT the PPO contract this family is being aligned with.
-The consequence to keep in mind when reading `eval/reference`: this compares search+net
-against the raw policy of another checkpoint, so an untrained value head (whose search is
-little better than a random choice among the legal moves) can lose to its own raw policy --
-measured: 0/8 in a mirror at n_iter=8/depth=2 with an untrained net. The mirrored numbers
-become meaningful as the search gets stronger than the policy it improves.
+every league game (the member would solve at every ply), and it is NOT the PPO contract
+this family is being aligned with. The consequence to keep in mind when reading
+`eval/reference`: this compares search+net against the raw policy of another checkpoint, so
+an untrained value head (whose search is little better than a random choice among the legal
+moves) can lose to its own raw policy. The comparison only becomes meaningful once the
+search is stronger than the policy it improves.
 
 Determinism: the env, the belief, the search and every opponent all derive from the game's
 seed, and every player takes its argmax, so the same (checkpoint, member, seed) always
@@ -406,8 +405,8 @@ def match_metrics(results: Sequence[Dict], prefix: str = "heuristic") -> Dict[st
         return float(np.mean([r[key] for r in results]))
 
     win_rate = m("won")
-    # sqrt(p(1-p)/n): with 8 games the standard error is ~18%, which is why an evaluation
-    # is only worth reading as a trend over several of them.
+    # sqrt(p(1-p)/n): the standard error shrinks as games are added, which is why one
+    # evaluation is only worth reading as a trend over several of them.
     stderr = float(np.sqrt(max(win_rate * (1 - win_rate), 1e-9) / n))
     return {
         f"eval/{prefix}": win_rate,

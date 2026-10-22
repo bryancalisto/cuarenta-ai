@@ -58,7 +58,6 @@ def test_kuhn_cfr_converges():
 
     That ratio is the sharp check. The bluff frequency alone is NOT: every member of the
     equilibrium family has the same value, so a mismatch there would not prove anything.
-    (Reference measurement on this code: value -0.05530, bluff 0.0934, bet 0.2823.)
     """
     stats = kuhn_poker_solve(n_iter=20_000, seed=0)
     value = stats["value_to_player0"]
@@ -374,18 +373,16 @@ def test_value_head_prefers_scoring_captures():
     The value head must rank a caida/limpia capture above a plain placement.
 
     This is the property the whole search rests on: `ReBeLSolver` optimises the value, so a
-    head that does not know scoring is good makes the search decline caidas -- which is
-    exactly the failure that was observed in play (the search picking worse actions than
-    the policy head it searches from).
+    head that does not know scoring is good makes the search decline caidas -- the failure
+    mode where the search picks worse actions than the policy head it searches from.
 
     It is a REGRESSION test for the value head, and it needs a trained checkpoint: an
     untrained head's outputs are near-constant, so it has no ranking to speak of. Skipped
     when `checkpoints-rebel/bootstrap.pt` is absent.
 
     Comparison is between the MEAN value of the capturing actions and the MEAN value of the
-    placing actions. An earlier version compared the best of each set, which is biased
-    whenever the two sets have different sizes -- it reported the opposite of the truth
-    (86% "captures rated lower" against a real 98% "captures rated higher").
+    placing actions. Comparing the best of each set instead is biased whenever the two sets
+    have different sizes, and can report the opposite of the truth.
     """
     from bootstrap import DEFAULT_OUT
     if not Path(DEFAULT_OUT).exists():
@@ -482,6 +479,62 @@ def test_net_shapes_and_checkpoint_roundtrip():
     print(f"test_net_shapes_and_checkpoint_roundtrip: OK (logits {tuple(logits.shape)}, "
           f"value {tuple(value.shape)} in [-1,1], illegal slots "
           f"{logits[~mask].max():.3g}, round-trip exact)")
+
+def test_dropout_is_training_only():
+    """
+    One mask per forward on the shared state embedding, active in train mode only, and
+    remembered in the checkpoint's architecture so a warm start keeps its setting.
+    """
+    torch.manual_seed(0)
+    obs = torch.randn(4, INPUT_DIM)
+    feats = torch.randn(4, 64, 84)
+
+    net = RebelNet(dropout=0.5)
+    net.eval()
+    with torch.no_grad():
+        eval_a = net(obs, feats)
+    net.train()
+    torch.manual_seed(1)
+    with torch.no_grad():
+        train_a = net(obs, feats)
+    torch.manual_seed(2)
+    with torch.no_grad():
+        train_b = net(obs, feats)
+    net.eval()
+    with torch.no_grad():
+        eval_b = net(obs, feats)
+
+    assert torch.allclose(eval_a[0], eval_b[0], atol=1e-6), "eval must be deterministic (logits)"
+    assert torch.allclose(eval_a[1], eval_b[1], atol=1e-6), "eval must be deterministic (value)"
+    assert not torch.allclose(train_a[0], train_b[0], atol=1e-6), "train must draw a fresh mask"
+    assert not torch.allclose(train_a[1], train_b[1], atol=1e-6), "the mask is shared by both heads"
+
+    # dropout=0 stays a strict no-op
+    plain = RebelNet()
+    plain.train()
+    with torch.no_grad():
+        p_a = plain(obs, feats)
+        p_b = plain(obs, feats)
+    assert torch.allclose(p_a[0], p_b[0]) and torch.allclose(p_a[1], p_b[1]), \
+        "dropout=0 must be a no-op in train mode"
+    assert plain.architecture_config()["dropout"] == 0.0
+
+    # the checkpoint carries the value, and the loader lets a run override it
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dropout.pt"
+        save_rebel_checkpoint(path, net)
+        loaded = load_rebel_checkpoint(path, torch.device("cpu"))
+        assert loaded.dropout_p == 0.5, loaded.dropout_p
+        loaded.eval()
+        with torch.no_grad():
+            reloaded = loaded(obs, feats)
+        assert torch.allclose(eval_a[0], reloaded[0], atol=1e-6)
+        assert torch.allclose(eval_a[1], reloaded[1], atol=1e-6)
+        overridden = load_rebel_checkpoint(path, torch.device("cpu"), dropout=0.0)
+        assert overridden.dropout_p == 0.0, "an explicit dropout must override the checkpoint"
+
+    print("test_dropout_is_training_only: OK")
+
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +689,7 @@ if __name__ == "__main__":
     test_search_prefers_the_winning_capture()
     test_value_head_prefers_scoring_captures()
     test_net_shapes_and_checkpoint_roundtrip()
+    test_dropout_is_training_only()
     test_league_eval_logs_the_canonical_key_set()
     test_league_skips_members_without_a_checkpoint()
     print(f"\nAll ReBeL tests passed in {time.perf_counter() - start:.1f}s.")

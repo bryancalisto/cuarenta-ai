@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lstm-hidden", type=int, default=128)
     p.add_argument("--lstm-layers", type=int, default=1)
     p.add_argument("--value-hidden", type=int, default=128)
+    p.add_argument("--dropout", type=float, default=0.0,
+                   help="dropout on the shared state embedding, training only (0 = off)")
     # opponents
     p.add_argument("--opponent-mode", type=str, default="selfplay",
                    choices=["heuristic", "selfplay", "random"])
@@ -128,6 +130,7 @@ def config_from_args(args) -> PPOConfig:
         lstm_hidden=args.lstm_hidden,
         lstm_layers=args.lstm_layers,
         value_hidden=args.value_hidden,
+        dropout=args.dropout,
         symmetrize_rewards=args.symmetrize_rewards,
         pool_size=args.pool_size,
         opponent_latest=args.opponent_latest,

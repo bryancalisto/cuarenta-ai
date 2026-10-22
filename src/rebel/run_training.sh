@@ -11,11 +11,9 @@
 # best.pt = the net with the best win rate against the heuristic bot). Metrics go to
 # wandb project cuarenta-ai unless --no-wandb is passed.
 #
-# Cost, measured on a 10-core laptop at the defaults (n_iter=32, depth=3, particles=16):
-# about 10s per self-play game -- a game is ~160 plies and a decision costs ~57ms of
-# search -- so ~40s per iteration of 4 games, plus ~10-25s per evaluation (8 games over
-# 4 workers). A 20-iteration run is therefore around 15 minutes; nearly all of it is the
-# search, which is why --n-iter and --depth are the first knobs to turn down.
+# Cost: nearly all of a run's time is the search -- every ply pays `n_iter * depth *
+# particles` -- so --n-iter and --depth are the first knobs to turn down. The periodic
+# evaluation adds its own fixed cost per check, spread over --eval-workers.
 
 set -e
 

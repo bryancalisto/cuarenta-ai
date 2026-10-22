@@ -110,11 +110,4 @@ if __name__ == "__main__":
     print(f"\nNetworkISMCTS (untrained) wins: {wins[0]}/{N} = {wins[0]/N:.1%}")
     print(f"RolloutISMCTS wins:              {wins[1]}/{N} = {wins[1]/N:.1%}")
     print(f"Execution time: {timedelta(seconds=elapsed)}")
-
-    """
-    For NetworkISMCTS:
-    NetworkISMCTS (untrained) wins: 41/100 = 41.0%
-    RolloutISMCTS wins:              59/100 = 59.0%
-    Execution time: 0:07:44.637141
-    """
     

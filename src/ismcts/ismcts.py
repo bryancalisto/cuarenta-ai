@@ -221,8 +221,7 @@ class ISMCTS:
         # backup only increments the CHILD of each edge. The usual `parent.N += 1`
         # looks harmless but double counts every intermediate node (once as a child,
         # once as a parent), which inflates its visit count and halves `W / N`
-        # because W is added only once per simulation. Measured before the fix:
-        # 300 simulations produced visit counts summing to ~595.
+        # because W is added only once per simulation.
         for parent, action in path:
             child = parent.children[action]
             child.N += 1

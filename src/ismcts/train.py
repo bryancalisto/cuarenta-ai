@@ -28,9 +28,9 @@ the same name PPO and ReBeL log (`iter` is still logged with the same value).
 
 WHY THERE ARE FOUR NUMBERS ON THE EVAL LINE
 -------------------------------------------
-Measured on this project, self-play silently destroyed a good net three times while
-the win rate vs the heuristic drifted down. Post-mortem, two metrics would have said
-"stop" immediately, so they are now printed every evaluation:
+Self-play can silently destroy a good net while the win rate vs the heuristic still
+looks flat, so two health metrics are printed every evaluation next to the two
+matches. They are what says "stop" before the win rate does:
 
   * `ref`      — win rate vs the REFERENCE checkpoint (the best net so far), both
                  sides searching. This is the AlphaZero gating criterion and the
@@ -43,16 +43,14 @@ the win rate vs the heuristic drifted down. Post-mortem, two metrics would have 
                  distribution, so this number can fall while the net gets stronger.
   * `edge`     — win rate of the net WITH search against the SAME net's raw policy
                  (argmax of the prior, no search). This is the "teacher edge": the
-                 whole point of expert iteration. Measured: 75% for a fresh
-                 bootstrap, collapsing to 57% after self-play had wrecked the value
-                 head — by which time the self-play targets are mostly
-                 self-distillation, so training has nothing to teach.
+                 whole point of expert iteration. Once it collapses, the self-play
+                 targets are mostly self-distillation, so training has nothing to
+                 teach.
   * `v_mse`    — held-out value MSE on a FIXED set of heuristic games (seeds
                  PROBE_SEEDS, never used for training). 1.0 means "worse than always
-                 predicting 0". It went 0.573 -> 0.769 on the run that degraded, and
-                 because the search VALUES LEAVES WITH THIS HEAD, that drift was the
-                 direct cause: the win rate fell 69% -> 43% while the raw policy's
-                 strength stayed flat at 41.7%.
+                 predicting 0". The search VALUES LEAVES WITH THIS HEAD, so drift here
+                 is not a side metric: it degrades the search directly, while the raw
+                 policy's strength can stay flat.
 
 Under the hood:
   * SELF-PLAY and EVAL use the same search settings (same n_iter, same leaf value),
@@ -95,9 +93,9 @@ dotenv.load_dotenv() # to load wandb token
 # ---------------------------------------------------------------------------
 
 N_ITERATIONS = 30             # outer loop iterations
-GAMES_PER_ITER = 40           # self-play games per iteration (more = better;
-                              # 20 games produced only ~2.6k decisions and 20 outcome
-                              # labels, which the value head could only memorise)
+GAMES_PER_ITER = 40           # self-play games per iteration (more = better; too few
+                              # games leave the value head so few distinct outcomes
+                              # that it can only memorise them)
 IMITATION_GAMES_PER_ITER = 5  # heuristic games mixed in for value calibration
 IMITATION_POLICY_WEIGHT = 0.0 # 0 = use them for the VALUE loss only
 N_SEARCH_ITER = 400           # ISMCTS sims per decision (self-play AND eval)
@@ -147,9 +145,8 @@ VALUE_TARGET = "win"
 VALUE_LAMBDA = 0.9            # RETURN mode only: TD(lambda) bootstrapping of the value
                               # target (1.0 = pure Monte-Carlo returns, the old behaviour).
                               # The MC target's spread is mostly captures in later rounds
-                              # that the state does not determine (std ~35 points measured),
-                              # and a head trained on it memorises the buffer instead
-                              # (in-sample R^2 0.77 vs held-out -0.27). See
+                              # that the state does not determine, and a head trained on it
+                              # memorises the buffer instead of the game. See
                               # selfplay.backfill_value_targets for the recursion.
 PROBE_EVERY = 1               # run the held-out head probe every N iterations. It is
                               # cheap (no search) and it is the earliest warning that the
@@ -158,9 +155,9 @@ PROBE_EVERY = 1               # run the held-out head probe every N iterations. 
 DROPOUT = 0.0                 # dropout on the shared embedding (0 = off). See network.py
                               # for the placement and why it is not inside the LSTM.
 VALUE_ANCHOR_WEIGHT = 2.0     # keep the value head near the starting checkpoint's
-                              # calibration (0 = off, 5+ = effectively frozen)
-                              # Measured: at 0.5 the anchor loss still grew 0.03 -> 0.31
-                              # over a run and the value MSE drifted 0.573 -> 0.769.
+                              # calibration (0 = off, 5+ = effectively frozen; too small
+                              # a value has no effect on it, which is the failure the anchor
+                              # exists for)
 CKPT_DIR = "checkpoints"
 # Fixed, never-trained-on seeds for the value/policy probe.
 PROBE_SEEDS = list(range(900_000, 900_020))
@@ -170,15 +167,12 @@ def _pick_device(requested: str = "auto") -> str:
     """
     Device selection.
 
-    Measured on an Apple Silicon machine (see the numbers below), the search does
-    ONE batch-1 network forward per evaluated node, and MPS per-op launch overhead
-    dominates at that size:
+    The search does ONE batch-1 network forward per evaluated node, and MPS per-op
+    launch overhead dominates at that size, so CPU is substantially FASTER than MPS
+    for this workload.
 
-        n_iter=200, CPU:  32 ms/search      n_iter=200, MPS: 251 ms/search
-        n_iter=400, CPU:  59 ms/search      n_iter=400, MPS: 370 ms/search
-
-    i.e. CPU was 3-8x FASTER. So "auto" prefers CUDA when present and CPU otherwise;
-    MPS is available with --device mps but usually a bad trade for this workload.
+    So "auto" prefers CUDA when present and CPU otherwise; MPS is available with
+    --device mps but usually a bad trade here.
     """
     if requested != "auto":
         return requested
@@ -243,9 +237,8 @@ def collect_imitation_games(n_games: int, base_seed: int,
     play like me". That estimator is exactly what the search relies on, so as soon as
     it drifts away from the value it had against other opponent types, the search's
     decisions get worse on those opponents. Mixing in teacher games keeps the head
-    calibrated on the wider distribution — measured on the 20-iteration run that
-    degraded: value MSE on heuristic games rose 0.573 -> 0.769 while the win rate
-    fell 69% -> 43%.
+    calibrated on the wider distribution, so self-play cannot quietly narrow what the
+    search knows about other opponent types.
 
     These samples are given policy weight 0 by default (IMITATION_POLICY_WEIGHT), so
     they do NOT drag the policy back toward the teacher; only the value loss uses them.
@@ -339,10 +332,9 @@ def train_one_epoch(net, loader, opt, device, anchor_net=None, anchor_weight=0.0
 
     Why anchor the value head at all? Because the search VALUES LEAVES WITH IT
     (`leaf_value_mode="net"`), so a value head that drifts becomes a search that
-    plays badly. Measured on this project: two short self-play iterations left the
-    policy as good as before (top-1 vs the heuristic 0.655 -> 0.645) but pushed the
-    held-out value MSE from 0.82 past 1.0 (worse than always predicting 0), and the
-    win rate fell 55% -> 37%. The anchor keeps the calibrated bootstrap value while
+    plays badly. The failure is one-sided: the policy can hold its strength while the
+    held-out value MSE goes past 1.0 ("worse than always predicting 0"), and nothing on
+    the win-rate line says why. The anchor keeps the calibrated bootstrap value while
     still letting the head adapt:
 
         anchor_weight = 0.0  -> train the value head freely (AlphaZero-style)
@@ -803,10 +795,9 @@ def _sd(net):
     return {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
 
 
-# Canonical league name -> the legacy name this trainer used to log as well. The
-# aliases are gone (see `_with_aliases`); the mapping is kept only so the call sites
-# still read as "canonical, and no legacy duplicate".
-# point at the SAME numbers; see `_with_aliases`.
+# Canonical league name -> the legacy name this trainer used to log as well. The aliases
+# are gone (see `_with_aliases`), so the mapping is empty and the call sites log one
+# number per member.
 LEGACY_ALIASES: dict = {}
 
 
@@ -824,7 +815,7 @@ def match_metrics(results: list[dict], prefix: str) -> dict:
     numbers (which is exactly why gating is calibrated against a mirror baseline, see
     `main`). `src/ppo/eval_harness.py` instead ROTATES the policy over the four seats
     and reports the same key names. The names therefore compare, but a mirror match is
-    ~50% in expectation for PPO and the measured seat edge here for ISMCTS. This
+    ~50% in expectation for PPO; here it is whatever the seat edge makes it. This
     convention is deliberately unchanged: changing it would silently change what the
     existing `vs_*` curves mean.
 
@@ -884,10 +875,8 @@ def head_probe_metrics(state_dict, cfg, desc: str = "eval head probe") -> dict:
     evaluated. That matters: the failure this measures (a value head that memorises the
     replay buffer and is then worse than useless on fresh games, while the search — which
     uses that head to value its leaves — quietly degrades) shows up in the held-out numbers
-    several iterations before it shows up in the win rate. MEASURED on a return-mode run:
-    at eval-every 5 the first alarm was at iteration 4, by which point the net had already
-    gone from 73% to 42% against the heuristic. The probe costs ~20 games of teacher play
-    and no search, i.e. seconds against a ~5 minute iteration.
+    several iterations before it shows up in the win rate. The probe costs ~20 games of
+    teacher play and no search, so it is cheap next to a full evaluation.
 
     Keys (all under `probe_*`): policy top-1 vs the teacher, value MSE/sign, mean |value|,
     and the moments of the value TARGET, from which `probe_value_r2` is computed — the
@@ -1125,8 +1114,7 @@ def main():
                         help="training epochs per iteration over the replay buffer. This "
                              "× --replay-iters is how many times each sample is replayed, "
                              "and THAT is what lets a 1.6M-parameter net memorise ~20k "
-                             "decisions (in-sample value R^2 0.77 while held-out R^2 was "
-                             "-0.27). Cut it before adding regularisation.")
+                             "decisions. Cut it before adding regularisation.")
     parser.add_argument("--replay-iters", type=int, default=REPLAY_ITERS,
                         help="how many iterations of data to keep in the replay buffer "
                              "(default %(default)s)")
@@ -1320,8 +1308,8 @@ def main():
 
     # ---- Value anchor ----
     # Frozen copy of the starting net. Its value output is the calibration reference
-    # for the anchor term in the loss; see train_one_epoch for the measurements that
-    # motivate it. Only created when we actually start from a checkpoint: anchoring to
+    # for the anchor term in the loss; see train_one_epoch for why the head is anchored
+    # at all. Only created when we actually start from a checkpoint: anchoring to
     # a random net's value would be anchoring to noise.
     anchor_net = None
     anchor_weight = args.value_anchor_weight
