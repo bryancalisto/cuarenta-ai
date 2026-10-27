@@ -263,8 +263,13 @@ The header carries the language picker and the one way back, as a single top-rig
 
 * **one back button for the whole app**, next to the picker (the picker keeps the corner), shown
   only where there is somewhere to go back to (`canGoBack`: create, join, lobby, game) and routing
-  through one `goBack()` — from a game it returns to the lobby, from anywhere else to the menu.
-  It replaced a per-screen button on each screen plus a `⬅️` column on the game screen that was
+  through one `goBack()`. From a game it goes to that game's lobby if the game is still running,
+  and to the menu once the game is finished or canceled (`leaveTable`): a finished game's lobby
+  has nothing left to start, so "back" there would be a dead end, and the finished game is
+  dropped from the session instead of being restored into that lobby. The label follows the
+  destination (`Return to lobby` / `Back to menu`), and the results dialog's button says
+  `Back to menu` for the same reason. From anywhere else the button goes to the menu. It replaced
+  a per-screen button on each screen plus a `⬅️` column on the game screen that was
   `hidden lg:flex`, which left a phone with no way out of a running game;
 * the label is hidden under 420px (the arrow and the `aria-label` carry it), the target is a
   ~2.4rem pill so it is tappable, and the arrow leans left on hover;

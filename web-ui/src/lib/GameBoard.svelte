@@ -7,12 +7,12 @@
 	import PlayingCard from './PlayingCard.svelte';
 	import { slotOffsetUnits, TableSlots } from './tableLayout';
 
-	let { game, currentUser, onPlayCard, onSelectCapture, onReturnToLobby } = $props<{
+	let { game, currentUser, onPlayCard, onSelectCapture, onLeaveTable } = $props<{
 		game: Game;
 		currentUser: { id: string; username: string } | null;
 		onPlayCard: (cardIndex: number) => void;
 		onSelectCapture: (captureIndices: number[]) => void;
-		onReturnToLobby: () => void;
+		onLeaveTable: () => void;
 	}>();
 
 	const suits = ['♦️', '♥️', '♠️', '♣️'];
@@ -670,7 +670,7 @@
 	</div>
 
 	{#if showGameEndDialog}
-		<GameResultsDialog game={view} {onReturnToLobby} />
+		<GameResultsDialog game={view} {onLeaveTable} />
 	{/if}
 
 	<!-- The table with the four players around it: you at the bottom, the others left, up and

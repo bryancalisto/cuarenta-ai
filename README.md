@@ -1,8 +1,15 @@
+# Cuarenta AI engine
+
+Read a **write-up** that includes an overall analysis of this project in my blog [https://einecomadreja.xyz/factory/cuarenta](https://einecomadreja.xyz/factory/cuarenta).
+
+
+Play **against the AI** in [https://cuarenta.einecomadreja.xyz](https://cuarenta.einecomadreja.xyz).
+
 ## Generating ONNX model
 ```bash
 python3 -m scripts.pth2onnx checkpoints-ppo/bootstrap.pt --out backend/models/ppo_bootstrap.onnx
 ```
-One ONNX call is one decision. The model takes the 208-wide observation shared with the
+The model takes the 208-wide observation shared with the
 ISMCTS pipeline (see `OBS_KEYS_ISMCTS` in `src/ppo/utils.py`), a `[64, 84]` matrix of
 candidate-action features plus a `[64]` legality mask, and the LSTM state
 (`lstm_h`/`lstm_c`); it returns `action_logits [64]`, a scalar `value`, and the next LSTM
@@ -36,8 +43,7 @@ cd backend && go test ./internal/game/ -v
 
 # Training code
 
-Three independent reinforcement-learning pipelines live in this repository, plus the
-imitation-learning stage they warm-start from:
+Three independent reinforcement-learning pipelines live in this repository, plus an imitation-learning stage I did some experiments with trying to obtain a warm-up-start checkpoint.
 
 | path | what it is | how to run it |
 |---|---|---|
@@ -75,14 +81,35 @@ better:
 python3 src/eval_ppo_only_vs_ismcts.py --games 50 --workers 4   # or: make eval_ppo_vs_ismcts
 python3 src/eval_ppo_only_vs_ismcts.py --n-iter 400 --ppo-checkpoint checkpoints-ppo/best.pt
 python3 src/eval_ppo_only_vs_ismcts.py --games 100 --sweep 1,8,32,128 --workers 4
+
+# Same match against the ReBeL agent (CFR search over a public belief state). The
+# ReBeL search is the cost, so the default is fewer games; --sweep varies its CFR budget.
+python3 src/eval_ppo_only_vs_rebel.py --games 20 --workers 4    # or: make eval_ppo_vs_rebel
+python3 src/eval_ppo_only_vs_rebel.py --games 20 --sweep 2,8,32,128 --workers 4
+
+# The two searchers against each other. Both sides search, so a game costs the two
+# searches together; --sweep varies ISMCTS's simulation budget.
+python3 src/eval_ismcts_vs_rebel.py --games 20 --workers 4 --value-target return \
+    --ismcts-checkpoint checkpoints-return/best.pt \
+    --rebel-checkpoint checkpoints-rebel-return/best.pt        # or: make eval_ismcts_vs_rebel
+
+
+# The exact commands used to get the final results are these:
+python3 src/ppo/bootstrap.py --games 200 --epochs 8 --dropout 0.1 \
+    --out checkpoints-ppo-return/bootstrap.pt
+
+# 1200 games x ~120 turns = 144k steps; eval ~ every 80 games (= 2 ISMCTS iters)
+./src/ppo/run_training.sh --steps 144000 --n-envs 8 --n-steps 512 --n-epochs 2 \
+    --lr 1e-3 --dropout 0.1 --eval-every 9600 --eval-games 60 \
+    --skip-bootstrap --save-dir checkpoints-ppo-return --run-name ppo-return
 ```
 
 The `--sweep` run is usually the most informative: at 1 simulation ISMCTS's search is a
 no-op, so that row compares the two *policies*, and each further row shows what search
 adds on top of the ISMCTS network.
 
-The Go backend serves players from `backend/models/ppo_bootstrap.onnx` — this policy
-exported (see [Generating ONNX model](#generating-onnx-model)) — located through
+The Go backend serves players from `backend/models/ppo_bootstrap.onnx` - this policy
+exported (see [Generating ONNX model](#generating-onnx-model)) - located through
 `ONNX_MODEL_PATH` in `backend/.env`. After training a better checkpoint, export it and
 regenerate the parity fixture, then point `ONNX_MODEL_PATH` at the new file.
 
@@ -91,14 +118,14 @@ regenerate the parity fixture, then point `ONNX_MODEL_PATH` at the new file.
 coin flip against the heuristic (~49%) while the same weights with the search win ~77%:
 
 ```
-AI_SEARCH_ITERATIONS=128    # in backend/.env; 0 = policy only (the old behaviour)
+AI_SEARCH_ITERATIONS=128    # in backend/.env; 0 = policy only
 AI_SEARCH_CPUCT=1.5
 ```
 
 Measured cost/benefit per AI turn, against the heuristic (100 games each, ±~5%): 0 sims
 49.0%, 32 sims 57.0%, 64 sims 59.0%, 128 sims 72.0%, **400 sims 77.0%**.
 
-The Go search is fast enough to afford the full budget — MEASURED in Go on the same export
+The Go search is fast enough to afford the full budget - MEASURED in Go on the same export
 (only the simulations that expand a node call the model):
 
 | budget | per AI turn |
@@ -148,14 +175,14 @@ Everything a run produces lands in `checkpoints-ppo/`: `bootstrap.pt`, periodic
 Metrics go to Weights & Biases (project `cuarenta-ai`, the same one the ISMCTS runs use)
 with the training step as the x-axis, under four families:
 
-* `train/*`  — policy/value loss, entropy, `approx_kl`, `clip_frac` (PPO health),
-* `selfplay/*` — win rate, game scores, episode returns, caídas, limpías and game length
+* `train/*`  - policy/value loss, entropy, `approx_kl`, `clip_frac` (PPO health),
+* `selfplay/*` - win rate, game scores, episode returns, caídas, limpías and game length
   of the games being generated,
-* `eval/*`   — win rate, scores, returns and bonus counts for every member of the
+* `eval/*`   - win rate, scores, returns and bonus counts for every member of the
   evaluation league: `reference` (best-so-far, used for gating), `heuristic` (the
   rule-based bot), `initial` (the policy the run started from), `prev_checkpoint` and
   `random`, each with a standard error,
-* `time/*`   — steps per second and where the seconds went.
+* `time/*`   - steps per second and where the seconds went.
 
 ## ISMCTS
 
@@ -164,6 +191,10 @@ with the training step as the x-axis, under four families:
 ./src/ismcts/run_training.sh --iters 2 --games-per-iter 2     # smoke test
 ./src/ismcts/run_training.sh --value-target return            # optimise the dense reward
 python3 src/ismcts/test_value_target.py                       # the two value targets
+
+# The exact commands used to get the final results are these:
+python3 src/ismcts/bootstrap.py --games 200 --epochs 8 --out checkpoints-return/bootstrap.pt
+./src/ismcts/run_training.sh --value-target return --value-lambda 0.9 --init-checkpoint checkpoints-return/bootstrap_return.pt --value-anchor-weight 2 --epochs-per-iter 2 --replay-iters 2 --dropout 0.1 --lr 1e-3 --eval-every 2 --probe-every 1 --members heuristic,reference,teacher_edge --ckpt-dir checkpoints-return
 ```
 
 AlphaZero-style: PUCT over sampled determinizations, the policy target is the search's
@@ -171,13 +202,13 @@ visit distribution, the value target is the game result. `--value-target` decide
 run actually optimises, and it changes BOTH the head and the search, because the head is
 the search's leaf evaluation:
 
-* `win` (default) — the head predicts ±1 game results and a terminal node is worth ±1;
+* `win` (default) - the head predicts ±1 game results and a terminal node is worth ±1;
   per-step rewards are ignored, so the search maximizes win probability and Q is symmetric
   around 0.
-* `return` — the head is linear and predicts the env's dense reward as a scaled
+* `return` - the head is linear and predicts the env's dense reward as a scaled
   return-to-go (`RETURN_VALUE_SCALE`); the search accumulates rewards down every simulation
   path, `+` for the root's team and `−` for the opponent's, and scores an unvisited child
-  as neutral rather than 0. It then chases caídas/captures instead of win probability —
+  as neutral rather than 0. It then chases caídas/captures instead of win probability -
   not the same objective, since the win bonus is only ~15% of a game's return.
 
 The mode is read off the net, so every evaluator searches with the semantics its checkpoint
@@ -188,7 +219,7 @@ the weights).
 **How to know the value head is failing before the win rate says so.** In return mode the
 search's Q *is* the value head: a capture is worth `1/30` of a unit while the leaf value is
 worth ~1, so a head that is confidently wrong destroys the search. `probe_value_r2` (logged
-every iteration, held-out games that are never trained on) is the number to watch —
+every iteration, held-out games that are never trained on) is the number to watch -
 0 means "as good as predicting the mean", negative means worse. Measured on a real run:
 in-sample R² 0.77 while held-out R² was **−0.27**, with the head's output magnitude growing
 70× (the search then followed noise), and the net fell from 73% to 42% against the heuristic
@@ -199,7 +230,7 @@ state. Knobs, in the order worth trying: `--epochs-per-iter`/`--replay-iters` (p
 `--value-anchor-weight 2`, and `--value-lambda` (below).
 
 `--value-lambda` (return mode; default 0.9, `1.0` = pure Monte-Carlo) trains the value head
-on TD(λ) returns — the net's own value bootstraps the tail instead of the realised future:
+on TD(λ) returns - the net's own value bootstraps the tail instead of the realised future:
 
     G_t = reward_t + (1 - λ)·V(s_{t+1}) + λ·G_{t+1},   G_T = 0
 
@@ -212,7 +243,7 @@ already-overfitted head *raised* it from 24.6 to 33.5 (λ=0.95) / 39.1 (λ=0.9),
 while the first is the smaller number. That is why the recipe starts from a return-mode
 bootstrap: warm-start V first, then bootstrap from it.
 
-`--members a,b,c` trims the evaluation league (`reference` is required — the gate reads it);
+`--members a,b,c` trims the evaluation league (`reference` is required - the gate reads it);
 the default set is `reference,heuristic,initial,random,teacher_edge`. Every member costs its
 own games, so it is the knob for cutting evaluation time.
 
@@ -224,11 +255,18 @@ python3 src/rebel/bootstrap.py         # warm start: imitate the heuristic -> bo
 ./src/rebel/run_training.sh --smoke    # seconds, no wandb
 python3 src/rebel/test_rebel.py        # CFR on Kuhn poker, belief plumbing, search, checkpoints
 python3 src/rebel/eval_rebel.py --checkpoint checkpoints-rebel/best.pt --games 20
+
+# The exact commands used to get the final results are these:
+python3 src/rebel/bootstrap.py --games 200 --epochs 8 --out checkpoints-rebel-return/bootstrap.pt
+./src/rebel/run_training.sh --iterations 30 --games 40 --epochs 2 --dropout 0.1 \
+    --eval-every 2 --eval-games 60 --league-games 30 --eval-workers 4 \
+    --init-checkpoint checkpoints-rebel-return/bootstrap.pt \
+    --save-dir checkpoints-rebel-return --run-name rebel-return
 ```
 
 ReBeL (Recursive Belief-based Learning) replaces MCTS with a CFR search over the **public
 belief state**: instead of averaging searches on sampled determinizations (which is
-unsound with hidden information), it solves the subgame as a game — the network values the
+unsound with hidden information), it solves the subgame as a game - the network values the
 leaves, and the belief, a weighted particle set over the hidden hands that is updated by
 Bayes whenever an action is observed, defines the chance node. Because the value must
 answer "how good is this given what everyone *could* be holding", the network reads the
@@ -247,12 +285,12 @@ All three pipelines (PPO, ISMCTS, ReBeL) log the same evaluation league under th
 names, and define every family against the same x-axis (`iteration`), so their curves can be
 overlaid on one chart in the Weights & Biases console (project `cuarenta-ai`).
 
-Members — the evaluated network plays a TEAM, the opponent plays the other:
+Members - the evaluated network plays a TEAM, the opponent plays the other:
 
 | member | opponent |
 |---|---|
 | `reference` | the gated best-so-far checkpoint |
-| `heuristic` | the rule-based bot (always evaluated) |
+| `heuristic` | the rule-based bot |
 | `initial` | the checkpoint the run started from |
 | `prev_checkpoint` | the snapshot before this evaluation |
 | `random` | uniform-random legal moves |
@@ -269,10 +307,10 @@ eval/<member>_return_against
 ```
 
 `return` is the environment's dense reward: `cards_captured + 2*caidas + 2*limpias +
-carton + WIN_BONUS*won` — the cartón points are paid too (see the
+carton + WIN_BONUS*won` - the cartón points are paid too (see the
 `REWARD` note in `src/ismcts/env.py`, which all three pipelines follow). `WIN_BONUS` is a
 single constant in each `env.py`; check that it matches before comparing return charts
-across pipelines. Members are skipped — with no keys logged at all — when their checkpoint
+across pipelines. Members are skipped - with no keys logged at all - when their checkpoint
 does not exist yet, rather than reporting stale numbers.
 
 Known differences to keep in mind when reading across pipelines:
@@ -284,5 +322,5 @@ Known differences to keep in mind when reading across pipelines:
   own policy; ISMCTS has it search as well. So `eval/reference` is a strict mirror in ISMCTS
   and "search vs a raw policy" in the other two.
 * **Win rates, scores, bonus counts and plies** are comparable across pipelines;
-  **`_return_*` is comparable only because all three now share one reward formula** — it is
+  **`_return_*` is comparable only because all three now share one reward formula** - it is
   not comparable with runs from before that change.

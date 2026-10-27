@@ -3,9 +3,9 @@
 	import type { Game } from './api';
 	import { t } from './i18n.svelte';
 
-	let { game, onReturnToLobby } = $props<{
+	let { game, onLeaveTable } = $props<{
 		game: Game;
-		onReturnToLobby: () => void;
+		onLeaveTable: () => void;
 	}>();
 
 	let duration = $state('');
@@ -54,8 +54,9 @@
 			</div>
 		</div>
 
-		<button class="return-button" onclick={onReturnToLobby}>
-			{t('Return to lobby')}
+		<!-- The game is over, so there is no lobby to return to: the button leaves the table. -->
+		<button class="return-button" onclick={onLeaveTable}>
+			{t('Back to menu')}
 		</button>
 	</div>
 </div>

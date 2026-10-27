@@ -203,6 +203,14 @@
 
 		try {
 			const game = await getGame(token, gameId);
+			if (game.status === 'finished' || game.status === 'canceled') {
+				// The stored session pointed at a game that is over: keep the player in the menu
+				// rather than in a lobby with nothing left to start.
+				activeGame = null;
+				pendingGameId = '';
+				persistSession();
+				return;
+			}
 			activeGame = game;
 			screen = 'lobby';
 			pendingGameId = game.id;
@@ -458,9 +466,29 @@
 		sendGameAction(lastCardPlayed, captureIndices);
 	}
 
-	function returnToLobby() {
-		screen = 'lobby';
+	// A finished (or canceled) game is OVER, and its lobby has nothing left to do: there is no
+	// game to start, no seats to fill and nothing to cancel, so it is a dead end. Leaving the
+	// table therefore lands on the menu, where a new game can be created or joined, and the
+	// finished game is dropped from the session instead of being restored into a lobby later.
+	const gameOver = $derived(
+		activeGame?.status === 'finished' || activeGame?.status === 'canceled'
+	);
+
+	function leaveTable() {
+		if (!gameOver) {
+			screen = 'lobby';
+			mainMessage = '';
+			return;
+		}
+
+		closeSocket();
+		activeGame = null;
+		pendingGameId = '';
 		mainMessage = '';
+		socketError = '';
+		screen = 'menu';
+		persistSession();
+		void loadMyGames();
 	}
 
 	// ONE back button for the whole app, in the header next to the language dropdown, instead of
@@ -469,13 +497,15 @@
 	const canGoBack = $derived(
 		screen === 'create' || screen === 'join' || screen === 'lobby' || screen === 'game'
 	);
-	// Reuses the results dialog's wording for the game screen: the same trip back, already
-	// translated, and no near-duplicate key to keep in step.
-	const backLabel = $derived(screen === 'game' ? t('Return to lobby') : t('Back to menu'));
+	// The label names where the button actually goes: a running game has a lobby to return to, a
+	// finished one does not.
+	const backLabel = $derived(
+		screen === 'game' && !gameOver ? t('Return to lobby') : t('Back to menu')
+	);
 
 	function goBack() {
 		if (screen === 'game') {
-			returnToLobby();
+			leaveTable();
 			return;
 		}
 		// Leaving a screen also drops the notice it was showing: a message about the game you just
@@ -977,7 +1007,7 @@
 				     content can size this column wider than the screen. -->
 				<div class="min-w-0 rounded-xl sm:rounded-2xl lg:rounded-[1.75rem] border border-white/10 bg-[var(--card-bg)] p-4 sm:p-5 md:p-6 shadow-2xl shadow-black/30 backdrop-blur-xl">
 					{#if activeGame}
-						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} onReturnToLobby={returnToLobby} />
+						<GameBoard game={activeGame} {currentUser} onPlayCard={sendGameAction} onSelectCapture={sendCaptureSelection} onLeaveTable={leaveTable} />
 					{/if}
 					{#if mainMessage}
 						<div role="status" aria-live="polite" class="mt-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">

@@ -256,6 +256,7 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
     caidas = [0, 0]
     limpias = [0, 0]
     captures = [0, 0]
+    carton = [0, 0]
     reward_sum = [0.0, 0.0]
     plies = 0
     started = time.perf_counter()
@@ -300,6 +301,8 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
             caidas[team] += 1
         elif has_reason(info["reasons"], PointsReasons.LIMPIA):
             limpias[team] += 1
+        # The cartón is paid to the acting team on the move that ends a deal.
+        carton[team] += int(info.get("carton_points") or 0)
         plies += 1
 
     winner = env.state.winner
@@ -308,18 +311,18 @@ def play_game(task: dict, setup: dict, worker: PPOWorker, ctx: dict) -> dict:
     # Self-check of the whole harness: the env's rewards are dense (+1 per captured card,
     # +2 caída, +2 limpia, the cartón points, WIN_BONUS for the win — see the REWARD note
     # in src/ismcts/env.py), so they must decompose EXACTLY as
-    # `return == captures + 2*caidas + 2*limpias + WIN_BONUS*won` for both teams. If this
-    # ever fails, the numbers below are not measuring what they claim to.
+    # `return == captures + 2*caidas + 2*limpias + carton + WIN_BONUS*won` for both teams.
+    # If this ever fails, the numbers below are not measuring what they claim to.
     for team in (0, 1):
         won = 1 if winner == team else 0
         expected = (captures[team] + 2 * caidas[team] + 2 * limpias[team]
-                    + WIN_BONUS * won)
+                    + carton[team] + WIN_BONUS * won)
         if abs(reward_sum[team] - expected) > 1e-6:
             raise AssertionError(
                 f"game {game}: team {team} accumulated return {reward_sum[team]} but "
-                f"captures + 2*caidas + 2*limpias + WIN_BONUS*won = {expected} "
+                f"captures + 2*caidas + 2*limpias + carton + WIN_BONUS*won = {expected} "
                 f"(captures={captures[team]}, caidas={caidas[team]}, "
-                f"limpias={limpias[team]}, won={won})")
+                f"limpias={limpias[team]}, carton={carton[team]}, won={won})")
 
     return {
         "game": task["game"],
