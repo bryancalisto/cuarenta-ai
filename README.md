@@ -1,4 +1,4 @@
-# Cuarenta AI engine
+# 🃏 Cuarenta AI
 
 <br>
 <p align="center">
