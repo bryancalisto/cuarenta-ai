@@ -608,7 +608,7 @@ def _load_net(state_dict, value_target="win", dropout: float = 0.0):
     of setting, and only matters where the net acts in train mode (self-play workers):
     evaluation builds the net in eval mode, where dropout is the identity.
     """
-    net = CuarentaNet(value_target=value_target, dropout=dropout)
+    net = CuarentaNet(value_target=value_target, dropout=dropout, hidden=128)
     net.load_state_dict(state_dict)
     net.eval()
     return net
@@ -1393,7 +1393,8 @@ def main():
         for group in ("train", "buffer", "selfplay", "eval", "time"):
             wandb.define_metric(f"{group}/*", step_metric="iteration")
 
-    net = CuarentaNet(value_target=VALUE_TARGET, dropout=args.dropout).to(DEVICE)
+    # net = CuarentaNet(value_target=VALUE_TARGET, dropout=args.dropout).to(DEVICE)
+    net = CuarentaNet(value_target=VALUE_TARGET, dropout=args.dropout, hidden=128).to(DEVICE)
 
     if args.init_checkpoint:
         # Loads with a clear error if the checkpoint predates the history fixes.
