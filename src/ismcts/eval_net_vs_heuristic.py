@@ -8,6 +8,13 @@ HeuristicAgent, the search is greedy with no Dirichlet noise, and the per-game R
 number EXACTLY for the same snapshot and game count — which is what makes it useful for
 answering "why do my two numbers disagree?".
 
+The report carries the same per-game fields as the trainer's `eval/heuristic_*` keys —
+win rate, score, RETURN (the dense env reward, per team), caídas and limpias, and game
+length — so a one-off measurement can be read next to (or quoted against) the training
+curves. The counters are the trainer's own: +1 per captured card, +2 caída, +2 limpia, the
+cartón points and the win bonus, and every game asserts that the return decomposes into
+exactly those terms before it is counted.
+
 The value target must be right (`--value-target`, else the checkpoint's sidecar): in return
 mode the search accumulates the dense reward, in win mode it ignores it and backs up ±1 game
 results.
@@ -56,11 +63,12 @@ def play_one(args) -> dict:
     import torch
     torch.set_num_threads(1)
 
-    from env import CuarentaEnv, TEAMS
+    from env import WIN_BONUS, CuarentaEnv, TEAMS
     from heuristic_agent import HeuristicAgent
     from history import HistoryTracker
     from network import CuarentaNet, VALUE_TARGETS
     from network_ismcts_1 import NetworkISMCTS
+    from utils import PointsReasons, has_reason
 
     env = CuarentaEnv(seed=seed)
     env.reset(seed=seed)
@@ -89,6 +97,15 @@ def play_one(args) -> dict:
     )
     heuristic = HeuristicAgent(seed=seed * 2 + 2)
 
+    # Per-team bookkeeping, the same one the trainer's own `_play_match` keeps (see
+    # `train.py: match_metrics`), so these numbers are comparable with the `eval/*` curves
+    # the training runs log. The cartón and the captured-card count are only needed for the
+    # identity check below: the return already contains them.
+    returns = [0.0, 0.0]
+    caidas = [0, 0]
+    limpias = [0, 0]
+    captures = [0, 0]
+    carton = [0, 0]
     steps = 0
     while not env.state.done:
         p = env.state.current_player
@@ -119,13 +136,52 @@ def play_one(args) -> dict:
             a = int(np.argmax(priors))
 
         tracker.record(p, obs, a)
-        env.step(a)
+
+        # `legal[a]` IS the action the env applies, so the capture count is exact; the
+        # capture piles cannot be read back after a cartón clears them.
+        played = legal[a]
+        _, reward, _, _, info = env.step(a)
+
+        team = TEAMS[p]
+        returns[team] += float(reward)
+        if played.capture:
+            captures[team] += len(played.capture)
+        # caída and limpia are mutually exclusive in the env's own reward (if/elif), so
+        # mirror that here to keep the identity below exact.
+        reasons = info.get("reasons") or []
+        if has_reason(reasons, PointsReasons.CAIDA):
+            caidas[team] += 1
+        elif has_reason(reasons, PointsReasons.LIMPIA):
+            limpias[team] += 1
+        # The cartón is paid to the acting team on the move that ends a deal.
+        carton[team] += int(info.get("carton_points") or 0)
         steps += 1
+
+    # The env's reward is dense and fully explained by the counters above, so this is a
+    # guard that the harness counts what it reports: +1 per captured card, +2 caída,
+    # +2 limpia, the cartón points, WIN_BONUS for the win.
+    for team in (0, 1):
+        won = 1 if env.state.winner == team else 0
+        expected = (captures[team] + 2 * caidas[team] + 2 * limpias[team]
+                    + carton[team] + WIN_BONUS * won)
+        if abs(returns[team] - expected) > 1e-6:
+            raise AssertionError(
+                f"seed {seed}: team {team} accumulated return {returns[team]} but "
+                f"captures + 2*caidas + 2*limpias + carton + WIN_BONUS*won = {expected} "
+                f"(captures={captures[team]}, caidas={caidas[team]}, "
+                f"limpias={limpias[team]}, carton={carton[team]}, won={won})")
 
     return {
         "winner": env.state.winner,
         "score_team0": env.state.scores[0],
         "score_team1": env.state.scores[1],
+        # `_for` is the checkpoint's team (team 0), like every other harness here.
+        "return_for": returns[0],
+        "return_against": returns[1],
+        "caidas_for": caidas[0],
+        "caidas_against": caidas[1],
+        "limpias_for": limpias[0],
+        "limpias_against": limpias[1],
         "steps": steps,
     }
 
@@ -196,6 +252,9 @@ def main():
     score_t1 = np.mean([r["score_team1"] for r in results])
     steps_avg = np.mean([r["steps"] for r in results])
 
+    def m(key: str) -> float:
+        return float(np.mean([r[key] for r in results]))
+
     # Standard error of a win rate: sqrt(p(1-p)/n). At 30 games that is roughly ±9%, so
     # a single small evaluation cannot separate two close nets.
     p = wins_t0 / max(args.n_games, 1)
@@ -210,8 +269,15 @@ def main():
     print(f"Net (team 0) wins:       {wins_t0}/{args.n_games} = {p:.1%} (±{stderr:.1%} se)")
     print(f"Opponent (team 1) wins:  {wins_t1}/{args.n_games} = {wins_t1/args.n_games:.1%}")
     print(f"Avg score: net {score_t0:.2f} - opponent {score_t1:.2f}")
+    # The per-game numbers the cross-model tables use, from the net's point of view
+    # (`for` = team 0, `against` = the opponent). Same definitions as the trainer's
+    # `eval/*_return_*`, `_caidas_*` and `_limpias_*` keys.
+    print(f"Avg return: net {m('return_for'):.2f} - opponent {m('return_against'):.2f}"
+          f"   (dense env reward)")
+    print(f"Avg caídas: net {m('caidas_for'):.2f} - opponent {m('caidas_against'):.2f}")
+    print(f"Avg limpias: net {m('limpias_for'):.2f} - opponent {m('limpias_against'):.2f}")
     print(f"Avg game length: {steps_avg:.1f} plays")
-    print(f"Time: {timedelta(seconds=elapsed)}")
+    print(f"Time: {timedelta(seconds=elapsed)} ({elapsed / max(args.n_games, 1):.2f} s/game)")
     print("=" * 60)
 
 

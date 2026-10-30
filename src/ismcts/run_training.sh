@@ -33,6 +33,7 @@ GAMES="${GAMES:-2000}"
 BOOTSTRAP_EPOCHS="${BOOTSTRAP_EPOCHS:-12}"
 ITERS="${ITERS:-30}"
 GAMES_PER_ITER="${GAMES_PER_ITER:-40}"
+GAMES_WORKERS="${GAMES_WORKERS:-0}"      # 0 = one process per CPU
 IMITATION_GAMES="${IMITATION_GAMES:-5}"
 N_SEARCH_ITER="${N_SEARCH_ITER:-400}"
 EVAL_GAMES="${EVAL_GAMES:-60}"
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --bootstrap-epochs) BOOTSTRAP_EPOCHS="$2"; shift 2 ;;
         --iters)            ITERS="$2"; shift 2 ;;
         --games-per-iter)   GAMES_PER_ITER="$2"; shift 2 ;;
+        --games-workers)    GAMES_WORKERS="$2"; shift 2 ;;
         --imitation-games)  IMITATION_GAMES="$2"; shift 2 ;;
         --n-search-iter)    N_SEARCH_ITER="$2"; shift 2 ;;
         --eval-games)       EVAL_GAMES="$2"; shift 2 ;;
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --bootstrap-epochs N     (default: $BOOTSTRAP_EPOCHS)"
             echo "  --iters N                self-play iterations (default: $ITERS)"
             echo "  --games-per-iter N       (default: $GAMES_PER_ITER)"
+            echo "  --games-workers N        processes for the self-play games, 0 = one"
+            echo "                           per CPU, 1 = serial (default: $GAMES_WORKERS)"
             echo "  --imitation-games N      teacher games mixed in (default: $IMITATION_GAMES)"
             echo "  --n-search-iter N        ISMCTS sims per move (default: $N_SEARCH_ITER)"
             echo "  --eval-games N           games per match (default: $EVAL_GAMES)"
@@ -80,7 +84,8 @@ echo "Training config:"
 echo "  bootstrap ckpt:   $BOOTSTRAP_CKPT"
 echo "  imitation games:  $GAMES (epochs $BOOTSTRAP_EPOCHS)"
 echo "  iterations:       $ITERS"
-echo "  games/iter:       $GAMES_PER_ITER self-play + $IMITATION_GAMES teacher"
+echo "  games/iter:       $GAMES_PER_ITER self-play (over $GAMES_WORKERS process(es),"
+echo "                    0 = one per CPU) + $IMITATION_GAMES teacher"
 echo "  n_search_iter:    $N_SEARCH_ITER"
 echo "  eval games:       $EVAL_GAMES per match"
 echo "  value target:     $VALUE_TARGET"
@@ -109,6 +114,7 @@ uv run src/ismcts/train.py \
     --init-checkpoint "$BOOTSTRAP_CKPT" \
     --iterations "$ITERS" \
     --games-per-iter "$GAMES_PER_ITER" \
+    --games-workers "$GAMES_WORKERS" \
     --imitation-games "$IMITATION_GAMES" \
     --n-search-iter "$N_SEARCH_ITER" \
     --value-target "$VALUE_TARGET" \

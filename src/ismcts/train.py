@@ -61,6 +61,7 @@ Under the hood:
 
 from __future__ import annotations
 
+import atexit
 import datetime
 import json
 
@@ -98,6 +99,7 @@ GAMES_PER_ITER = 40           # self-play games per iteration (more = better; to
                               # that it can only memorise them)
 IMITATION_GAMES_PER_ITER = 5  # heuristic games mixed in for value calibration
 IMITATION_POLICY_WEIGHT = 0.0 # 0 = use them for the VALUE loss only
+SELFPLAY_WORKERS = 0          # processes for the self-play games (0 = one per CPU, 1 = serial)
 N_SEARCH_ITER = 400           # ISMCTS sims per decision (self-play AND eval)
 DIRICHLET_EPS = 0.10          # root exploration noise (it lands in the target too)
 TEMPERATURE_CUTOFF = 24       # plies with tau=1 before switching to greedy play
@@ -190,32 +192,160 @@ DEVICE = _pick_device()
 # Data collection
 # ---------------------------------------------------------------------------
 
-def collect_games(net: CuarentaNet, n_games: int, base_seed: int):
+# Config every self-play worker needs. The search parameters are module constants (a
+# spawned worker only sees module defaults, never the parent's CLI), so the parent's
+# resolved values travel with the job as one small dict.
+def _selfplay_cfg() -> dict:
+    return {
+        "n_iter": N_SEARCH_ITER,
+        "max_history_len": T_MAX,
+        "temperature": 1.0,
+        "temperature_cutoff": TEMPERATURE_CUTOFF,
+        "dirichlet_eps": DIRICHLET_EPS,
+        "leaf_value_mode": LEAF_VALUE_MODE,
+        "max_rollout_len": MAX_ROLLOUT_LEN,
+        "value_lambda": VALUE_LAMBDA,
+    }
+
+
+def _selfplay_kwargs(seed: int, cfg: dict, device: str) -> dict:
+    """The keyword arguments `play_one_game` needs, from the cfg above."""
+    return dict(
+        n_iter=cfg["n_iter"],
+        max_history_len=cfg["max_history_len"],
+        seed=seed,
+        temperature=cfg["temperature"],
+        temperature_cutoff=cfg["temperature_cutoff"],
+        dirichlet_eps=cfg["dirichlet_eps"],
+        leaf_value_mode=cfg["leaf_value_mode"],
+        max_rollout_len=cfg["max_rollout_len"],
+        device=device,
+        value_lambda=cfg["value_lambda"],
+    )
+
+
+# The pool, the file its workers reload weights from, and the run's search config: built
+# once per process (creating it per iteration would pay torch's import in every child on
+# every iteration -- seconds against a ~10 s batch of games).
+_SELFPLAY: dict = {}
+atexit.register(lambda: close_selfplay_pool())
+
+
+def _selfplay_worker_init(weights_path: str, cfg: dict, training: bool,
+                          value_target: str, dropout: float) -> None:
+    """
+    Prepare a worker: one torch thread, and the settings a net needs that are NOT in its
+    weights.
+
+    `training` mirrors the parent's module mode, because that decides whether dropout
+    fires; a worker that quietly evaluated would generate different games from the
+    trainer's own (with `--dropout > 0`) while looking perfectly normal. `value_target`
+    and `dropout` are the other two settings that live outside the state_dict.
+    """
+    import torch as _torch
+
+    _torch.set_num_threads(1)
+    _SELFPLAY.update(weights_path=weights_path, cfg=cfg, training=training,
+                     value_target=value_target, dropout=dropout,
+                     net=None, weights_mtime=None)
+
+
+def _selfplay_worker(seed: int):
+    """
+    One self-play game in a worker process.
+
+    The action sampler in `play_one_game` draws from numpy's GLOBAL generator, and the
+    search's root noise from the same one, so the per-game seed is installed here: each
+    game then depends only on its seed, which is what makes a batch independent of how
+    many workers played it, or of the order in which they finished.
+
+    The weights are reloaded when the parent has written a new file, not shipped with
+    every task: one 6 MB read per worker per iteration beats 6 MB through the pipe per
+    game. Every worker starts on CPU, so a CUDA trainer still collects on the CPU -- the
+    search is Python-bound there anyway, and the state dict crosses as CPU tensors.
+    """
+    np.random.seed(seed % (2 ** 32))
+    mtime = os.stat(_SELFPLAY["weights_path"]).st_mtime_ns
+    if _SELFPLAY["net"] is None or _SELFPLAY["weights_mtime"] != mtime:
+        state = torch.load(_SELFPLAY["weights_path"], map_location="cpu", weights_only=True)
+        net = _load_net(state, _SELFPLAY["value_target"], dropout=_SELFPLAY["dropout"])
+        net.train(_SELFPLAY["training"])
+        _SELFPLAY.update(net=net, weights_mtime=mtime)
+    return play_one_game(_SELFPLAY["net"], **_selfplay_kwargs(seed, _SELFPLAY["cfg"], "cpu"))
+
+
+def _ensure_selfplay_pool(workers: int, state_dict, cfg: dict, training: bool,
+                          value_target: str, dropout: float):
+    """Publish `state_dict` for the workers and return the (created-once) pool."""
+    import tempfile
+
+    if _SELFPLAY.get("pool") is None:
+        from multiprocessing import get_context
+
+        # `spawn`, not `fork`: the workers import torch and build a net, which is exactly
+        # the combination fork is known to break.
+        ctx = get_context("spawn")
+        path = os.path.join(tempfile.gettempdir(), f"cuarenta_selfplay_{os.getpid()}.pt")
+        _SELFPLAY.update(
+            path=path,
+            pool=ctx.Pool(
+                processes=workers,
+                initializer=_selfplay_worker_init,
+                initargs=(path, cfg, training, value_target, dropout),
+            ),
+        )
+    # Written on every call (the weights change every iteration); the workers notice the
+    # new mtime on their next game and reload.
+    torch.save(state_dict, _SELFPLAY["path"])
+    return _SELFPLAY["pool"]
+
+
+def close_selfplay_pool() -> None:
+    """Shut the workers down and delete the weights file they were reading."""
+    pool = _SELFPLAY.pop("pool", None)
+    path = _SELFPLAY.pop("path", None)
+    if pool is not None:
+        pool.terminate()
+        pool.join()
+    if path and os.path.exists(path):
+        os.remove(path)
+
+
+def collect_games(net: CuarentaNet, n_games: int, base_seed: int, workers: int = 1):
     """
     Self-play games with the current net at all four seats.
 
     Returns (decisions, metrics) where `metrics` averages the per-game returns,
     scores, plies and reward components (caídas/limpias) over the batch of games —
     i.e. how well the agent is actually doing, in reward terms, this iteration.
+
+    The search is pure-Python work around batch-1 network forwards, so it holds the GIL:
+    extra THREADS would only interleave, never run in parallel. Processes do, which is
+    what `workers > 1` uses — one game per worker, over a pool that lives for the whole
+    run and reloads the weights from a file the parent rewrites each iteration. Games are
+    seeded individually (`base_seed + i`), so the batch is the same whatever the worker
+    count: `workers=1` is the serial path, not a different experiment. With
+    `--dropout > 0` the dropout masks still come from each process's own torch RNG, so a
+    run is reproducible up to that noise.
     """
-    all_decisions: list[Decision] = []
-    game_results: list[GameResult] = []
-    for i in tqdm(range(n_games), desc="self-play games", leave=False):
-        decisions, result = play_one_game(
-            net,
-            n_iter=N_SEARCH_ITER,
-            max_history_len=T_MAX,
-            seed=base_seed + i,
-            temperature=1.0,
-            temperature_cutoff=TEMPERATURE_CUTOFF,
-            dirichlet_eps=DIRICHLET_EPS,
-            leaf_value_mode=LEAF_VALUE_MODE,
-            max_rollout_len=MAX_ROLLOUT_LEN,
-            device=DEVICE,
-            value_lambda=VALUE_LAMBDA,
-        )
-        all_decisions.extend(decisions)
-        game_results.append(result)
+    cfg = _selfplay_cfg()
+    if workers > 1 and n_games > 1:
+        pool = _ensure_selfplay_pool(min(workers, n_games), _sd(net), cfg, net.training,
+                                     net.value_target, net.dropout_p)
+        games = list(tqdm(
+            pool.imap(_selfplay_worker, [base_seed + i for i in range(n_games)],
+                      chunksize=1),
+            total=n_games, desc="self-play games", leave=False))
+    else:
+        games = []
+        for i in tqdm(range(n_games), desc="self-play games", leave=False):
+            # Same per-game seeding as the workers, so the two paths generate the same
+            # games for the same seeds.
+            np.random.seed((base_seed + i) % (2 ** 32))
+            games.append(play_one_game(net, **_selfplay_kwargs(base_seed + i, cfg, DEVICE)))
+
+    all_decisions: list[Decision] = [d for decisions, _ in games for d in decisions]
+    game_results: list[GameResult] = [result for _, result in games]
     return all_decisions, mean_game_metrics(game_results, prefix="selfplay")
 
 
@@ -468,15 +598,17 @@ def _make_search(env, net, tracker, seed, *, n_iter, leaf_value_mode, max_rollou
     )
 
 
-def _load_net(state_dict, value_target="win"):
+def _load_net(state_dict, value_target="win", dropout: float = 0.0):
     """
     Build a net and load `state_dict` into it.
 
     `value_target` picks the head's activation, which is NOT part of the state_dict, so
     every evaluation worker has to be told it (they only see module defaults, never the
-    parent's CLI values — that is what `search_cfg` is for).
+    parent's CLI values — that is what `search_cfg` is for). `dropout` is the same kind
+    of setting, and only matters where the net acts in train mode (self-play workers):
+    evaluation builds the net in eval mode, where dropout is the identity.
     """
-    net = CuarentaNet(value_target=value_target)
+    net = CuarentaNet(value_target=value_target, dropout=dropout)
     net.load_state_dict(state_dict)
     net.eval()
     return net
@@ -1098,6 +1230,11 @@ def main():
                              "incompatible and will fail to load.")
     parser.add_argument("--iterations", type=int, default=N_ITERATIONS)
     parser.add_argument("--games-per-iter", type=int, default=GAMES_PER_ITER)
+    parser.add_argument("--games-workers", type=int, default=SELFPLAY_WORKERS,
+                        help="processes that play the self-play games (0 = one per CPU, "
+                             "capped at --games-per-iter; 1 = serial). The games are "
+                             "seeded individually, so this changes the speed, not the "
+                             "batch")
     parser.add_argument("--imitation-games", type=int, default=IMITATION_GAMES_PER_ITER,
                         help="Heuristic games per iteration, mixed in for value "
                              "calibration (0 disables)")
@@ -1409,6 +1546,17 @@ def main():
     start = time.perf_counter()
     decisions_buffer: list[Decision] = []
 
+    # One game per process: the search is Python work around batch-1 forwards, so extra
+    # threads would take turns rather than run in parallel.
+    # Auto leaves a little headroom rather than taking every core: a worker carries a
+    # torch runtime, and a training run is not the only thing a laptop is doing.
+    auto_workers = min(os.cpu_count() or 1, 8)
+    games_workers = args.games_workers or min(auto_workers, max(1, args.games_per_iter))
+    games_workers = max(1, min(games_workers, max(1, args.games_per_iter)))
+    print(f"Self-play workers: {games_workers}"
+          + ("  (serial; pass --games-workers N for N processes)" if games_workers == 1
+             else f"  ({args.games_per_iter} games split over {games_workers} processes)"))
+
     for iteration in range(args.iterations):
         print(f"\n=== Iteration {iteration} ===")
         t_iter = time.perf_counter()
@@ -1416,7 +1564,8 @@ def main():
         # 1. Self-play with the current net
         t0 = time.perf_counter()
         decisions, sp_metrics = collect_games(net, args.games_per_iter,
-                                              base_seed=iteration * 1000)
+                                              base_seed=iteration * 1000,
+                                              workers=games_workers)
         t_collect = time.perf_counter() - t0
         print(f"  collected {len(decisions)} self-play decisions "
               f"in {timedelta(seconds=t_collect)}")
