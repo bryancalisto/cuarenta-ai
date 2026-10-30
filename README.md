@@ -1,5 +1,6 @@
 # Cuarenta AI engine
 
+<br>
 <p align="center">
   <img src="images/thumbnail.png" alt="The deployed game: playing cuarenta against the engine in the browser" style="width: 60%;" />
 </p>
