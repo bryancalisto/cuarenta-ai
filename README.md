@@ -7,7 +7,7 @@
 
 <br>
 
-Here are some experiments I ran trying to build the ***ultimate Cuarenta AI engine*** 🤔. The best model I came up with is an Information Set Monte Carlo Tree Search + policy / value networks (AlphaGo style) engine. I also built ReBel and Searchless PPO versions, but they didn't do as good as the ISMCT + net model.
+Here are some experiments I've run trying to build the ***ultimate Cuarenta AI engine*** 🤔. The best model I came up with is an Information Set Monte Carlo Tree Search + policy / value networks (AlphaGo style) engine. I also built ReBel and Searchless PPO versions, but they didn't do as good as the ISMCTS + net model.
 
 Read a **write-up** that includes an overall analysis of this project in my website [https://einecomadreja.xyz/factory/cuarenta-ai](https://einecomadreja.xyz/factory/cuarenta-ai).
 
