@@ -7,7 +7,7 @@ Play **against the AI** in [https://cuarenta.einecomadreja.xyz](https://cuarenta
 
 ## Generating ONNX model
 ```bash
-python3 -m scripts.pth2onnx checkpoints-ppo/bootstrap.pt --out backend/models/ppo_bootstrap.onnx
+uv run -m scripts.pth2onnx checkpoints-ppo/bootstrap.pt --out backend/models/ppo_bootstrap.onnx
 ```
 The model takes the 208-wide observation shared with the
 ISMCTS pipeline (see `OBS_KEYS_ISMCTS` in `src/ppo/utils.py`), a `[64, 84]` matrix of
@@ -24,7 +24,7 @@ replays them through ONNX and compares the two, refusing to run if the fixture a
 exported model came from different checkpoints:
 
 ```bash
-python3 scripts/onnx_parity_fixture.py                 # after every re-export
+uv run scripts/onnx_parity_fixture.py                 # after every re-export
 cd backend && go test ./internal/inference/ -run TestONNXMatchesPyTorchPolicy -v
 ```
 
@@ -37,7 +37,7 @@ ordered hand would otherwise leave every Go test green while the model received 
 well-formed but wrong vector.
 
 ```bash
-python3 scripts/state_parity_fixture.py                # after changing either game core
+uv run scripts/state_parity_fixture.py                # after changing either game core
 cd backend && go test ./internal/game/ -v
 ```
 
@@ -48,7 +48,7 @@ Three independent reinforcement-learning pipelines live in this repository, plus
 | path | what it is | how to run it |
 |---|---|---|
 | `src/imitation_learning/` | DAgger imitation learning from human play (Tkinter UI, imports the game core from `src/ppo/`) | `make train_with_imitation` |
-| `src/ppo/` | **self-play PPO**, no search | `python3 src/ppo/train.py --help`, or `src/ppo/run_training.sh` |
+| `src/ppo/` | **self-play PPO**, no search | `uv run src/ppo/train.py --help`, or `src/ppo/run_training.sh` |
 | `src/ismcts/` | AlphaZero-style **information-set MCTS + network** | `./src/ismcts/run_training.sh` |
 | `src/rebel/` | **ReBeL**: CFR search over a public belief state, belief-conditioned network | `./src/rebel/run_training.sh` |
 
@@ -64,9 +64,9 @@ pipeline in `src/imitation_learning/` imports them from there.
 ./src/ppo/run_training.sh --smoke    # seconds, no wandb
 
 # or step by step
-python3 src/ppo/bootstrap.py --games 2000 --epochs 8   # -> checkpoints-ppo/bootstrap.pt
-python3 src/ppo/train.py --use-lstm true --n-envs 10 --steps 2_000_000
-python3 src/ppo/test_ppo.py                            # obs layout, rewards, GAE, LSTM replay, eval
+uv run src/ppo/bootstrap.py --games 2000 --epochs 8   # -> checkpoints-ppo/bootstrap.pt
+uv run src/ppo/train.py --use-lstm true --n-envs 10 --steps 2_000_000
+uv run src/ppo/test_ppo.py                            # obs layout, rewards, GAE, LSTM replay, eval
 ```
 
 PPO uses the same representation as the ISMCTS pipeline: a 208-dim observation plus
@@ -78,24 +78,24 @@ other, which is the only comparison that says anything about which one actually 
 better:
 
 ```bash
-python3 src/eval_ppo_only_vs_ismcts.py --games 50 --workers 4   # or: make eval_ppo_vs_ismcts
-python3 src/eval_ppo_only_vs_ismcts.py --n-iter 400 --ppo-checkpoint checkpoints-ppo/best.pt
-python3 src/eval_ppo_only_vs_ismcts.py --games 100 --sweep 1,8,32,128 --workers 4
+uv run src/eval_ppo_only_vs_ismcts.py --games 50 --workers 4   # or: make eval_ppo_vs_ismcts
+uv run src/eval_ppo_only_vs_ismcts.py --n-iter 400 --ppo-checkpoint checkpoints-ppo/best.pt
+uv run src/eval_ppo_only_vs_ismcts.py --games 100 --sweep 1,8,32,128 --workers 4
 
 # Same match against the ReBeL agent (CFR search over a public belief state). The
 # ReBeL search is the cost, so the default is fewer games; --sweep varies its CFR budget.
-python3 src/eval_ppo_only_vs_rebel.py --games 20 --workers 4    # or: make eval_ppo_vs_rebel
-python3 src/eval_ppo_only_vs_rebel.py --games 20 --sweep 2,8,32,128 --workers 4
+uv run src/eval_ppo_only_vs_rebel.py --games 20 --workers 4    # or: make eval_ppo_vs_rebel
+uv run src/eval_ppo_only_vs_rebel.py --games 20 --sweep 2,8,32,128 --workers 4
 
 # The two searchers against each other. Both sides search, so a game costs the two
 # searches together; --sweep varies ISMCTS's simulation budget.
-python3 src/eval_ismcts_vs_rebel.py --games 20 --workers 4 --value-target return \
+uv run src/eval_ismcts_vs_rebel.py --games 20 --workers 4 --value-target return \
     --ismcts-checkpoint checkpoints-return/best.pt \
     --rebel-checkpoint checkpoints-rebel-return/best.pt        # or: make eval_ismcts_vs_rebel
 
 
 # The exact commands used to get the final results are these:
-python3 src/ppo/bootstrap.py --games 200 --epochs 8 --dropout 0.1 \
+uv run src/ppo/bootstrap.py --games 200 --epochs 8 --dropout 0.1 \
     --out checkpoints-ppo-return/bootstrap.pt
 
 # 1200 games x ~120 turns = 144k steps; eval ~ every 80 games (= 2 ISMCTS iters)
@@ -190,11 +190,20 @@ with the training step as the x-axis, under four families:
 ./src/ismcts/run_training.sh                                  # imitation + self-play (~4h)
 ./src/ismcts/run_training.sh --iters 2 --games-per-iter 2     # smoke test
 ./src/ismcts/run_training.sh --value-target return            # optimise the dense reward
-python3 src/ismcts/test_value_target.py                       # the two value targets
+./src/ismcts/run_training.sh --games-workers 1                # serial self-play (default: one process per CPU, max 8)
+
+# Two checkpoints head to head, both searching. Each side resolves its own value target
+# from its .json sidecar; --value-target sets them explicitly when there is none (one
+# value for both, or a pair in checkpoint order, so a win-mode run can play a return-mode
+# one). --sweep splits a difference into "the policies differ" vs "the search differs".
+uv run src/ismcts/eval_net_checkpoint.py --checkpoint-a checkpoints-return/best.pt \
+    --checkpoint-b checkpoints/best_prev.pt --games 20 --value-target return,win
+uv run src/ismcts/test_value_target.py                       # the two value targets
 
 # The exact commands used to get the final results are these:
-python3 src/ismcts/bootstrap.py --games 200 --epochs 8 --out checkpoints-return/bootstrap.pt
-./src/ismcts/run_training.sh --value-target return --value-lambda 0.9 --init-checkpoint checkpoints-return/bootstrap_return.pt --value-anchor-weight 2 --epochs-per-iter 2 --replay-iters 2 --dropout 0.1 --lr 1e-3 --eval-every 2 --probe-every 1 --members heuristic,reference,teacher_edge --ckpt-dir checkpoints-return
+uv run src/ismcts/bootstrap.py --games 200 --epochs 8 --out checkpoints-return/bootstrap.pt
+
+uv run ./src/ismcts/train.py --value-target return --value-lambda 0.9 --init-checkpoint checkpoints-return/bootstrap_return.pt --value-anchor-weight 2 --epochs-per-iter 2 --replay-iters 2 --dropout 0.1 --lr 1e-3 --eval-every 2 --probe-every 1 --members heuristic,reference,teacher_edge --ckpt-dir checkpoints-return
 ```
 
 AlphaZero-style: PUCT over sampled determinizations, the policy target is the search's
@@ -250,15 +259,15 @@ own games, so it is the knob for cutting evaluation time.
 ## ReBeL
 
 ```bash
-python3 src/rebel/bootstrap.py         # warm start: imitate the heuristic -> bootstrap.pt
+uv run src/rebel/bootstrap.py         # warm start: imitate the heuristic -> bootstrap.pt
 ./src/rebel/run_training.sh            # self-play + training (default: 20 iterations)
 ./src/rebel/run_training.sh --smoke    # seconds, no wandb
-python3 src/rebel/test_rebel.py        # CFR on Kuhn poker, belief plumbing, search, checkpoints
-python3 src/rebel/eval_rebel.py --checkpoint checkpoints-rebel/best.pt --games 20
+uv run src/rebel/test_rebel.py        # CFR on Kuhn poker, belief plumbing, search, checkpoints
+uv run src/rebel/eval_rebel.py --checkpoint checkpoints-rebel/best.pt --games 20
 
 # The exact commands used to get the final results are these:
-python3 src/rebel/bootstrap.py --games 200 --epochs 8 --out checkpoints-rebel-return/bootstrap.pt
-./src/rebel/run_training.sh --iterations 30 --games 40 --epochs 2 --dropout 0.1 \
+uv run src/rebel/bootstrap.py --games 200 --epochs 8 --out checkpoints-rebel-return/bootstrap.pt
+uv run ./src/rebel/train.py --iterations 30 --games 40 --epochs 2 --dropout 0.1 \
     --eval-every 2 --eval-games 60 --league-games 30 --eval-workers 4 \
     --init-checkpoint checkpoints-rebel-return/bootstrap.pt \
     --save-dir checkpoints-rebel-return --run-name rebel-return
